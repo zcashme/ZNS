@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tokio = { version = "1", features = ["full"] }
+zcash_client_backend = { version = "0.21", features = ["lightwalletd-tonic-transport", "lightwalletd-tonic-tls-webpki-roots"] }
+rustls = { version = "0.23", features = ["ring"], default-features = false }
+hex = "0.4"
+
+[dev-dependencies]
+zip32 = "0.2"
+zcash_protocol = "0.7"
