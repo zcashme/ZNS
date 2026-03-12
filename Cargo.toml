@@ -5,10 +5,16 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-zcash_client_backend = { version = "0.21", features = ["lightwalletd-tonic-transport", "lightwalletd-tonic-tls-webpki-roots"] }
+zcash_client_backend = { version = "0.21", features = ["lightwalletd-tonic-transport", "lightwalletd-tonic-tls-webpki-roots", "orchard"] }
+orchard = { version = "0.11", default-features = false }
+zcash_note_encryption = "0.4"
+incrementalmerkletree = "0.8"
+zcash_keys = { version = "0.12", features = ["orchard"] }
+zcash_primitives = "0.26"
+zcash_protocol = "0.7"
+zip32 = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", features = ["ring"], default-features = false }
 hex = "0.4"
 
 [dev-dependencies]
-zip32 = "0.2"
-zcash_protocol = "0.7"
