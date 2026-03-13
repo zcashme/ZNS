@@ -38,10 +38,10 @@ fn open_db() -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-fn name_exists(db: &Connection, name: &str) -> bool {
+fn is_registered(db: &Connection, name: &str, ua: &str) -> bool {
     db.query_row(
-        "SELECT 1 FROM registrations WHERE name = ?1",
-        rusqlite::params![name],
+        "SELECT 1 FROM registrations WHERE name = ?1 OR ua = ?2",
+        rusqlite::params![name, ua],
         |_| Ok(()),
     )
     .is_ok()
@@ -213,7 +213,7 @@ async fn run_block_sync(
                                                 &domain, pivk, action,
                                             )
                                             && let Some(reg) = parse_memo(&memo)
-                                            && !name_exists(db, &reg.name)
+                                            && !is_registered(db, &reg.name, &reg.ua)
                                         {
                                             if let Err(e) = create_registration(
                                                 db, &reg.name, &reg.ua, &txid_hash, height,
@@ -393,9 +393,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!name_exists(&db, "alice"));
+        assert!(!is_registered(&db, "alice", "u1addr"));
         create_registration(&db, "alice", "u1addr", b"txid", 100).unwrap();
-        assert!(name_exists(&db, "alice"));
+        assert!(is_registered(&db, "alice", "u1addr"));
     }
 
     // ── Network tests ────────────────────────────────────────────────────────
