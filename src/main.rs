@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use orchard::keys::PreparedIncomingViewingKey;
-use orchard::note_encryption::OrchardDomain;
+use orchard::note_encryption::{CompactAction, OrchardDomain};
 use rusqlite::Connection;
 use tokio::sync::mpsc;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
@@ -104,8 +104,9 @@ enum TxEvent {
 async fn run_block_sync(
     mut client: CompactTxStreamerClient<tonic::transport::Channel>,
     sender: mpsc::Sender<TxEvent>,
+    pivk: PreparedIncomingViewingKey,
 ) {
-    let mut last_scanned_height = BIRTHDAY;
+    let mut last_scanned_height = BIRTHDAY - 100;
 
     loop {
         let tip = match client.get_latest_block(ChainSpec {}).await {
@@ -133,23 +134,57 @@ async fn run_block_sync(
             match stream.message().await {
                 Ok(Some(block)) => {
                     let height = block.height;
+
+                    // Phase 1: compact trial decryption — no network I/O.
+                    // Collect (CompactAction, txid) for every Orchard action in the block.
+                    let mut candidates: Vec<(CompactAction, Vec<u8>)> = Vec::new();
                     for ctx in &block.vtx {
-                        if ctx.actions.is_empty() { continue; }
-                        match client.get_transaction(TxFilter {
-                            block: None, index: 0, hash: ctx.hash.clone(),
-                        }).await {
-                            Ok(r) => {
-                                let event = TxEvent::Confirmed {
-                                    data:   r.into_inner().data,
-                                    txid:   ctx.hash.clone(),
-                                    height,
-                                };
-                                if sender.send(event).await.is_err() { return; }
+                        for compact_action in &ctx.actions {
+                            if let Ok(ca) = CompactAction::try_from(compact_action) {
+                                candidates.push((ca, ctx.hash.clone()));
                             }
-                            Err(e) => eprintln!("get_transaction: {e}"),
                         }
                     }
+
+                    if !candidates.is_empty() {
+                        let domains_and_outputs: Vec<_> = candidates
+                            .iter()
+                            .map(|(ca, _)| (OrchardDomain::for_compact_action(ca), ca.clone()))
+                            .collect();
+
+                        let results = zcash_note_encryption::batch::try_compact_note_decryption(
+                            std::slice::from_ref(&pivk),
+                            &domains_and_outputs,
+                        );
+
+                        // Phase 2: fetch full tx only for matched txids.
+                        let mut matched: std::collections::HashSet<Vec<u8>> =
+                            std::collections::HashSet::new();
+                        for (result, (_, txid_hash)) in results.iter().zip(candidates.iter()) {
+                            if result.is_some() {
+                                matched.insert(txid_hash.clone());
+                            }
+                        }
+
+                        for txid_hash in matched {
+                            match client.get_transaction(TxFilter {
+                                block: None, index: 0, hash: txid_hash.clone(),
+                            }).await {
+                                Ok(r) => {
+                                    let event = TxEvent::Confirmed {
+                                        data:   r.into_inner().data,
+                                        txid:   txid_hash,
+                                        height,
+                                    };
+                                    if sender.send(event).await.is_err() { return; }
+                                }
+                                Err(e) => eprintln!("get_transaction: {e}"),
+                            }
+                        }
+                    }
+
                     last_scanned_height = height;
+                    if height % 1_000 == 0 { println!("Scanned height {height}"); }
                 }
                 Ok(None)   => { println!("Block stream complete at {tip}."); break; }
                 Err(e)     => { eprintln!("block stream error: {e}"); break; }
@@ -194,6 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let uivk = UnifiedIncomingViewingKey::decode(&Network::MainNetwork, UIVK_STR)
         .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
     let orchard_ivk = uivk.orchard().as_ref().ok_or("UIVK has no Orchard key")?;
+    let pivk_sync = PreparedIncomingViewingKey::new(orchard_ivk);
     let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
 
     // Open DB
@@ -205,7 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn producers
     let (sender, mut receiver) = mpsc::channel::<TxEvent>(256);
-    tokio::spawn(run_block_sync(client.clone(), sender.clone()));
+    tokio::spawn(run_block_sync(client.clone(), sender.clone(), pivk_sync));
     tokio::spawn(run_mempool(client, sender));
 
     // Decryption worker
