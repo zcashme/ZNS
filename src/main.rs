@@ -1,17 +1,15 @@
-// ZNS Indexer v2
+// ZNS Indexer
 //
-// Two independent producer tasks (block sync + mempool) feed raw transactions
-// into an mpsc channel. A single decryption worker consumes the channel,
-// trial-decrypts Orchard notes, and writes ZNS registrations to SQLite.
+// Scans confirmed blocks, trial-decrypts Orchard notes, and writes
+// ZNS registrations to SQLite.
 
 use std::time::Duration;
 
 use orchard::keys::PreparedIncomingViewingKey;
 use orchard::note_encryption::{CompactAction, OrchardDomain};
 use rusqlite::Connection;
-use tokio::sync::mpsc;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
-use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, Empty, TxFilter};
+use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, TxFilter};
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_primitives::consensus::BranchId;
 use zcash_primitives::transaction::Transaction;
@@ -92,19 +90,12 @@ fn parse_memo(memo: &[u8; 512]) -> Option<Registration> {
     Some(Registration { name: name.to_string(), ua: ua.to_string() })
 }
 
-// ── MPSC message type ─────────────────────────────────────────────────────────
-
-enum TxEvent {
-    Confirmed { data: Vec<u8>, txid: Vec<u8>, height: u64 },
-    Mempool   { data: Vec<u8> },
-}
-
-// ── Producer: block sync ──────────────────────────────────────────────────────
+// ── Block scanner ─────────────────────────────────────────────────────────────
 
 async fn run_block_sync(
     mut client: CompactTxStreamerClient<tonic::transport::Channel>,
-    sender: mpsc::Sender<TxEvent>,
-    pivk: PreparedIncomingViewingKey,
+    db: &Connection,
+    pivk: &PreparedIncomingViewingKey,
 ) {
     let mut last_scanned_height = BIRTHDAY - 100;
 
@@ -136,7 +127,6 @@ async fn run_block_sync(
                     let height = block.height;
 
                     // Phase 1: compact trial decryption — no network I/O.
-                    // Collect (CompactAction, txid) for every Orchard action in the block.
                     let mut candidates: Vec<(CompactAction, Vec<u8>)> = Vec::new();
                     for ctx in &block.vtx {
                         for compact_action in &ctx.actions {
@@ -153,7 +143,7 @@ async fn run_block_sync(
                             .collect();
 
                         let results = zcash_note_encryption::batch::try_compact_note_decryption(
-                            std::slice::from_ref(&pivk),
+                            std::slice::from_ref(pivk),
                             &domains_and_outputs,
                         );
 
@@ -171,12 +161,29 @@ async fn run_block_sync(
                                 block: None, index: 0, hash: txid_hash.clone(),
                             }).await {
                                 Ok(r) => {
-                                    let event = TxEvent::Confirmed {
-                                        data:   r.into_inner().data,
-                                        txid:   txid_hash,
-                                        height,
-                                    };
-                                    if sender.send(event).await.is_err() { return; }
+                                    let data = r.into_inner().data;
+                                    let branch = BranchId::for_height(
+                                        &Network::MainNetwork,
+                                        BlockHeight::from_u32(height as u32),
+                                    );
+                                    let Ok(tx) = Transaction::read(&data[..], branch) else { continue };
+                                    let Some(bundle) = tx.orchard_bundle() else { continue };
+                                    for action in bundle.actions() {
+                                        let domain = OrchardDomain::for_action(action);
+                                        if let Some((_note, _addr, memo)) =
+                                            zcash_note_encryption::try_note_decryption(&domain, pivk, action)
+                                        {
+                                            if let Some(reg) = parse_memo(&memo) {
+                                                if !name_exists(db, &reg.name) {
+                                                    if let Err(e) = create_registration(db, &reg.name, &reg.ua, &txid_hash, height) {
+                                                        eprintln!("DB error: {e}");
+                                                    } else {
+                                                        println!("Registered: {} → {} (height {})", reg.name, reg.ua, height);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 Err(e) => eprintln!("get_transaction: {e}"),
                             }
@@ -184,38 +191,12 @@ async fn run_block_sync(
                     }
 
                     last_scanned_height = height;
-                    if height % 1_000 == 0 { println!("Scanned height {height}"); }
+                    if height % 10 == 0 { println!("Scanned height {height}"); }
                 }
                 Ok(None)   => { println!("Block stream complete at {tip}."); break; }
                 Err(e)     => { eprintln!("block stream error: {e}"); break; }
             }
         }
-    }
-}
-
-// ── Producer: mempool ─────────────────────────────────────────────────────────
-
-async fn run_mempool(
-    mut client: CompactTxStreamerClient<tonic::transport::Channel>,
-    sender: mpsc::Sender<TxEvent>,
-) {
-    loop {
-        match client.get_mempool_stream(Empty {}).await {
-            Ok(r) => {
-                let mut stream = r.into_inner();
-                loop {
-                    match stream.message().await {
-                        Ok(Some(raw_tx)) => {
-                            if sender.send(TxEvent::Mempool { data: raw_tx.data }).await.is_err() { return; }
-                        }
-                        Ok(None)   => break,
-                        Err(e)     => { eprintln!("mempool stream error: {e}"); break; }
-                    }
-                }
-            }
-            Err(e) => eprintln!("get_mempool_stream: {e}"),
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -229,7 +210,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let uivk = UnifiedIncomingViewingKey::decode(&Network::MainNetwork, UIVK_STR)
         .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
     let orchard_ivk = uivk.orchard().as_ref().ok_or("UIVK has no Orchard key")?;
-    let pivk_sync = PreparedIncomingViewingKey::new(orchard_ivk);
     let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
 
     // Open DB
@@ -239,57 +219,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connecting to {LWD_URL}...");
     let client = CompactTxStreamerClient::connect(LWD_URL).await?;
 
-    // Spawn producers
-    let (sender, mut receiver) = mpsc::channel::<TxEvent>(256);
-    tokio::spawn(run_block_sync(client.clone(), sender.clone(), pivk_sync));
-    tokio::spawn(run_mempool(client, sender));
-
-    // Decryption worker
-    while let Some(event) = receiver.recv().await {
-        match event {
-            TxEvent::Confirmed { data, txid, height } => {
-                let branch = BranchId::for_height(
-                    &Network::MainNetwork,
-                    BlockHeight::from_u32(height as u32),
-                );
-                let Ok(tx) = Transaction::read(&data[..], branch) else { continue };
-                let Some(bundle) = tx.orchard_bundle() else { continue };
-                for action in bundle.actions() {
-                    let domain = OrchardDomain::for_action(action);
-                    if let Some((_note, _addr, memo)) =
-                        zcash_note_encryption::try_note_decryption(&domain, &pivk, action)
-                    {
-                        if let Some(reg) = parse_memo(&memo) {
-                            if !name_exists(&db, &reg.name) {
-                                if let Err(e) = create_registration(&db, &reg.name, &reg.ua, &txid, height) {
-                                    eprintln!("DB error: {e}");
-                                } else {
-                                    println!("Registered: {} → {} (height {})", reg.name, reg.ua, height);
-                                }
-                            }
-                        }
-                    }
-                }
-                if height % 1_000 == 0 {
-                    println!("Scanned height {height}");
-                }
-            }
-            TxEvent::Mempool { data } => {
-                let Ok(tx) = Transaction::read(&data[..], BranchId::Nu6) else { continue };
-                let Some(bundle) = tx.orchard_bundle() else { continue };
-                for action in bundle.actions() {
-                    let domain = OrchardDomain::for_action(action);
-                    if let Some((_note, _addr, memo)) =
-                        zcash_note_encryption::try_note_decryption(&domain, &pivk, action)
-                    {
-                        if let Some(reg) = parse_memo(&memo) {
-                            println!("mempool pending: {} → {}", reg.name, reg.ua);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    run_block_sync(client, &db, &pivk).await;
 
     Ok(())
 }
