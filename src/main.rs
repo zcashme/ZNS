@@ -1,13 +1,15 @@
-// ZNS Indexer v1
+// ZNS Indexer v2
 //
-// A single-loop async service that scans the Zcash blockchain for name
-// registration memos, validates them, and stores them in SQLite.
+// Two independent producer tasks (block sync + mempool) feed raw transactions
+// into an mpsc channel. A single decryption worker consumes the channel,
+// trial-decrypts Orchard notes, and writes ZNS registrations to SQLite.
 
 use std::time::Duration;
 
 use orchard::keys::PreparedIncomingViewingKey;
 use orchard::note_encryption::OrchardDomain;
 use rusqlite::Connection;
+use tokio::sync::mpsc;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
 use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, Empty, TxFilter};
 use zcash_keys::keys::UnifiedIncomingViewingKey;
@@ -90,74 +92,95 @@ fn parse_memo(memo: &[u8; 512]) -> Option<Registration> {
     Some(Registration { name: name.to_string(), ua: ua.to_string() })
 }
 
-// ── Block processing ─────────────────────────────────────────────────────────
+// ── MPSC message type ─────────────────────────────────────────────────────────
 
-async fn process_block(
-    block: &zcash_client_backend::proto::compact_formats::CompactBlock,
-    client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
-    pivk: &PreparedIncomingViewingKey,
-    db: &Connection,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let height = block.height;
+enum TxEvent {
+    Confirmed { data: Vec<u8>, txid: Vec<u8>, height: u64 },
+    Mempool   { data: Vec<u8> },
+}
 
-    for ctx in &block.vtx {
-        if ctx.actions.is_empty() { continue; }
+// ── Producer: block sync ──────────────────────────────────────────────────────
 
-        let raw = client
-            .get_transaction(TxFilter {
-                block: None,
-                index: 0,
-                hash: ctx.hash.clone(),
-            })
-            .await?
-            .into_inner();
+async fn run_block_sync(
+    mut client: CompactTxStreamerClient<tonic::transport::Channel>,
+    sender: mpsc::Sender<TxEvent>,
+) {
+    let mut last_scanned_height = BIRTHDAY;
 
-        let branch = BranchId::for_height(
-            &Network::MainNetwork,
-            BlockHeight::from_u32(height as u32),
-        );
-        let tx = Transaction::read(&raw.data[..], branch)?;
+    loop {
+        let tip = match client.get_latest_block(ChainSpec {}).await {
+            Ok(r)  => r.into_inner().height,
+            Err(e) => { eprintln!("get_latest_block: {e}"); tokio::time::sleep(POLL_INTERVAL).await; continue; }
+        };
 
-        if let Some(bundle) = tx.orchard_bundle() {
-            for action in bundle.actions() {
-                let domain = OrchardDomain::for_action(action);
-                if let Some((_note, _addr, memo)) =
-                    zcash_note_encryption::try_note_decryption(&domain, pivk, action)
-                {
-                    if let Some(reg) = parse_memo(&memo) {
-                        if !name_exists(db, &reg.name) {
-                            create_registration(db, &reg.name, &reg.ua, &ctx.hash, height)?;
-                            println!("Registered: {} → {} (height {})", reg.name, reg.ua, height);
+        if last_scanned_height >= tip {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        }
+
+        let start = last_scanned_height + 1;
+        println!("Scanning {start}..={tip}");
+
+        let mut stream = match client.get_block_range(BlockRange {
+            start: Some(BlockId { height: start, hash: vec![] }),
+            end:   Some(BlockId { height: tip,   hash: vec![] }),
+        }).await {
+            Ok(r)  => r.into_inner(),
+            Err(e) => { eprintln!("get_block_range: {e}"); tokio::time::sleep(POLL_INTERVAL).await; continue; }
+        };
+
+        loop {
+            match stream.message().await {
+                Ok(Some(block)) => {
+                    let height = block.height;
+                    for ctx in &block.vtx {
+                        if ctx.actions.is_empty() { continue; }
+                        match client.get_transaction(TxFilter {
+                            block: None, index: 0, hash: ctx.hash.clone(),
+                        }).await {
+                            Ok(r) => {
+                                let event = TxEvent::Confirmed {
+                                    data:   r.into_inner().data,
+                                    txid:   ctx.hash.clone(),
+                                    height,
+                                };
+                                if sender.send(event).await.is_err() { return; }
+                            }
+                            Err(e) => eprintln!("get_transaction: {e}"),
                         }
+                    }
+                    last_scanned_height = height;
+                }
+                Ok(None)   => { println!("Block stream complete at {tip}."); break; }
+                Err(e)     => { eprintln!("block stream error: {e}"); break; }
+            }
+        }
+    }
+}
+
+// ── Producer: mempool ─────────────────────────────────────────────────────────
+
+async fn run_mempool(
+    mut client: CompactTxStreamerClient<tonic::transport::Channel>,
+    sender: mpsc::Sender<TxEvent>,
+) {
+    loop {
+        match client.get_mempool_stream(Empty {}).await {
+            Ok(r) => {
+                let mut stream = r.into_inner();
+                loop {
+                    match stream.message().await {
+                        Ok(Some(raw_tx)) => {
+                            if sender.send(TxEvent::Mempool { data: raw_tx.data }).await.is_err() { return; }
+                        }
+                        Ok(None)   => break,
+                        Err(e)     => { eprintln!("mempool stream error: {e}"); break; }
                     }
                 }
             }
+            Err(e) => eprintln!("get_mempool_stream: {e}"),
         }
-    }
-
-    if height % 1_000 == 0 {
-        println!("Scanned height {height}");
-    }
-
-    Ok(())
-}
-
-fn process_mempool_tx(
-    raw_tx: &zcash_client_backend::proto::service::RawTransaction,
-    pivk: &PreparedIncomingViewingKey,
-) {
-    let Ok(tx) = Transaction::read(&raw_tx.data[..], BranchId::Nu6) else { return };
-    let Some(bundle) = tx.orchard_bundle() else { return };
-
-    for action in bundle.actions() {
-        let domain = OrchardDomain::for_action(action);
-        if let Some((_note, _addr, memo)) =
-            zcash_note_encryption::try_note_decryption(&domain, pivk, action)
-        {
-            if let Some(reg) = parse_memo(&memo) {
-                println!("mempool pending: {} → {}", reg.name, reg.ua);
-            }
-        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -178,71 +201,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connect to lightwalletd
     println!("Connecting to {LWD_URL}...");
-    let mut client = CompactTxStreamerClient::connect(LWD_URL).await?;
+    let client = CompactTxStreamerClient::connect(LWD_URL).await?;
 
-    let mut last_scanned_height = BIRTHDAY;
+    // Spawn producers
+    let (sender, mut receiver) = mpsc::channel::<TxEvent>(256);
+    tokio::spawn(run_block_sync(client.clone(), sender.clone()));
+    tokio::spawn(run_mempool(client, sender));
 
-    loop {
-        let tip = client
-            .get_latest_block(ChainSpec {})
-            .await?
-            .into_inner()
-            .height;
-
-        if last_scanned_height >= tip {
-            println!("Caught up at {tip}. Waiting...");
-            tokio::time::sleep(POLL_INTERVAL).await;
-            continue;
-        }
-
-        let start = last_scanned_height + 1;
-        println!("Scanning {start}..={tip}");
-
-        let mut block_stream = client
-            .get_block_range(BlockRange {
-                start: Some(BlockId { height: start, hash: vec![] }),
-                end: Some(BlockId { height: tip, hash: vec![] }),
-            })
-            .await?
-            .into_inner();
-
-        let mut mempool_stream = client
-            .get_mempool_stream(Empty {})
-            .await?
-            .into_inner();
-
-        let mut blocks_done = false;
-        let mut mempool_done = false;
-
-        while !blocks_done || !mempool_done {
-            tokio::select! {
-                msg = block_stream.message(), if !blocks_done => {
-                    match msg? {
-                        Some(block) => {
-                            last_scanned_height = block.height;
-                            process_block(&block, &mut client, &pivk, &db).await?;
-                        }
-                        None => {
-                            blocks_done = true;
-                            println!("Block stream complete at tip {tip}.");
+    // Decryption worker
+    while let Some(event) = receiver.recv().await {
+        match event {
+            TxEvent::Confirmed { data, txid, height } => {
+                let branch = BranchId::for_height(
+                    &Network::MainNetwork,
+                    BlockHeight::from_u32(height as u32),
+                );
+                let Ok(tx) = Transaction::read(&data[..], branch) else { continue };
+                let Some(bundle) = tx.orchard_bundle() else { continue };
+                for action in bundle.actions() {
+                    let domain = OrchardDomain::for_action(action);
+                    if let Some((_note, _addr, memo)) =
+                        zcash_note_encryption::try_note_decryption(&domain, &pivk, action)
+                    {
+                        if let Some(reg) = parse_memo(&memo) {
+                            if !name_exists(&db, &reg.name) {
+                                if let Err(e) = create_registration(&db, &reg.name, &reg.ua, &txid, height) {
+                                    eprintln!("DB error: {e}");
+                                } else {
+                                    println!("Registered: {} → {} (height {})", reg.name, reg.ua, height);
+                                }
+                            }
                         }
                     }
                 }
-                msg = mempool_stream.message(), if !mempool_done => {
-                    match msg? {
-                        Some(raw_tx) => {
-                            process_mempool_tx(&raw_tx, &pivk);
-                        }
-                        None => {
-                            mempool_done = true;
+                if height % 1_000 == 0 {
+                    println!("Scanned height {height}");
+                }
+            }
+            TxEvent::Mempool { data } => {
+                let Ok(tx) = Transaction::read(&data[..], BranchId::Nu6) else { continue };
+                let Some(bundle) = tx.orchard_bundle() else { continue };
+                for action in bundle.actions() {
+                    let domain = OrchardDomain::for_action(action);
+                    if let Some((_note, _addr, memo)) =
+                        zcash_note_encryption::try_note_decryption(&domain, &pivk, action)
+                    {
+                        if let Some(reg) = parse_memo(&memo) {
+                            println!("mempool pending: {} → {}", reg.name, reg.ua);
                         }
                     }
                 }
             }
         }
-
-        tokio::time::sleep(POLL_INTERVAL).await;
     }
+
+    Ok(())
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
