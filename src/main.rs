@@ -1,59 +1,29 @@
-// ZNS Indexer
+// ZNS Indexer v1
+//
+// A single-loop async service that scans the Zcash blockchain for name
+// registration memos, validates them, and stores them in SQLite.
 
-use std::collections::HashMap;
+use std::time::Duration;
 
-use incrementalmerkletree::Position;
-use orchard::keys::{IncomingViewingKey as OrchardIvk, PreparedIncomingViewingKey};
-use orchard::note::Nullifier as OrchardNullifier;
+use orchard::keys::PreparedIncomingViewingKey;
 use orchard::note_encryption::OrchardDomain;
-
 use rusqlite::Connection;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
-use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, TxFilter};
-use zcash_client_backend::scanning::{Nullifiers, ScanningKeyOps, ScanningKeys, scan_block};
+use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, Empty, TxFilter};
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_primitives::consensus::BranchId;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, Network};
-use zip32::AccountId;
 
-// ── Config ────────────────────────────────────────────────────────────────────
+// ── Config ───────────────────────────────────────────────────────────────────
 
 const LWD_URL: &str = "https://light.zcash.me:443";
 const DB_PATH: &str = "zns.db";
 const BIRTHDAY: u64 = 3_265_357;
 const UIVK_STR: &str = "uivk1cpxzaa8rck580qfekjd3xma32zzk4mwm0p4c99qglpy4atgw74up0lexqvz5tq2wwj7s980c8fe9s98x7g9t9l603pjj6rsp44ufdj6dh0u3d28xm8rmcjdlej40unnvjrwtex45er8uxy3jk6tt22gu9a36t546kplsy280qq92ssz4sscev8529k347r8v2x3xzduuldjdltjjjy02sgv59hgjx2fud6u6y70nvu6g3h9p4n20gtcmmhjwsvqv2ykr2jlc3ert3qa4n99d7p0mg8g743jm5y96frmnu4aheyh6wf3wh9g4hz8jhy70s9xda9rmyg0aqdnec44j84hwjwxar9";
-const CHUNK_SIZE: u64 = 1_000;
+const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
-// ── Orchard IVK scanning key ──────────────────────────────────────────────────
-//
-// ScanningKey<Ivk, Nk, AccountId> has private fields, so we implement
-// ScanningKeyOps directly on a newtype around the Orchard IVK.
-
-struct OrchardIvkKey {
-    ivk: OrchardIvk,
-    account_id: AccountId,
-}
-
-impl ScanningKeyOps<OrchardDomain, AccountId, OrchardNullifier> for OrchardIvkKey {
-    fn prepare(&self) -> PreparedIncomingViewingKey {
-        PreparedIncomingViewingKey::new(&self.ivk)
-    }
-
-    fn account_id(&self) -> &AccountId {
-        &self.account_id
-    }
-
-    fn key_scope(&self) -> Option<zip32::Scope> {
-        None
-    }
-
-    fn nf(&self, _note: &orchard::Note, _position: Position) -> Option<OrchardNullifier> {
-        None // IVK-only; nullifiers require the FVK
-    }
-}
-
-// ── Database ──────────────────────────────────────────────────────────────────
+// ── Database ─────────────────────────────────────────────────────────────────
 
 fn open_db() -> rusqlite::Result<Connection> {
     let conn = Connection::open(DB_PATH)?;
@@ -61,38 +31,147 @@ fn open_db() -> rusqlite::Result<Connection> {
         "CREATE TABLE IF NOT EXISTS registrations (
             name    TEXT PRIMARY KEY,
             ua      TEXT NOT NULL,
-            txid    BLOB,
-            height  INTEGER
+            txid    BLOB NOT NULL,
+            height  INTEGER NOT NULL
         );",
     )?;
     Ok(conn)
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+fn name_exists(db: &Connection, name: &str) -> bool {
+    db.query_row(
+        "SELECT 1 FROM registrations WHERE name = ?1",
+        rusqlite::params![name],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+fn create_registration(
+    db: &Connection,
+    name: &str,
+    ua: &str,
+    txid: &[u8],
+    height: u64,
+) -> rusqlite::Result<()> {
+    db.execute(
+        "INSERT OR IGNORE INTO registrations (name, ua, txid, height) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![name, ua, txid, height as i64],
+    )?;
+    Ok(())
+}
+
+// ── Memo parsing ─────────────────────────────────────────────────────────────
+
+struct Registration {
+    name: String,
+    ua: String,
+}
+
+/// Parse a ZNS registration memo. Returns None for non-ZNS memos.
+/// Format: zns:register:<name>:<ua>
+fn parse_memo(memo: &[u8; 512]) -> Option<Registration> {
+    let s = std::str::from_utf8(memo).ok()?;
+    let s = s.trim_end_matches('\0');
+    let rest = s.strip_prefix("zns:register:")?;
+    let mut parts = rest.splitn(2, ':');
+    let name = parts.next().filter(|n| !n.is_empty())?;
+    let ua = parts.next().filter(|u| !u.is_empty())?;
+
+    // Name validation: lowercase alphanumeric + hyphens, 1-63 chars,
+    // no leading/trailing hyphens, no consecutive hyphens
+    if name.len() > 63 { return None; }
+    if name.starts_with('-') || name.ends_with('-') { return None; }
+    if name.contains("--") { return None; }
+    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return None;
+    }
+
+    Some(Registration { name: name.to_string(), ua: ua.to_string() })
+}
+
+// ── Block processing ─────────────────────────────────────────────────────────
+
+async fn process_block(
+    block: &zcash_client_backend::proto::compact_formats::CompactBlock,
+    client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
+    pivk: &PreparedIncomingViewingKey,
+    db: &Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let height = block.height;
+
+    for ctx in &block.vtx {
+        if ctx.actions.is_empty() { continue; }
+
+        let raw = client
+            .get_transaction(TxFilter {
+                block: None,
+                index: 0,
+                hash: ctx.hash.clone(),
+            })
+            .await?
+            .into_inner();
+
+        let branch = BranchId::for_height(
+            &Network::MainNetwork,
+            BlockHeight::from_u32(height as u32),
+        );
+        let tx = Transaction::read(&raw.data[..], branch)?;
+
+        if let Some(bundle) = tx.orchard_bundle() {
+            for action in bundle.actions() {
+                let domain = OrchardDomain::for_action(action);
+                if let Some((_note, _addr, memo)) =
+                    zcash_note_encryption::try_note_decryption(&domain, pivk, action)
+                {
+                    if let Some(reg) = parse_memo(&memo) {
+                        if !name_exists(db, &reg.name) {
+                            create_registration(db, &reg.name, &reg.ua, &ctx.hash, height)?;
+                            println!("Registered: {} → {} (height {})", reg.name, reg.ua, height);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if height % 1_000 == 0 {
+        println!("Scanned height {height}");
+    }
+
+    Ok(())
+}
+
+fn process_mempool_tx(
+    raw_tx: &zcash_client_backend::proto::service::RawTransaction,
+    pivk: &PreparedIncomingViewingKey,
+) {
+    let Ok(tx) = Transaction::read(&raw_tx.data[..], BranchId::Nu6) else { return };
+    let Some(bundle) = tx.orchard_bundle() else { return };
+
+    for action in bundle.actions() {
+        let domain = OrchardDomain::for_action(action);
+        if let Some((_note, _addr, memo)) =
+            zcash_note_encryption::try_note_decryption(&domain, pivk, action)
+        {
+            if let Some(reg) = parse_memo(&memo) {
+                println!("mempool pending: {} → {}", reg.name, reg.ua);
+            }
+        }
+    }
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Parse UIVK → extract Orchard IVK
+    // Parse UIVK → extract Orchard IVK → prepare for trial decryption
     let uivk = UnifiedIncomingViewingKey::decode(&Network::MainNetwork, UIVK_STR)
         .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
     let orchard_ivk = uivk.orchard().as_ref().ok_or("UIVK has no Orchard key")?;
-
-    // Prepared key is constant — create once, reuse for every memo decryption
-    let prepared_ivk = PreparedIncomingViewingKey::new(orchard_ivk);
-
-    // Build ScanningKeys using our own ScanningKeyOps impl (one clone to give ownership)
-    let account = AccountId::ZERO;
-    let mut orchard_map: HashMap<
-        (AccountId, zip32::Scope),
-        Box<dyn ScanningKeyOps<OrchardDomain, AccountId, OrchardNullifier>>,
-    > = HashMap::new();
-    orchard_map.insert(
-        (account, zip32::Scope::External),
-        Box::new(OrchardIvkKey { ivk: orchard_ivk.clone(), account_id: account }),
-    );
-    let scanning_keys = ScanningKeys::new(HashMap::new(), orchard_map);
+    let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
 
     // Open DB
     let db = open_db()?;
@@ -101,116 +180,194 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connecting to {LWD_URL}...");
     let mut client = CompactTxStreamerClient::connect(LWD_URL).await?;
 
-    let tip = client
-        .get_latest_block(ChainSpec {})
-        .await?
-        .into_inner()
-        .height;
-    println!("Chain tip: {tip}. Scanning from birthday {BIRTHDAY}...");
+    let mut last_scanned_height = BIRTHDAY;
 
-    // ── Scanner loop ──────────────────────────────────────────────────────────
-    let mut height = BIRTHDAY;
-    while height <= tip {
-        let end = (height + CHUNK_SIZE - 1).min(tip);
+    loop {
+        let tip = client
+            .get_latest_block(ChainSpec {})
+            .await?
+            .into_inner()
+            .height;
 
-        let range = BlockRange {
-            start: Some(BlockId { height, hash: vec![] }),
-            end:   Some(BlockId { height: end, hash: vec![] }),
-        };
-        let mut stream = client.get_block_range(range).await?.into_inner();
+        if last_scanned_height >= tip {
+            println!("Caught up at {tip}. Waiting...");
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        }
 
-        while let Some(block) = stream.message().await? {
-            let block_height = block.height;
-            let scanned = scan_block(
-                &Network::MainNetwork,
-                block,
-                &scanning_keys,
-                &Nullifiers::empty(),
-                None,
-            )
-            .map_err(|e| format!("scan_block error at {block_height}: {e:?}"))?;
+        let start = last_scanned_height + 1;
+        println!("Scanning {start}..={tip}");
 
-            for tx in scanned.transactions() {
-                // Fetch the full transaction to read memos
-                let raw = client
-                    .get_transaction(TxFilter {
-                        block: None,
-                        index: 0,
-                        hash: tx.txid().as_ref().to_vec(),
-                    })
-                    .await?
-                    .into_inner();
+        let mut block_stream = client
+            .get_block_range(BlockRange {
+                start: Some(BlockId { height: start, hash: vec![] }),
+                end: Some(BlockId { height: tip, hash: vec![] }),
+            })
+            .await?
+            .into_inner();
 
-                let branch = BranchId::for_height(
-                    &Network::MainNetwork,
-                    BlockHeight::from_u32(block_height as u32),
-                );
-                let full_tx = Transaction::read(&raw.data[..], branch)?;
+        let mut mempool_stream = client
+            .get_mempool_stream(Empty {})
+            .await?
+            .into_inner();
 
-                // Extract memos from Orchard actions by trial-decrypting the full tx
-                if let Some(bundle) = full_tx.orchard_bundle() {
-                    for action in bundle.actions() {
-                        let domain = OrchardDomain::for_action(action);
-                        if let Some((_note, _addr, memo)) =
-                            zcash_note_encryption::try_note_decryption(&domain, &prepared_ivk, action)
-                        {
-                            parse_and_store_memo(
-                                &memo,
-                                tx.txid().as_ref(),
-                                block_height,
-                                &db,
-                            )?;
+        let mut blocks_done = false;
+        let mut mempool_done = false;
+
+        while !blocks_done || !mempool_done {
+            tokio::select! {
+                msg = block_stream.message(), if !blocks_done => {
+                    match msg? {
+                        Some(block) => {
+                            last_scanned_height = block.height;
+                            process_block(&block, &mut client, &pivk, &db).await?;
+                        }
+                        None => {
+                            blocks_done = true;
+                            println!("Block stream complete at tip {tip}.");
+                        }
+                    }
+                }
+                msg = mempool_stream.message(), if !mempool_done => {
+                    match msg? {
+                        Some(raw_tx) => {
+                            process_mempool_tx(&raw_tx, &pivk);
+                        }
+                        None => {
+                            mempool_done = true;
                         }
                     }
                 }
             }
-
-            if block_height % 1_000 == 0 {
-                println!("Scanned height {block_height}");
-            }
         }
 
-        height = end + 1;
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
-
-    println!("Scan complete.");
-    Ok(())
 }
 
-// ── Memo parsing ──────────────────────────────────────────────────────────────
+// ── Tests ────────────────────────────────────────────────────────────────────
 
-fn parse_and_store_memo(
-    memo: &[u8; 512],
-    txid: &[u8],
-    height: u64,
-    db: &Connection,
-) -> rusqlite::Result<()> {
-    let Ok(s) = std::str::from_utf8(memo) else { return Ok(()) };
-    let s = s.trim_end_matches('\0');
-    // Format: zns:register:<name>:<ua>
-    let Some(rest) = s.strip_prefix("zns:register:") else { return Ok(()) };
-    let mut parts = rest.splitn(2, ':');
-    let (Some(name), Some(ua)) = (parts.next(), parts.next()) else { return Ok(()) };
-    if name.is_empty() || ua.is_empty() { return Ok(()) }
-
-    db.execute(
-        "INSERT OR IGNORE INTO registrations (name, ua, txid, height) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![name, ua, txid, height as i64],
-    )?;
-    println!("Registered: {name} → {ua} (height {height})");
-    Ok(())
-}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
-    use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, TxFilter};
-    use zcash_client_backend::scanning::{Nullifiers, scan_block};
-    use zcash_keys::keys::UnifiedSpendingKey;
 
     fn init_tls() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
+
+    // ── Memo parsing tests ───────────────────────────────────────────────────
+
+    fn make_memo(s: &str) -> [u8; 512] {
+        let mut buf = [0u8; 512];
+        buf[..s.len()].copy_from_slice(s.as_bytes());
+        buf
+    }
+
+    #[test]
+    fn test_parse_valid_memo() {
+        let memo = make_memo("zns:register:alice:u1someaddress");
+        let reg = parse_memo(&memo).unwrap();
+        assert_eq!(reg.name, "alice");
+        assert_eq!(reg.ua, "u1someaddress");
+    }
+
+    #[test]
+    fn test_parse_memo_not_zns() {
+        let memo = make_memo("hello world");
+        assert!(parse_memo(&memo).is_none());
+    }
+
+    #[test]
+    fn test_parse_memo_empty_name() {
+        let memo = make_memo("zns:register::u1addr");
+        assert!(parse_memo(&memo).is_none());
+    }
+
+    #[test]
+    fn test_parse_memo_empty_ua() {
+        let memo = make_memo("zns:register:alice:");
+        assert!(parse_memo(&memo).is_none());
+    }
+
+    #[test]
+    fn test_parse_memo_uppercase_rejected() {
+        let memo = make_memo("zns:register:Alice:u1addr");
+        assert!(parse_memo(&memo).is_none());
+    }
+
+    #[test]
+    fn test_parse_memo_leading_hyphen() {
+        let memo = make_memo("zns:register:-alice:u1addr");
+        assert!(parse_memo(&memo).is_none());
+    }
+
+    #[test]
+    fn test_parse_memo_trailing_hyphen() {
+        let memo = make_memo("zns:register:alice-:u1addr");
+        assert!(parse_memo(&memo).is_none());
+    }
+
+    #[test]
+    fn test_parse_memo_double_hyphen() {
+        let memo = make_memo("zns:register:al--ice:u1addr");
+        assert!(parse_memo(&memo).is_none());
+    }
+
+    #[test]
+    fn test_parse_memo_hyphen_ok() {
+        let memo = make_memo("zns:register:my-name:u1addr");
+        let reg = parse_memo(&memo).unwrap();
+        assert_eq!(reg.name, "my-name");
+    }
+
+    #[test]
+    fn test_parse_memo_digits_ok() {
+        let memo = make_memo("zns:register:user42:u1addr");
+        let reg = parse_memo(&memo).unwrap();
+        assert_eq!(reg.name, "user42");
+    }
+
+    #[test]
+    fn test_parse_memo_too_long_name() {
+        let long = "a".repeat(64);
+        let memo = make_memo(&format!("zns:register:{long}:u1addr"));
+        assert!(parse_memo(&memo).is_none());
+    }
+
+    #[test]
+    fn test_parse_memo_63_char_name() {
+        let name = "a".repeat(63);
+        let memo = make_memo(&format!("zns:register:{name}:u1addr"));
+        let reg = parse_memo(&memo).unwrap();
+        assert_eq!(reg.name, name);
+    }
+
+    #[test]
+    fn test_ua_with_colons() {
+        let memo = make_memo("zns:register:alice:u1some:thing:here");
+        let reg = parse_memo(&memo).unwrap();
+        assert_eq!(reg.name, "alice");
+        assert_eq!(reg.ua, "u1some:thing:here");
+    }
+
+    // ── DB tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_db_round_trip() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE registrations (
+                name TEXT PRIMARY KEY, ua TEXT NOT NULL,
+                txid BLOB NOT NULL, height INTEGER NOT NULL
+            );",
+        ).unwrap();
+
+        assert!(!name_exists(&db, "alice"));
+        create_registration(&db, "alice", "u1addr", b"txid", 100).unwrap();
+        assert!(name_exists(&db, "alice"));
+    }
+
+    // ── Network tests ────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_connect() -> Result<(), Box<dyn std::error::Error>> {
@@ -261,82 +418,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compact_block_has_orchard_actions() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_trial_decrypt_no_match() -> Result<(), Box<dyn std::error::Error>> {
         init_tls();
         let mut client = CompactTxStreamerClient::connect(LWD_URL).await?;
+
         let range = BlockRange {
             start: Some(BlockId { height: 2_500_000, hash: vec![] }),
             end:   Some(BlockId { height: 2_500_000, hash: vec![] }),
         };
         let mut stream = client.get_block_range(range).await?.into_inner();
         let block = stream.message().await?.expect("block");
-        let orchard_actions: usize = block.vtx.iter().map(|tx| tx.actions.len()).sum();
-        assert!(orchard_actions > 0);
-        Ok(())
-    }
 
-    #[tokio::test]
-    async fn test_scan_block_no_match() -> Result<(), Box<dyn std::error::Error>> {
-        use zcash_protocol::consensus::Network;
-        init_tls();
-        let mut client = CompactTxStreamerClient::connect(LWD_URL).await?;
-        let range = BlockRange {
-            start: Some(BlockId { height: 2_500_000, hash: vec![] }),
-            end:   Some(BlockId { height: 2_500_000, hash: vec![] }),
-        };
-        let block = client.get_block_range(range).await?.into_inner()
-            .message().await?.expect("block");
-
-        let account = AccountId::ZERO;
-        let usk = UnifiedSpendingKey::from_seed(&Network::MainNetwork, &[0u8; 32], account)
+        use zcash_keys::keys::UnifiedSpendingKey;
+        use zip32::AccountId;
+        let usk = UnifiedSpendingKey::from_seed(&Network::MainNetwork, &[0u8; 32], AccountId::ZERO)
             .expect("valid usk");
-        let scanning_keys = ScanningKeys::from_account_ufvks([(account, usk.to_unified_full_viewing_key())]);
+        let ufvk = usk.to_unified_full_viewing_key();
+        let orchard_ivk = ufvk.orchard().expect("has orchard").to_ivk(zip32::Scope::External);
+        let prepared = PreparedIncomingViewingKey::new(&orchard_ivk);
 
-        let scanned = scan_block(&Network::MainNetwork, block, &scanning_keys, &Nullifiers::empty(), None)
-            .expect("scan_block");
-        assert!(scanned.transactions().is_empty());
-        Ok(())
-    }
-
-    // Parses the real registry UIVK, builds OrchardIvkKey scanning keys, and scans
-    // a 10-block window at the birthday height. Asserts the pipeline completes without
-    // error — proving UIVK → ScanningKeyOps → scan_block works end-to-end.
-    #[tokio::test]
-    async fn test_scan_with_real_uivk() -> Result<(), Box<dyn std::error::Error>> {
-        use zcash_protocol::consensus::Network;
-        init_tls();
-
-        let uivk = UnifiedIncomingViewingKey::decode(&Network::MainNetwork, UIVK_STR)
-            .map_err(|e| format!("decode uivk: {e}"))?;
-        let orchard_ivk = uivk.orchard().as_ref().ok_or("no orchard key")?;
-
-        let account = AccountId::ZERO;
-        let mut orchard_map: HashMap<
-            (AccountId, zip32::Scope),
-            Box<dyn ScanningKeyOps<OrchardDomain, AccountId, OrchardNullifier>>,
-        > = HashMap::new();
-        orchard_map.insert(
-            (account, zip32::Scope::External),
-            Box::new(OrchardIvkKey { ivk: orchard_ivk.clone(), account_id: account }),
-        );
-        let scanning_keys = ScanningKeys::new(HashMap::new(), orchard_map);
-
-        let mut client = CompactTxStreamerClient::connect(LWD_URL).await?;
-        let range = BlockRange {
-            start: Some(BlockId { height: BIRTHDAY, hash: vec![] }),
-            end:   Some(BlockId { height: BIRTHDAY + 9, hash: vec![] }),
-        };
-        let mut stream = client.get_block_range(range).await?.into_inner();
-        let mut matched_txs = 0usize;
-        while let Some(block) = stream.message().await? {
-            let scanned = scan_block(&Network::MainNetwork, block, &scanning_keys, &Nullifiers::empty(), None)
-                .expect("scan_block");
-            matched_txs += scanned.transactions().len();
+        let mut matches = 0usize;
+        for compact_tx in &block.vtx {
+            if compact_tx.actions.is_empty() { continue }
+            let raw = client
+                .get_transaction(TxFilter { block: None, index: 0, hash: compact_tx.hash.clone() })
+                .await?
+                .into_inner();
+            let branch = BranchId::for_height(&Network::MainNetwork, BlockHeight::from_u32(2_500_000));
+            let full_tx = Transaction::read(&raw.data[..], branch)?;
+            if let Some(bundle) = full_tx.orchard_bundle() {
+                for action in bundle.actions() {
+                    let domain = OrchardDomain::for_action(action);
+                    if zcash_note_encryption::try_note_decryption(&domain, &prepared, action).is_some() {
+                        matches += 1;
+                    }
+                }
+            }
         }
-
-        // We scanned successfully — whether or not a registration exists in these 10 blocks
-        println!("Matched {matched_txs} transactions in 10 blocks at birthday");
+        assert_eq!(matches, 0);
         Ok(())
     }
 }
-
