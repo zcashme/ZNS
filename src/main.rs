@@ -30,7 +30,7 @@ fn open_db() -> rusqlite::Result<Connection> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS registrations (
             name    TEXT PRIMARY KEY,
-            ua      TEXT NOT NULL,
+            ua      TEXT NOT NULL UNIQUE,
             txid    BLOB NOT NULL,
             height  INTEGER NOT NULL
         );",
@@ -80,14 +80,26 @@ fn parse_memo(memo: &[u8; 512]) -> Option<Registration> {
 
     // Name validation: lowercase alphanumeric + hyphens, 1-63 chars,
     // no leading/trailing hyphens, no consecutive hyphens
-    if name.len() > 63 { return None; }
-    if name.starts_with('-') || name.ends_with('-') { return None; }
-    if name.contains("--") { return None; }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if name.len() > 63 {
+        return None;
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        return None;
+    }
+    if name.contains("--") {
+        return None;
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         return None;
     }
 
-    Some(Registration { name: name.to_string(), ua: ua.to_string() })
+    Some(Registration {
+        name: name.to_string(),
+        ua: ua.to_string(),
+    })
 }
 
 // ── Block scanner ─────────────────────────────────────────────────────────────
@@ -101,8 +113,12 @@ async fn run_block_sync(
 
     loop {
         let tip = match client.get_latest_block(ChainSpec {}).await {
-            Ok(r)  => r.into_inner().height,
-            Err(e) => { eprintln!("get_latest_block: {e}"); tokio::time::sleep(POLL_INTERVAL).await; continue; }
+            Ok(r) => r.into_inner().height,
+            Err(e) => {
+                eprintln!("get_latest_block: {e}");
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
         };
 
         if last_scanned_height >= tip {
@@ -113,12 +129,25 @@ async fn run_block_sync(
         let start = last_scanned_height + 1;
         println!("Scanning {start}..={tip}");
 
-        let mut stream = match client.get_block_range(BlockRange {
-            start: Some(BlockId { height: start, hash: vec![] }),
-            end:   Some(BlockId { height: tip,   hash: vec![] }),
-        }).await {
-            Ok(r)  => r.into_inner(),
-            Err(e) => { eprintln!("get_block_range: {e}"); tokio::time::sleep(POLL_INTERVAL).await; continue; }
+        let mut stream = match client
+            .get_block_range(BlockRange {
+                start: Some(BlockId {
+                    height: start,
+                    hash: vec![],
+                }),
+                end: Some(BlockId {
+                    height: tip,
+                    hash: vec![],
+                }),
+            })
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => {
+                eprintln!("get_block_range: {e}");
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
         };
 
         loop {
@@ -157,30 +186,44 @@ async fn run_block_sync(
                         }
 
                         for txid_hash in matched {
-                            match client.get_transaction(TxFilter {
-                                block: None, index: 0, hash: txid_hash.clone(),
-                            }).await {
+                            match client
+                                .get_transaction(TxFilter {
+                                    block: None,
+                                    index: 0,
+                                    hash: txid_hash.clone(),
+                                })
+                                .await
+                            {
                                 Ok(r) => {
                                     let data = r.into_inner().data;
                                     let branch = BranchId::for_height(
                                         &Network::MainNetwork,
                                         BlockHeight::from_u32(height as u32),
                                     );
-                                    let Ok(tx) = Transaction::read(&data[..], branch) else { continue };
-                                    let Some(bundle) = tx.orchard_bundle() else { continue };
+                                    let Ok(tx) = Transaction::read(&data[..], branch) else {
+                                        continue;
+                                    };
+                                    let Some(bundle) = tx.orchard_bundle() else {
+                                        continue;
+                                    };
                                     for action in bundle.actions() {
                                         let domain = OrchardDomain::for_action(action);
                                         if let Some((_note, _addr, memo)) =
-                                            zcash_note_encryption::try_note_decryption(&domain, pivk, action)
+                                            zcash_note_encryption::try_note_decryption(
+                                                &domain, pivk, action,
+                                            )
+                                            && let Some(reg) = parse_memo(&memo)
+                                            && !name_exists(db, &reg.name)
                                         {
-                                            if let Some(reg) = parse_memo(&memo) {
-                                                if !name_exists(db, &reg.name) {
-                                                    if let Err(e) = create_registration(db, &reg.name, &reg.ua, &txid_hash, height) {
-                                                        eprintln!("DB error: {e}");
-                                                    } else {
-                                                        println!("Registered: {} → {} (height {})", reg.name, reg.ua, height);
-                                                    }
-                                                }
+                                            if let Err(e) = create_registration(
+                                                db, &reg.name, &reg.ua, &txid_hash, height,
+                                            ) {
+                                                eprintln!("DB error: {e}");
+                                            } else {
+                                                println!(
+                                                    "Registered: {} → {} (height {})",
+                                                    reg.name, reg.ua, height
+                                                );
                                             }
                                         }
                                     }
@@ -191,10 +234,18 @@ async fn run_block_sync(
                     }
 
                     last_scanned_height = height;
-                    if height % 10 == 0 { println!("Scanned height {height}"); }
+                    if height % 10 == 0 {
+                        println!("Scanned height {height}");
+                    }
                 }
-                Ok(None)   => { println!("Block stream complete at {tip}."); break; }
-                Err(e)     => { eprintln!("block stream error: {e}"); break; }
+                Ok(None) => {
+                    println!("Block stream complete at {tip}.");
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("block stream error: {e}");
+                    break;
+                }
             }
         }
     }
@@ -336,10 +387,11 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE registrations (
-                name TEXT PRIMARY KEY, ua TEXT NOT NULL,
+                name TEXT PRIMARY KEY, ua TEXT NOT NULL UNIQUE,
                 txid BLOB NOT NULL, height INTEGER NOT NULL
             );",
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(!name_exists(&db, "alice"));
         create_registration(&db, "alice", "u1addr", b"txid", 100).unwrap();
@@ -369,8 +421,14 @@ mod tests {
         init_tls();
         let mut client = CompactTxStreamerClient::connect(LWD_URL).await?;
         let range = BlockRange {
-            start: Some(BlockId { height: 2_500_000, hash: vec![] }),
-            end:   Some(BlockId { height: 2_500_001, hash: vec![] }),
+            start: Some(BlockId {
+                height: 2_500_000,
+                hash: vec![],
+            }),
+            end: Some(BlockId {
+                height: 2_500_001,
+                hash: vec![],
+            }),
         };
         let mut stream = client.get_block_range(range).await?.into_inner();
         let mut blocks = vec![];
@@ -389,7 +447,11 @@ mod tests {
         let mut client = CompactTxStreamerClient::connect(LWD_URL).await?;
         let hash = hex::decode("3e12cd4942dd15205ebe4d5c4a624e2b4edce42e2346ff1ebe74f3afe107443c")?;
         let raw_tx = client
-            .get_transaction(TxFilter { block: None, index: 0, hash })
+            .get_transaction(TxFilter {
+                block: None,
+                index: 0,
+                hash,
+            })
             .await?
             .into_inner();
         assert!(!raw_tx.data.is_empty());
@@ -402,8 +464,14 @@ mod tests {
         let mut client = CompactTxStreamerClient::connect(LWD_URL).await?;
 
         let range = BlockRange {
-            start: Some(BlockId { height: 2_500_000, hash: vec![] }),
-            end:   Some(BlockId { height: 2_500_000, hash: vec![] }),
+            start: Some(BlockId {
+                height: 2_500_000,
+                hash: vec![],
+            }),
+            end: Some(BlockId {
+                height: 2_500_000,
+                hash: vec![],
+            }),
         };
         let mut stream = client.get_block_range(range).await?.into_inner();
         let block = stream.message().await?.expect("block");
@@ -413,22 +481,34 @@ mod tests {
         let usk = UnifiedSpendingKey::from_seed(&Network::MainNetwork, &[0u8; 32], AccountId::ZERO)
             .expect("valid usk");
         let ufvk = usk.to_unified_full_viewing_key();
-        let orchard_ivk = ufvk.orchard().expect("has orchard").to_ivk(zip32::Scope::External);
+        let orchard_ivk = ufvk
+            .orchard()
+            .expect("has orchard")
+            .to_ivk(zip32::Scope::External);
         let prepared = PreparedIncomingViewingKey::new(&orchard_ivk);
 
         let mut matches = 0usize;
         for compact_tx in &block.vtx {
-            if compact_tx.actions.is_empty() { continue }
+            if compact_tx.actions.is_empty() {
+                continue;
+            }
             let raw = client
-                .get_transaction(TxFilter { block: None, index: 0, hash: compact_tx.hash.clone() })
+                .get_transaction(TxFilter {
+                    block: None,
+                    index: 0,
+                    hash: compact_tx.hash.clone(),
+                })
                 .await?
                 .into_inner();
-            let branch = BranchId::for_height(&Network::MainNetwork, BlockHeight::from_u32(2_500_000));
+            let branch =
+                BranchId::for_height(&Network::MainNetwork, BlockHeight::from_u32(2_500_000));
             let full_tx = Transaction::read(&raw.data[..], branch)?;
             if let Some(bundle) = full_tx.orchard_bundle() {
                 for action in bundle.actions() {
                     let domain = OrchardDomain::for_action(action);
-                    if zcash_note_encryption::try_note_decryption(&domain, &prepared, action).is_some() {
+                    if zcash_note_encryption::try_note_decryption(&domain, &prepared, action)
+                        .is_some()
+                    {
                         matches += 1;
                     }
                 }
