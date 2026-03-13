@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package zns.v1;
+
+service ZnsService {
+  rpc GetZnsRecord (ZnsQuery) returns (ZnsRecord);
+}
+
+// Input: resolve by name or by address.
+message ZnsQuery {
+  oneof query {
+    string name    = 1;  // "alice", "alice.zec", "alice.zcash"
+    string address = 2;  // "u1..."
+  }
+}
+
+// Output: the canonical name/address pair.
+message ZnsRecord {
+  string name    = 1;
+  string address = 2;
+}
