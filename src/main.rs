@@ -1,7 +1,7 @@
 // ZNS Indexer
 //
-// Scans confirmed blocks, trial-decrypts Orchard notes, and writes
-// ZNS registrations to SQLite.
+// Scans confirmed blocks, trial-decrypts incoming Orchard notes,
+// and writes ZNS registrations to SQLite.
 
 use std::time::Duration;
 
@@ -10,17 +10,18 @@ use orchard::note_encryption::{CompactAction, OrchardDomain};
 use rusqlite::Connection;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
 use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, TxFilter};
-use zcash_keys::keys::UnifiedIncomingViewingKey;
+use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::consensus::BranchId;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, Network};
+use zip32::Scope;
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
 const LWD_URL: &str = "https://light.zcash.me:443";
 const DB_PATH: &str = "zns.db";
 const BIRTHDAY: u64 = 3_265_357;
-const UIVK_STR: &str = "uivk1cpxzaa8rck580qfekjd3xma32zzk4mwm0p4c99qglpy4atgw74up0lexqvz5tq2wwj7s980c8fe9s98x7g9t9l603pjj6rsp44ufdj6dh0u3d28xm8rmcjdlej40unnvjrwtex45er8uxy3jk6tt22gu9a36t546kplsy280qq92ssz4sscev8529k347r8v2x3xzduuldjdltjjjy02sgv59hgjx2fud6u6y70nvu6g3h9p4n20gtcmmhjwsvqv2ykr2jlc3ert3qa4n99d7p0mg8g743jm5y96frmnu4aheyh6wf3wh9g4hz8jhy70s9xda9rmyg0aqdnec44j84hwjwxar9";
+const UFVK_STR: &str = "uview1m2fxdutwsnqmrn7909hzhgfua7m20ugulualr0cg207whr8aj07ug4g53uj7qfdasy4tfu59zyrzfaplp8lz5tvk739rqm04pg0fyqwh5ldvnnefmtprw02swr5nf6gasr3ktd9ewnv8kx5gussjc3cjak2xvm6g29ctaq0m2ek2536gmmzmmf8rjk9trq9vu4hn9euhymqdyd2j5cw53244nuseca973vud8ymjx3mxvu0zmsezm78dy4r0r5qkcawge2gudnksys6znke8s33ywacdegqdrz44y8rp2uqwklftfcewdrmza3sj366hjy5rkrnlmmskc6p9d4w4w9nxk893fellzlsuztc38gvvvh4qyszhr63hutjd349mw8vn3rqvqt24vv6mrct73gwjq3hlezrcau5qhr6nt0uap0lxqpl67uukp0yxtdnjzdv6frwyn3exc7ke86yyekshkwcur65yykx2dawy4pw878hr0vvh6lpx";
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 // ── Database ─────────────────────────────────────────────────────────────────
@@ -104,150 +105,84 @@ fn parse_memo(memo: &[u8; 512]) -> Option<Registration> {
 
 // ── Block scanner ─────────────────────────────────────────────────────────────
 
-async fn run_block_sync(
-    mut client: CompactTxStreamerClient<tonic::transport::Channel>,
+type Client = CompactTxStreamerClient<tonic::transport::Channel>;
+
+/// Scan one block: compact-decrypt to find matching txids, fetch full txs for memos.
+async fn scan_block(
+    client: &mut Client,
     db: &Connection,
     pivk: &PreparedIncomingViewingKey,
+    block: &zcash_client_backend::proto::compact_formats::CompactBlock,
 ) {
-    let mut last_scanned_height = BIRTHDAY - 100;
+    let height = block.height;
+
+    // Phase 1: compact trial decryption — no network I/O
+    let candidates: Vec<_> = block.vtx.iter()
+        .flat_map(|tx| tx.actions.iter()
+            .filter_map(|a| CompactAction::try_from(a).ok().map(|ca| (ca, tx.hash.clone()))))
+        .collect();
+    if candidates.is_empty() { return; }
+
+    let pairs: Vec<_> = candidates.iter()
+        .map(|(ca, _)| (OrchardDomain::for_compact_action(ca), ca.clone()))
+        .collect();
+    let results = zcash_note_encryption::batch::try_compact_note_decryption(
+        std::slice::from_ref(pivk), &pairs,
+    );
+    let matched: std::collections::HashSet<_> = results.iter().zip(&candidates)
+        .filter_map(|(r, (_, txid))| r.as_ref().map(|_| txid.clone()))
+        .collect();
+
+    // Phase 2: fetch full tx, decrypt memos, store registrations
+    let branch = BranchId::for_height(&Network::MainNetwork, BlockHeight::from_u32(height as u32));
+    for txid in &matched {
+        let Ok(data) = client.get_transaction(TxFilter { block: None, index: 0, hash: txid.clone() })
+            .await.map(|r| r.into_inner().data) else { continue };
+        let Ok(tx) = Transaction::read(&data[..], branch) else { continue };
+        let Some(bundle) = tx.orchard_bundle() else { continue };
+
+        for action in bundle.actions() {
+            let domain = OrchardDomain::for_action(action);
+            if let Some((_, _, memo)) = zcash_note_encryption::try_note_decryption(&domain, pivk, action)
+                && let Some(reg) = parse_memo(&memo)
+                && !is_registered(db, &reg.name, &reg.ua)
+            {
+                match create_registration(db, &reg.name, &reg.ua, txid, height) {
+                    Ok(()) => println!("Registered: {} → {} (height {height})", reg.name, reg.ua),
+                    Err(e) => eprintln!("DB error: {e}"),
+                }
+            }
+        }
+    }
+}
+
+async fn run_block_sync(mut client: Client, db: &Connection, ufvk: &UnifiedFullViewingKey) {
+    let orchard_fvk = ufvk.orchard().expect("UFVK has no Orchard key");
+    let pivk = PreparedIncomingViewingKey::new(&orchard_fvk.to_ivk(Scope::External));
+    let mut last_scanned = BIRTHDAY - 100;
 
     loop {
-        let tip = match client.get_latest_block(ChainSpec {}).await {
-            Ok(r) => r.into_inner().height,
-            Err(e) => {
-                eprintln!("get_latest_block: {e}");
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
+        let Ok(tip) = client.get_latest_block(ChainSpec {}).await.map(|r| r.into_inner().height) else {
+            tokio::time::sleep(POLL_INTERVAL).await; continue;
         };
+        if last_scanned >= tip { tokio::time::sleep(POLL_INTERVAL).await; continue; }
 
-        if last_scanned_height >= tip {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            continue;
-        }
-
-        let start = last_scanned_height + 1;
+        let start = last_scanned + 1;
         println!("Scanning {start}..={tip}");
 
-        let mut stream = match client
-            .get_block_range(BlockRange {
-                start: Some(BlockId {
-                    height: start,
-                    hash: vec![],
-                }),
-                end: Some(BlockId {
-                    height: tip,
-                    hash: vec![],
-                }),
-            })
-            .await
-        {
-            Ok(r) => r.into_inner(),
-            Err(e) => {
-                eprintln!("get_block_range: {e}");
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
+        let range = BlockRange {
+            start: Some(BlockId { height: start, hash: vec![] }),
+            end: Some(BlockId { height: tip, hash: vec![] }),
+        };
+        let Ok(mut stream) = client.get_block_range(range).await.map(|r| r.into_inner()) else {
+            tokio::time::sleep(POLL_INTERVAL).await; continue;
         };
 
-        loop {
-            match stream.message().await {
-                Ok(Some(block)) => {
-                    let height = block.height;
-
-                    // Phase 1: compact trial decryption — no network I/O.
-                    let mut candidates: Vec<(CompactAction, Vec<u8>)> = Vec::new();
-                    for ctx in &block.vtx {
-                        for compact_action in &ctx.actions {
-                            if let Ok(ca) = CompactAction::try_from(compact_action) {
-                                candidates.push((ca, ctx.hash.clone()));
-                            }
-                        }
-                    }
-
-                    if !candidates.is_empty() {
-                        let domains_and_outputs: Vec<_> = candidates
-                            .iter()
-                            .map(|(ca, _)| (OrchardDomain::for_compact_action(ca), ca.clone()))
-                            .collect();
-
-                        let results = zcash_note_encryption::batch::try_compact_note_decryption(
-                            std::slice::from_ref(pivk),
-                            &domains_and_outputs,
-                        );
-
-                        // Phase 2: fetch full tx only for matched txids.
-                        let mut matched: std::collections::HashSet<Vec<u8>> =
-                            std::collections::HashSet::new();
-                        for (result, (_, txid_hash)) in results.iter().zip(candidates.iter()) {
-                            if result.is_some() {
-                                matched.insert(txid_hash.clone());
-                            }
-                        }
-
-                        for txid_hash in matched {
-                            match client
-                                .get_transaction(TxFilter {
-                                    block: None,
-                                    index: 0,
-                                    hash: txid_hash.clone(),
-                                })
-                                .await
-                            {
-                                Ok(r) => {
-                                    let data = r.into_inner().data;
-                                    let branch = BranchId::for_height(
-                                        &Network::MainNetwork,
-                                        BlockHeight::from_u32(height as u32),
-                                    );
-                                    let Ok(tx) = Transaction::read(&data[..], branch) else {
-                                        continue;
-                                    };
-                                    let Some(bundle) = tx.orchard_bundle() else {
-                                        continue;
-                                    };
-                                    for action in bundle.actions() {
-                                        let domain = OrchardDomain::for_action(action);
-                                        if let Some((_note, _addr, memo)) =
-                                            zcash_note_encryption::try_note_decryption(
-                                                &domain, pivk, action,
-                                            )
-                                            && let Some(reg) = parse_memo(&memo)
-                                            && !is_registered(db, &reg.name, &reg.ua)
-                                        {
-                                            if let Err(e) = create_registration(
-                                                db, &reg.name, &reg.ua, &txid_hash, height,
-                                            ) {
-                                                eprintln!("DB error: {e}");
-                                            } else {
-                                                println!(
-                                                    "Registered: {} → {} (height {})",
-                                                    reg.name, reg.ua, height
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => eprintln!("get_transaction: {e}"),
-                            }
-                        }
-                    }
-
-                    last_scanned_height = height;
-                    if height % 10 == 0 {
-                        println!("Scanned height {height}");
-                    }
-                }
-                Ok(None) => {
-                    println!("Block stream complete at {tip}.");
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("block stream error: {e}");
-                    break;
-                }
-            }
+        while let Ok(Some(block)) = stream.message().await {
+            scan_block(&mut client, db, &pivk, &block).await;
+            last_scanned = block.height;
         }
+        println!("Synced to {tip}.");
     }
 }
 
@@ -256,22 +191,12 @@ async fn run_block_sync(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-
-    // Parse UIVK → extract Orchard IVK → prepare for trial decryption
-    let uivk = UnifiedIncomingViewingKey::decode(&Network::MainNetwork, UIVK_STR)
-        .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
-    let orchard_ivk = uivk.orchard().as_ref().ok_or("UIVK has no Orchard key")?;
-    let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
-
-    // Open DB
+    let ufvk = UnifiedFullViewingKey::decode(&Network::MainNetwork, UFVK_STR)
+        .map_err(|e| format!("Failed to decode UFVK: {e}"))?;
     let db = open_db()?;
-
-    // Connect to lightwalletd
     println!("Connecting to {LWD_URL}...");
     let client = CompactTxStreamerClient::connect(LWD_URL).await?;
-
-    run_block_sync(client, &db, &pivk).await;
-
+    run_block_sync(client, &db, &ufvk).await;
     Ok(())
 }
 
@@ -481,10 +406,8 @@ mod tests {
         let usk = UnifiedSpendingKey::from_seed(&Network::MainNetwork, &[0u8; 32], AccountId::ZERO)
             .expect("valid usk");
         let ufvk = usk.to_unified_full_viewing_key();
-        let orchard_ivk = ufvk
-            .orchard()
-            .expect("has orchard")
-            .to_ivk(zip32::Scope::External);
+        let orchard_fvk = ufvk.orchard().expect("has orchard");
+        let orchard_ivk = orchard_fvk.to_ivk(Scope::External);
         let prepared = PreparedIncomingViewingKey::new(&orchard_ivk);
 
         let mut matches = 0usize;
