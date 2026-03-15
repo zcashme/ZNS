@@ -1,0 +1,278 @@
+mod circuit;
+mod fields;
+mod gadgets;
+
+use ark_bls12_381::Bls12_381;
+use ark_groth16::Groth16;
+use ark_r1cs_std::fields::nonnative::NonNativeFieldVar;
+use ark_r1cs_std::prelude::*;
+use ark_relations::r1cs::ConstraintSystem;
+use ark_snark::SNARK;
+use ark_std::rand::rngs::OsRng;
+
+use ark_ff::PrimeField;
+
+use fields::PallasFq;
+use circuit::{ZnsBindingCircuit, compute_binding_hash};
+use gadgets::sinsemilla::SinsemillaTable;
+
+use group::{Curve, GroupEncoding};
+use pasta_curves::arithmetic::{CurveAffine, CurveExt};
+
+type NativeFr = ark_bls12_381::Fr;
+
+fn main() {
+    println!("=== ZNS Binding Circuit (Orchard) ===\n");
+
+    // -------------------------------------------------------
+    // 1. Compute Orchard constants
+    // -------------------------------------------------------
+    println!("[1/5] Computing Orchard constants...");
+    let (spend_auth_base, commit_ivk_table, commit_ivk_r_base) = compute_orchard_constants();
+    println!("       SpendAuthBase, S-table (1024 entries), CommitIvk R-base ready.\n");
+
+    // -------------------------------------------------------
+    // 2. Trusted setup (parameter generation)
+    // -------------------------------------------------------
+    println!("[2/5] Generating Groth16 parameters...");
+    let empty_circuit = ZnsBindingCircuit {
+        sk: None,
+        g_d: None,
+        pk_d: None,
+        binding_hash: None,
+        spend_auth_base,
+        commit_ivk_table: commit_ivk_table.clone(),
+        commit_ivk_r_base,
+    };
+
+    let (pk, vk) = Groth16::<Bls12_381>::circuit_specific_setup(empty_circuit, &mut OsRng)
+        .expect("setup failed");
+    println!("       Parameters generated.\n");
+
+    // -------------------------------------------------------
+    // 3. Prover: create a proof
+    // -------------------------------------------------------
+    // Use a valid Orchard spending key.
+    let sk_bytes: [u8; 32] = [
+        0x42, 0x13, 0x37, 0xAB, 0xCD, 0xEF, 0x01, 0x23,
+        0x45, 0x67, 0x89, 0x0A, 0xBC, 0xDE, 0xF0, 0x12,
+        0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+    ];
+    let name = "jules";
+    let bound_u_address = "u1placeholder_bound_address";
+
+    println!("[3/5] Creating proof...");
+    println!("       Name: {}", name);
+
+    // Derive address components from the spending key using the orchard crate.
+    let (g_d_xy, pk_d_xy) = derive_address_components(&sk_bytes);
+    let binding_hash = compute_binding_hash(name, bound_u_address);
+
+    let circuit = ZnsBindingCircuit {
+        sk: Some(sk_bytes),
+        g_d: Some(g_d_xy),
+        pk_d: Some(pk_d_xy),
+        binding_hash: Some(binding_hash),
+        spend_auth_base,
+        commit_ivk_table: commit_ivk_table.clone(),
+        commit_ivk_r_base,
+    };
+
+    let proof = Groth16::<Bls12_381>::prove(&pk, circuit, &mut OsRng)
+        .expect("proof generation failed");
+    println!("       Proof created.\n");
+
+    // -------------------------------------------------------
+    // 4. Serialize proof
+    // -------------------------------------------------------
+    println!("[4/5] Serializing proof...");
+    let mut proof_bytes = Vec::new();
+    ark_serialize::CanonicalSerialize::serialize_compressed(&proof, &mut proof_bytes)
+        .expect("serialization failed");
+    let proof_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &proof_bytes,
+    );
+    println!("       Proof size: {} bytes", proof_bytes.len());
+    println!("       Base64: {}...\n", &proof_b64[..60.min(proof_b64.len())]);
+
+    // -------------------------------------------------------
+    // 5. Verify
+    // -------------------------------------------------------
+    println!("[5/5] Verifying proof...");
+    let public_inputs = build_public_inputs(g_d_xy, pk_d_xy, &binding_hash);
+    println!("       {} public input scalars", public_inputs.len());
+
+    let pvk = Groth16::<Bls12_381>::process_vk(&vk).expect("vk processing failed");
+    match Groth16::<Bls12_381>::verify_with_processed_vk(&pvk, &public_inputs, &proof) {
+        Ok(true) => println!("       VALID — \"{}\" bound to address.", name),
+        Ok(false) => println!("       INVALID — proof verification failed."),
+        Err(e) => println!("       ERROR — {:?}", e),
+    }
+}
+
+// =================================================================
+// Orchard constant computation (using pasta_curves)
+// =================================================================
+
+fn compute_orchard_constants() -> (
+    (PallasFq, PallasFq),
+    SinsemillaTable,
+    (PallasFq, PallasFq),
+) {
+    use pasta_curves::pallas;
+
+    // SpendAuthBase = GroupHash^P("z.cash:Orchard", "G")
+    let spend_auth_gen = pallas::Point::hash_to_curve("z.cash:Orchard")(b"G");
+    let spend_auth_base = pallas_point_to_fq(&spend_auth_gen);
+
+    // Sinsemilla S-table: S(j) = GroupHash("z.cash:SinsemillaS", I2LEOSP_32(j))
+    let s_entries: Vec<(PallasFq, PallasFq)> = (0..1024u32)
+        .map(|j| {
+            let p = pallas::Point::hash_to_curve("z.cash:SinsemillaS")(&j.to_le_bytes());
+            pallas_point_to_fq(&p)
+        })
+        .collect();
+
+    // Q for CommitIvk-M domain
+    let q_point =
+        pallas::Point::hash_to_curve("z.cash:SinsemillaQ")(b"z.cash:Orchard-CommitIvk-M");
+    let q = pallas_point_to_fq(&q_point);
+
+    let commit_ivk_table = SinsemillaTable {
+        entries: s_entries,
+        q,
+    };
+
+    // R-base for CommitIvk blinding
+    let r_point =
+        pallas::Point::hash_to_curve("z.cash:SinsemillaQ")(b"z.cash:Orchard-CommitIvk-r");
+    let commit_ivk_r_base = pallas_point_to_fq(&r_point);
+
+    (spend_auth_base, commit_ivk_table, commit_ivk_r_base)
+}
+
+/// Convert a Pallas projective point to our (PallasFq, PallasFq) representation.
+fn pallas_point_to_fq(point: &pasta_curves::pallas::Point) -> (PallasFq, PallasFq) {
+    let affine = point.to_affine();
+    let coords = affine.coordinates().unwrap();
+    // Use ff::PrimeField::to_repr() then ark_ff::PrimeField::from_le_bytes_mod_order()
+    let x_bytes: [u8; 32] = ff::PrimeField::to_repr(coords.x());
+    let y_bytes: [u8; 32] = ff::PrimeField::to_repr(coords.y());
+    (
+        PallasFq::from_le_bytes_mod_order(&x_bytes),
+        PallasFq::from_le_bytes_mod_order(&y_bytes),
+    )
+}
+
+// =================================================================
+// Out-of-circuit Orchard key derivation (using the orchard crate)
+// =================================================================
+
+/// Derive g_d and pk_d from a spending key using the orchard crate.
+/// Returns ((g_d_x, g_d_y), (pk_d_x, pk_d_y)).
+fn derive_address_components(
+    sk_bytes: &[u8; 32],
+) -> ((PallasFq, PallasFq), (PallasFq, PallasFq)) {
+    use orchard::keys::{FullViewingKey, Scope, SpendingKey};
+    use pasta_curves::pallas;
+
+    // Derive the full viewing key and address.
+    let sk = SpendingKey::from_bytes(*sk_bytes).expect("invalid spending key");
+    let fvk = FullViewingKey::from(&sk);
+    let address = fvk.address_at(0u32, Scope::External);
+
+    // Extract raw address bytes: [d (11 bytes) || pk_d_compressed (32 bytes)].
+    let raw = address.to_raw_address_bytes();
+    let d: [u8; 11] = raw[..11].try_into().unwrap();
+    let pk_d_bytes: [u8; 32] = raw[11..43].try_into().unwrap();
+
+    // Compute g_d = DiversifyHash(d) using pasta_curves directly.
+    let g_d_point = pallas::Point::hash_to_curve("z.cash:Orchard-gd")(&d);
+    let g_d = pallas_point_to_fq(&g_d_point);
+
+    // Decompress pk_d from its 32-byte compressed form.
+    let pk_d_affine =
+        pallas::Affine::from_bytes(&pk_d_bytes).expect("invalid pk_d encoding");
+    let pk_d_point = pasta_curves::pallas::Point::from(pk_d_affine);
+    let pk_d = pallas_point_to_fq(&pk_d_point);
+
+    (g_d, pk_d)
+}
+
+// =================================================================
+// Public input computation (must match circuit allocation order)
+// =================================================================
+
+/// Build Groth16 public inputs by replicating the circuit's `new_input` calls
+/// in a temporary constraint system and extracting the assigned values.
+fn build_public_inputs(
+    g_d: (PallasFq, PallasFq),
+    pk_d: (PallasFq, PallasFq),
+    binding_hash: &[u8; 32],
+) -> Vec<NativeFr> {
+    let cs = ConstraintSystem::<NativeFr>::new_ref();
+
+    // Must match the allocation order in ZnsBindingCircuit::generate_constraints.
+
+    // 1. g_d as NonNativeFieldVar public inputs (x then y).
+    let _ = NonNativeFieldVar::<PallasFq, NativeFr>::new_input(cs.clone(), || Ok(g_d.0)).unwrap();
+    let _ = NonNativeFieldVar::<PallasFq, NativeFr>::new_input(cs.clone(), || Ok(g_d.1)).unwrap();
+
+    // 2. pk_d as NonNativeFieldVar public inputs (x then y).
+    let _ = NonNativeFieldVar::<PallasFq, NativeFr>::new_input(cs.clone(), || Ok(pk_d.0)).unwrap();
+    let _ = NonNativeFieldVar::<PallasFq, NativeFr>::new_input(cs.clone(), || Ok(pk_d.1)).unwrap();
+
+    // 3. binding_hash as 256 Boolean public inputs.
+    for i in 0..256 {
+        let byte_idx = i / 8;
+        let bit_idx = i % 8;
+        let bit = (binding_hash[byte_idx] >> bit_idx) & 1 == 1;
+        let _ = Boolean::<NativeFr>::new_input(cs.clone(), || Ok(bit)).unwrap();
+    }
+
+    // Extract instance assignment (skip index 0, which is the constant "1").
+    let binding = cs.borrow().unwrap();
+    binding.instance_assignment[1..].to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_binding_hash() {
+        let hash = compute_binding_hash("jules", "u1someaddress");
+        assert_eq!(hash.len(), 32);
+        let hash2 = compute_binding_hash("jules", "u1someaddress");
+        assert_eq!(hash, hash2);
+        let hash3 = compute_binding_hash("alice", "u1someaddress");
+        assert_ne!(hash, hash3);
+    }
+
+    #[test]
+    fn test_derive_address_components() {
+        let sk: [u8; 32] = [
+            0x42, 0x13, 0x37, 0xAB, 0xCD, 0xEF, 0x01, 0x23,
+            0x45, 0x67, 0x89, 0x0A, 0xBC, 0xDE, 0xF0, 0x12,
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        ];
+        let (g_d, pk_d) = derive_address_components(&sk);
+        // g_d and pk_d should be valid non-zero field elements.
+        assert_ne!(g_d.0, PallasFq::from(0u64));
+        assert_ne!(pk_d.0, PallasFq::from(0u64));
+    }
+
+    #[test]
+    fn test_public_inputs_deterministic() {
+        let sk: [u8; 32] = [0x42; 32];
+        let (g_d, pk_d) = derive_address_components(&sk);
+        let bh = compute_binding_hash("test", "u1addr");
+        let inputs1 = build_public_inputs(g_d, pk_d, &bh);
+        let inputs2 = build_public_inputs(g_d, pk_d, &bh);
+        assert_eq!(inputs1, inputs2);
+        assert!(!inputs1.is_empty());
+    }
+}

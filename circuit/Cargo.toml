@@ -1,0 +1,44 @@
+[package]
+name = "zns-circuit"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Arkworks — proving system
+ark-groth16 = "0.4"
+ark-snark = "0.4"
+
+# Arkworks — curves
+ark-bls12-381 = "0.4"
+
+# Arkworks — field/group traits
+ark-ff = "0.4"
+ark-ec = "0.4"
+
+# Arkworks — R1CS
+ark-relations = "0.4"
+ark-r1cs-std = "0.4"
+
+# Arkworks — serialization & utilities
+ark-serialize = "0.4"
+ark-std = "0.4"
+
+# Blake2b for out-of-circuit computation
+blake2b_simd = "1"
+
+# Orchard key derivation (out-of-circuit)
+orchard = "0.10"
+
+# Zcash address parsing
+zcash_address = "0.7"
+zcash_protocol = "0.4"
+
+# Pallas curve constants (out-of-circuit computation)
+pasta_curves = { version = "0.5", features = ["alloc"] }
+group = "0.13"
+ff = "0.13"
+
+# Encoding
+hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
