@@ -24,9 +24,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 
 use crate::fields::PallasFq;
 use crate::gadgets::blake2b;
-use crate::gadgets::nonnative_point::{
-    bits_512_to_fq_mod, bits_512_to_fr_mod, PallasPointVar,
-};
+use crate::gadgets::nonnative_point::{bits_512_to_fq_mod, PallasPointVar};
 use crate::gadgets::sinsemilla::{sinsemilla_short_commit, SinsemillaTable};
 use crate::gadgets::word64::Word64;
 
@@ -43,7 +41,7 @@ pub struct ZnsBindingCircuit {
     pub g_d: Option<(PallasFq, PallasFq)>,
     /// Transmission key pk_d from the signer's u-address.
     pub pk_d: Option<(PallasFq, PallasFq)>,
-    /// Binding hash = BLAKE2b-512("ZNS_binding", name || bound_u_address)[..32].
+    /// Binding hash = BLAKE2b-512("ZNS:name_binding", name || bound_u_address)[..32].
     pub binding_hash: Option<[u8; 32]>,
 
     // --- Precomputed constants ---
@@ -75,11 +73,13 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
         };
 
         // =============================================
-        // 2. Derive ask = ToScalar(PRF_expand(sk, 0x06))
+        // 2. Derive ask bits via BLAKE2b
+        //    For scalar mul, [x]G = [x mod r_P]G on a group of order r_P,
+        //    so we use raw BLAKE2b bits directly (512 bits).
         // =============================================
         let prf_ask = blake2b::prf_expand(cs.clone(), &sk_words, 0x06)?;
-        let prf_ask_bits = blake2b::hash_to_bits(&prf_ask); // 512 bits
-        let ask = bits_512_to_fr_mod(cs.clone(), &prf_ask_bits)?;
+        let ask_bits = blake2b::hash_to_bits(&prf_ask);
+        eprintln!("  after BLAKE2b(ask): {} constraints", cs.num_constraints());
 
         // =============================================
         // 3. Derive ak = [ask] * SpendAuthBase
@@ -89,24 +89,25 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
             self.spend_auth_base.0,
             self.spend_auth_base.1,
         )?;
-        let ask_bits = ask.to_bits_le()?;
-        // For scalar mul, we need FqVar bits (since our point ops work in Fq).
-        // ask is in Fr, but [ask] * G is well-defined: just use the bit decomposition.
         let ak_point = PallasPointVar::scalar_mul(cs.clone(), &ask_bits, &spend_auth_base)?;
+        eprintln!("  after ak scalar mul: {} constraints", cs.num_constraints());
 
         // =============================================
-        // 4. Derive nk = ToBase(PRF_expand(sk, 0x07))
+        // 4. nk = ToBase(PRF_expand(sk, 0x07))
+        //    BLAKE2b produces 512 bits; reduce mod q_P to get nk as a Pallas Fq element.
         // =============================================
         let prf_nk = blake2b::prf_expand(cs.clone(), &sk_words, 0x07)?;
-        let prf_nk_bits = blake2b::hash_to_bits(&prf_nk);
-        let nk = bits_512_to_fq_mod(cs.clone(), &prf_nk_bits)?;
+        let nk_bits = blake2b::hash_to_bits(&prf_nk);
+        let nk = bits_512_to_fq_mod(cs.clone(), &nk_bits)?;
+        eprintln!("  after nk: {} constraints", cs.num_constraints());
 
         // =============================================
-        // 5. Derive rivk = ToScalar(PRF_expand(sk, 0x08))
+        // 5. Derive rivk bits via BLAKE2b
+        //    Used as scalar for blinding in SinsemillaCommit.
         // =============================================
         let prf_rivk = blake2b::prf_expand(cs.clone(), &sk_words, 0x08)?;
-        let prf_rivk_bits = blake2b::hash_to_bits(&prf_rivk);
-        let rivk = bits_512_to_fr_mod(cs.clone(), &prf_rivk_bits)?;
+        let rivk_bits = blake2b::hash_to_bits(&prf_rivk);
+        eprintln!("  after rivk: {} constraints", cs.num_constraints());
 
         // =============================================
         // 6. Compute ivk = SinsemillaShortCommit(
@@ -115,7 +116,6 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
         //      rivk
         //    )
         // =============================================
-        // Get ak_x = extract_x(ak_point): the x-coordinate as bits.
         let ak_x_bits = ak_point.x.to_bits_le()?;
         let nk_bits = nk.to_bits_le()?;
 
@@ -124,12 +124,9 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
         let mut commit_msg_bits = Vec::with_capacity(520);
         commit_msg_bits.extend_from_slice(&ak_x_bits[..255]);
         commit_msg_bits.extend_from_slice(&nk_bits[..255]);
-        // Pad with 10 zero bits to reach 520 (520 = 52 chunks × 10).
         for _ in 0..10 {
             commit_msg_bits.push(Boolean::constant(false));
         }
-
-        let rivk_bits = rivk.to_bits_le()?;
 
         let ivk = sinsemilla_short_commit(
             cs.clone(),
@@ -194,7 +191,7 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
 // ============================
 
 /// Compute the binding hash outside the circuit.
-/// binding_hash = BLAKE2b-512("ZNS_binding", name || bound_u_address)[..32]
+/// binding_hash = BLAKE2b-512("ZNS:name_binding", name || bound_u_address)[..32]
 pub fn compute_binding_hash(name: &str, bound_u_address: &str) -> [u8; 32] {
     let mut input = Vec::new();
     input.extend_from_slice(name.as_bytes());
@@ -203,7 +200,7 @@ pub fn compute_binding_hash(name: &str, bound_u_address: &str) -> [u8; 32] {
     // Personalization must be exactly 16 bytes.
     let hash = blake2b_simd::Params::new()
         .hash_length(64)
-        .personal(b"ZNS_binding_v1__")
+        .personal(b"ZNS:name_binding")
         .hash(&input);
 
     let mut out = [0u8; 32];

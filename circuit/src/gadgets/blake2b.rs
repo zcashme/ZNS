@@ -1,12 +1,11 @@
 /// BLAKE2b-512 gadget for R1CS, specialized for Orchard's PRF^expand.
 ///
-/// PRF^expand_sk(t) = BLAKE2b-512(personalization="Zcash_ExpandSeed", key=sk, message=t)
+/// PRF^expand_sk(t) = BLAKE2b-512(personalization="Zcash_ExpandSeed", msg = sk || t)
 ///
-/// Since key=sk (32 bytes) and message=t (1 byte: 0x06/0x07/0x08), the input is:
-///   Block 0: sk || zeros(96) — 128 bytes, counter=128, not final
-///   Block 1: [t] || zeros(127) — 128 bytes, counter=129, final
+/// No BLAKE2b key parameter — sk is concatenated with the domain byte as the message.
+/// Message = sk (32 bytes) || t (1 byte) = 33 bytes, fits in a single 128-byte block.
 ///
-/// Cost: ~200,000 constraints per call (2 compressions × 12 rounds × 8 G-functions).
+/// Cost: ~100,000 constraints per call (1 compression × 12 rounds × 8 G-functions).
 use ark_ff::PrimeField;
 use ark_r1cs_std::prelude::*;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
@@ -140,12 +139,13 @@ fn compress<F: PrimeField>(
 /// Compute the initial BLAKE2b state for PRF^expand (constant, free in R1CS).
 ///
 /// Personalization: "Zcash_ExpandSeed" (16 bytes)
-/// Key length: 32, Hash length: 64, Fanout: 1, Depth: 1
+/// No BLAKE2b key — sk is part of the message.
+/// Hash length: 64, Fanout: 1, Depth: 1
 fn prf_expand_init_state<F: PrimeField>() -> [Word64<F>; 8] {
     let personal_lo = u64::from_le_bytes(*b"Zcash_Ex");
     let personal_hi = u64::from_le_bytes(*b"pandSeed");
-    // Parameter block: digest_length=64, key_length=32, fanout=1, depth=1
-    let p0: u64 = 0x0101_0000 | (32 << 8) | 64;
+    // Parameter block (LE): digest_length=64, key_length=0, fanout=1, depth=1
+    let p0: u64 = 0x0101_0000 | 64;
 
     [
         Word64::constant(IV[0] ^ p0),
@@ -159,9 +159,13 @@ fn prf_expand_init_state<F: PrimeField>() -> [Word64<F>; 8] {
     ]
 }
 
-/// PRF^expand_sk(domain_byte) = BLAKE2b-512("Zcash_ExpandSeed", key=sk, msg=[domain_byte])
+/// PRF^expand_sk(domain_byte) = BLAKE2b-512("Zcash_ExpandSeed", msg = sk || domain_byte)
 ///
-/// Returns 64 bytes (512 bits) as 8 Word64 values.
+/// The spending key is concatenated with the domain byte as the message.
+/// No BLAKE2b key parameter is used.
+///
+/// Message = sk (32 bytes) || domain_byte (1 byte) = 33 bytes.
+/// Fits in a single 128-byte block.
 ///
 /// sk_words: the spending key as 4 Word64 values (32 bytes, little-endian).
 /// domain_byte: 0x06 (ask), 0x07 (nk), or 0x08 (rivk).
@@ -172,36 +176,14 @@ pub fn prf_expand<F: PrimeField>(
 ) -> Result<[Word64<F>; 8], SynthesisError> {
     let mut h = prf_expand_init_state::<F>();
 
-    // --- Block 0: key (sk padded to 128 bytes) ---
-    // m[0..3] = sk, m[4..15] = 0
-    let block0: [Word64<F>; 16] = [
+    // Single block: sk (32 bytes) || domain_byte (1 byte) || zeros (95 bytes)
+    // = 128 bytes total. This is the final (and only) block.
+    let block: [Word64<F>; 16] = [
         sk_words[0].clone(),
         sk_words[1].clone(),
         sk_words[2].clone(),
         sk_words[3].clone(),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-    ];
-    compress(cs.clone(), &mut h, &block0, 128, false)?;
-
-    // --- Block 1: message ([domain_byte] padded to 128 bytes) ---
-    // All constant — domain_byte is public.
-    let block1: [Word64<F>; 16] = [
-        Word64::constant(domain_byte as u64),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
-        Word64::constant(0),
+        Word64::constant(domain_byte as u64), // domain_byte in low byte
         Word64::constant(0),
         Word64::constant(0),
         Word64::constant(0),
@@ -214,7 +196,8 @@ pub fn prf_expand<F: PrimeField>(
         Word64::constant(0),
         Word64::constant(0),
     ];
-    compress(cs, &mut h, &block1, 129, true)?;
+    // Counter = 33 (total bytes: 32 sk + 1 domain_byte), final block.
+    compress(cs, &mut h, &block, 33, true)?;
 
     Ok(h)
 }
@@ -251,11 +234,11 @@ mod tests {
         let domain = 0x06u8;
 
         // Compute expected result using blake2b_simd.
+        // PRF_expand: msg = sk || domain_byte (no BLAKE2b key).
         let expected = blake2b_simd::Params::new()
             .hash_length(64)
             .personal(b"Zcash_ExpandSeed")
-            .key(&sk)
-            .hash(&[domain]);
+            .hash(&[sk.as_slice(), &[domain]].concat());
 
         // Convert sk to Word64.
         let sk_words: [Word64<Fr>; 4] = [

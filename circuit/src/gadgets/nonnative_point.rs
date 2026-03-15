@@ -257,23 +257,38 @@ impl PallasPointVar {
             });
         }
 
-        // Process from MSB to LSB.
-        // Find the first bit that might be 1 (we start accumulation from there).
-        // For simplicity, start with the base point and process bits MSB-1 down to 0.
+        // Double-and-add from MSB to LSB.
+        //
+        // We start with acc = base (representing the MSB being 1).
+        // Process bits n-2 down to 0: double acc, conditionally add base.
+        // After the loop, acc = [1 * 2^(n-1) + lower_bits] * base.
+        //
+        // If the MSB was actually 0, we need to subtract [2^(n-1)] * base.
+        // We compute neg_offset = -[2^(n-1)] * base by tracking the offset
+        // point through the same doublings.
+
         let mut acc = base.clone();
+        let mut offset = base.clone(); // tracks [2^k] * base for offset correction
 
         for i in (0..n - 1).rev() {
-            // acc = 2 * acc
             acc = Self::double(cs.clone(), &acc)?;
+            offset = Self::double(cs.clone(), &offset)?;
 
-            // conditionally add base if bit is 1
             let acc_plus_base = Self::add(cs.clone(), &acc, base)?;
-
-            // acc = if bit then (acc + base) else acc
             acc = Self::select(&scalar_bits[i], &acc_plus_base, &acc)?;
         }
 
-        Ok(acc)
+        // If MSB (bit n-1) was 0, subtract the offset [2^(n-1)] * base.
+        let neg_offset_y = offset.y.negate()?;
+        let neg_offset = PallasPointVar {
+            x: offset.x.clone(),
+            y: neg_offset_y,
+            is_infinity: Boolean::constant(false),
+        };
+        let acc_corrected = Self::add(cs, &acc, &neg_offset)?;
+
+        // result = MSB ? acc : acc_corrected
+        Self::select(&scalar_bits[n - 1], &acc, &acc_corrected)
     }
 
     /// Conditional selection: if condition then a else b.
@@ -330,14 +345,18 @@ impl PallasPointVar {
     }
 }
 
-/// Convert 256 Boolean bits (LE) to a PallasFq non-native field variable.
-/// Used to convert BLAKE2b output (truncated to 256 bits) into a scalar.
+/// Convert Boolean bits (LE) to a PallasFq non-native field variable.
+///
+/// Uses 128-bit chunks to avoid overflow: each 128-bit value is always < q_P (~2^255),
+/// so to_bits_le() won't wrap. Chunks are combined via constant multiplications.
 pub fn bits_to_fq_var(
     cs: ConstraintSystemRef<NativeFr>,
     bits: &[Boolean<NativeFr>],
 ) -> Result<FqVar, SynthesisError> {
-    // Compute the field element value from bits.
-    let val: Option<PallasFq> = {
+    const CHUNK: usize = 128;
+
+    // Compute the full value.
+    let full_val: Option<PallasFq> = {
         let bit_vals: Option<Vec<bool>> = bits.iter().map(|b| b.value().ok()).collect();
         bit_vals.map(|bv| {
             let mut result = PallasFq::zero();
@@ -353,29 +372,61 @@ pub fn bits_to_fq_var(
         })
     };
 
-    let var = FqVar::new_witness(cs.clone(), || {
-        val.ok_or(SynthesisError::AssignmentMissing)
-    })?;
+    // Process in 128-bit chunks.
+    let mut result = FqVar::new_constant(cs.clone(), PallasFq::zero())?;
+    let mut shift_val = PallasFq::one(); // 2^(chunk_index * 128)
 
-    // Constrain: var = sum(bits[i] * 2^i) mod q
-    // Build the linear combination from the bits.
-    let mut reconstructed = FqVar::new_constant(cs.clone(), PallasFq::zero())?;
-    let two = FqVar::new_constant(cs.clone(), PallasFq::from(2u64))?;
-    let mut power_of_two = FqVar::new_constant(cs.clone(), PallasFq::one())?;
+    for chunk_start in (0..bits.len()).step_by(CHUNK) {
+        let chunk_end = (chunk_start + CHUNK).min(bits.len());
+        let chunk_bits = &bits[chunk_start..chunk_end];
+        let chunk_len = chunk_bits.len();
 
-    for bit in bits {
-        // bit_as_fq = if bit then 1 else 0
-        let one = FqVar::new_constant(cs.clone(), PallasFq::one())?;
-        let zero_fq = FqVar::new_constant(cs.clone(), PallasFq::zero())?;
-        let bit_fq = FqVar::conditionally_select(bit, &one, &zero_fq)?;
+        // Compute this chunk's value (always < 2^128 < q_P, no wrapping).
+        let chunk_val: Option<PallasFq> = {
+            let bv: Option<Vec<bool>> = chunk_bits.iter().map(|b| b.value().ok()).collect();
+            bv.map(|bv| {
+                let mut v = PallasFq::zero();
+                let mut p = PallasFq::one();
+                let two = PallasFq::from(2u64);
+                for b in &bv {
+                    if *b {
+                        v += p;
+                    }
+                    p *= two;
+                }
+                v
+            })
+        };
 
-        reconstructed += &(&bit_fq * &power_of_two);
-        power_of_two = &power_of_two * &two;
+        // Allocate chunk as witness.
+        let chunk_var = FqVar::new_witness(cs.clone(), || {
+            chunk_val.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+
+        // Constrain: chunk_var's bits match the input chunk bits.
+        let chunk_var_bits = chunk_var.to_bits_le()?;
+        for (i, input_bit) in chunk_bits.iter().enumerate() {
+            if i < chunk_var_bits.len() {
+                input_bit.enforce_equal(&chunk_var_bits[i])?;
+            }
+        }
+        // High bits must be zero (proves chunk < 2^chunk_len).
+        for extra_bit in chunk_var_bits.iter().skip(chunk_len) {
+            extra_bit.enforce_equal(&Boolean::constant(false))?;
+        }
+
+        // Accumulate: result += chunk_var * 2^(chunk_index * 128)
+        let shift_const = FqVar::new_constant(cs.clone(), shift_val)?;
+        result += &(&chunk_var * &shift_const);
+
+        // Advance shift for next chunk.
+        let two = PallasFq::from(2u64);
+        for _ in 0..chunk_len {
+            shift_val *= two;
+        }
     }
 
-    var.enforce_equal(&reconstructed)?;
-
-    Ok(var)
+    Ok(result)
 }
 
 /// Convert 512 Boolean bits to a PallasFq element via mod reduction.
@@ -447,6 +498,83 @@ pub fn bits_512_to_fq_mod(
     Ok(result)
 }
 
+/// Convert Boolean bits (LE) to a PallasFr non-native field variable.
+/// Same 128-bit chunk strategy as bits_to_fq_var.
+pub fn bits_to_fr_var(
+    cs: ConstraintSystemRef<NativeFr>,
+    bits: &[Boolean<NativeFr>],
+) -> Result<NonNativeFieldVar<crate::fields::PallasFr, NativeFr>, SynthesisError> {
+    use crate::fields::PallasFr;
+    type FrNNVar = NonNativeFieldVar<PallasFr, NativeFr>;
+
+    const CHUNK: usize = 128;
+
+    let full_val: Option<PallasFr> = {
+        let bit_vals: Option<Vec<bool>> = bits.iter().map(|b| b.value().ok()).collect();
+        bit_vals.map(|bv| {
+            let mut result = PallasFr::zero();
+            let mut power = PallasFr::one();
+            let two = PallasFr::from(2u64);
+            for b in &bv {
+                if *b {
+                    result += power;
+                }
+                power *= two;
+            }
+            result
+        })
+    };
+
+    let mut result = FrNNVar::new_constant(cs.clone(), PallasFr::zero())?;
+    let mut shift_val = PallasFr::one();
+
+    for chunk_start in (0..bits.len()).step_by(CHUNK) {
+        let chunk_end = (chunk_start + CHUNK).min(bits.len());
+        let chunk_bits = &bits[chunk_start..chunk_end];
+        let chunk_len = chunk_bits.len();
+
+        let chunk_val: Option<PallasFr> = {
+            let bv: Option<Vec<bool>> = chunk_bits.iter().map(|b| b.value().ok()).collect();
+            bv.map(|bv| {
+                let mut v = PallasFr::zero();
+                let mut p = PallasFr::one();
+                let two = PallasFr::from(2u64);
+                for b in &bv {
+                    if *b {
+                        v += p;
+                    }
+                    p *= two;
+                }
+                v
+            })
+        };
+
+        let chunk_var = FrNNVar::new_witness(cs.clone(), || {
+            chunk_val.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+
+        let chunk_var_bits = chunk_var.to_bits_le()?;
+        for (i, input_bit) in chunk_bits.iter().enumerate() {
+            if i < chunk_var_bits.len() {
+                input_bit.enforce_equal(&chunk_var_bits[i])?;
+            }
+        }
+        for extra_bit in chunk_var_bits.iter().skip(chunk_len) {
+            extra_bit.enforce_equal(&Boolean::constant(false))?;
+        }
+
+        let shift_const = FrNNVar::new_constant(cs.clone(), shift_val)?;
+        result += &(&chunk_var * &shift_const);
+
+        let two = PallasFr::from(2u64);
+        for _ in 0..chunk_len {
+            shift_val *= two;
+        }
+    }
+
+    Ok(result)
+}
+
 /// Same as bits_512_to_fq_mod but reduces mod r_P (the scalar field order).
 /// Used for ToScalar^Orchard: leos2ip_512(x) mod r_P.
 ///
@@ -497,34 +625,14 @@ pub fn bits_512_to_fr_mod(
         val.ok_or(SynthesisError::AssignmentMissing)
     })?;
 
-    // Build lo, hi from bits and constrain.
-    let lo = {
-        let mut acc = FrVar::new_constant(cs.clone(), PallasFr::zero())?;
-        let two = FrVar::new_constant(cs.clone(), PallasFr::from(2u64))?;
-        let mut power = FrVar::new_constant(cs.clone(), PallasFr::one())?;
-        let one_fr = FrVar::new_constant(cs.clone(), PallasFr::one())?;
-        let zero_fr = FrVar::new_constant(cs.clone(), PallasFr::zero())?;
-        for bit in &bits[..256] {
-            let bit_fr = FrVar::conditionally_select(bit, &one_fr, &zero_fr)?;
-            acc += &(&bit_fr * &power);
-            power = &power * &two;
-        }
-        acc
-    };
-
-    let hi = {
-        let mut acc = FrVar::new_constant(cs.clone(), PallasFr::zero())?;
-        let two = FrVar::new_constant(cs.clone(), PallasFr::from(2u64))?;
-        let mut power = FrVar::new_constant(cs.clone(), PallasFr::one())?;
-        let one_fr = FrVar::new_constant(cs.clone(), PallasFr::one())?;
-        let zero_fr = FrVar::new_constant(cs.clone(), PallasFr::zero())?;
-        for bit in &bits[256..] {
-            let bit_fr = FrVar::conditionally_select(bit, &one_fr, &zero_fr)?;
-            acc += &(&bit_fr * &power);
-            power = &power * &two;
-        }
-        acc
-    };
+    // Constrain: decompose result back to bits, match against input bits.
+    // The 512-bit value mod r_P fits in ~255 bits.
+    // But the original 512 bits represent a LARGER integer that reduces mod r_P.
+    // We split into lo (0..256) and hi (256..512), then constrain:
+    //   result = lo_val + hi_val * 2^256  (mod r_P, implicit in field arithmetic)
+    // where lo_val and hi_val are constructed from their respective bits.
+    let lo_val = bits_to_fr_var(cs.clone(), &bits[..256])?;
+    let hi_val = bits_to_fr_var(cs.clone(), &bits[256..])?;
 
     let two_256 = {
         let mut t = PallasFr::one();
@@ -534,7 +642,7 @@ pub fn bits_512_to_fr_mod(
         t
     };
     let two_256_var = FrVar::new_constant(cs, two_256)?;
-    let expected = &lo + &(&hi * &two_256_var);
+    let expected = &lo_val + &(&hi_val * &two_256_var);
     result.enforce_equal(&expected)?;
 
     Ok(result)
