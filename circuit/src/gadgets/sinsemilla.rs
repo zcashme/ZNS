@@ -115,9 +115,11 @@ pub fn sinsemilla_hash_to_point(
             chunk,
         )?;
 
-        // acc = [2](acc + S(chunk_value))
-        let sum = PallasPointVar::add(cs.clone(), &acc, &s_point)?;
-        acc = PallasPointVar::double(cs.clone(), &sum)?;
+        // Sinsemilla step: acc = (acc + S(chunk_value)) + acc
+        // This computes 2*acc + S, NOT 2*(acc + S).
+        let old_acc = acc.clone();
+        let tmp = PallasPointVar::add(cs.clone(), &acc, &s_point)?;
+        acc = PallasPointVar::add(cs.clone(), &tmp, &old_acc)?;
     }
 
     Ok(acc)

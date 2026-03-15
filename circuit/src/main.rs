@@ -33,22 +33,43 @@ fn main() {
     println!("       SpendAuthBase, S-table (1024 entries), CommitIvk R-base ready.\n");
 
     // -------------------------------------------------------
-    // 2. Trusted setup (parameter generation)
+    // 2. Trusted setup (parameter generation) — cached to disk
     // -------------------------------------------------------
-    println!("[2/5] Generating Groth16 parameters...");
-    let empty_circuit = ZnsBindingCircuit {
-        sk: None,
-        g_d: None,
-        pk_d: None,
-        binding_hash: None,
-        spend_auth_base,
-        commit_ivk_table: commit_ivk_table.clone(),
-        commit_ivk_r_base,
-    };
+    let params_path = std::path::Path::new("zns_params.bin");
+    let (pk, vk) = if params_path.exists() {
+        println!("[2/5] Loading cached Groth16 parameters...");
+        let file = std::fs::File::open(params_path).expect("failed to open params");
+        let reader = std::io::BufReader::new(file);
+        let pk: ark_groth16::ProvingKey<Bls12_381> =
+            ark_serialize::CanonicalDeserialize::deserialize_uncompressed_unchecked(reader)
+                .expect("failed to deserialize pk");
+        let vk = pk.vk.clone();
+        println!("       Loaded from cache.\n");
+        (pk, vk)
+    } else {
+        println!("[2/5] Generating Groth16 parameters (first run, will cache)...");
+        let empty_circuit = ZnsBindingCircuit {
+            sk: None,
+            nk_witness: None,
+            g_d: None,
+            pk_d: None,
+            binding_hash: None,
+            spend_auth_base,
+            commit_ivk_table: commit_ivk_table.clone(),
+            commit_ivk_r_base,
+        };
 
-    let (pk, vk) = Groth16::<Bls12_381>::circuit_specific_setup(empty_circuit, &mut OsRng)
-        .expect("setup failed");
-    println!("       Parameters generated.\n");
+        let (pk, vk) = Groth16::<Bls12_381>::circuit_specific_setup(empty_circuit, &mut OsRng)
+            .expect("setup failed");
+
+        // Save to disk.
+        let file = std::fs::File::create(params_path).expect("failed to create params file");
+        let writer = std::io::BufWriter::new(file);
+        ark_serialize::CanonicalSerialize::serialize_uncompressed(&pk, writer)
+            .expect("failed to serialize pk");
+        println!("       Parameters generated and cached to {}.\n", params_path.display());
+        (pk, vk)
+    };
 
     // -------------------------------------------------------
     // 3. Prover: create a proof
@@ -67,11 +88,12 @@ fn main() {
     println!("       Name: {}", name);
 
     // Derive address components from the spending key using the orchard crate.
-    let (g_d_xy, pk_d_xy) = derive_address_components(&sk_bytes);
+    let (g_d_xy, pk_d_xy, nk_fq) = derive_address_components(&sk_bytes);
     let binding_hash = compute_binding_hash(name, bound_u_address);
 
     let circuit = ZnsBindingCircuit {
         sk: Some(sk_bytes),
+        nk_witness: Some(nk_fq),
         g_d: Some(g_d_xy),
         pk_d: Some(pk_d_xy),
         binding_hash: Some(binding_hash),
@@ -90,11 +112,13 @@ fn main() {
     let satisfied = cs.is_satisfied().unwrap();
     println!("       Satisfied: {}", satisfied);
     if !satisfied {
-        if let Some(trace) = cs.which_is_unsatisfied().unwrap() {
-            println!("       FAILING: {}", trace);
+        match cs.which_is_unsatisfied() {
+            Ok(Some(trace)) => println!("       FAILING constraint: {}", trace),
+            Ok(None) => println!("       FAILING: unknown constraint"),
+            Err(e) => println!("       Error finding unsatisfied: {:?}", e),
         }
+        println!("       Total constraints: {}", cs.num_constraints());
         // Don't proceed with broken proof — exit early.
-        println!("       Circuit is not satisfied. Debug needed.");
         return;
     }
 
@@ -154,7 +178,8 @@ fn compute_orchard_constants() -> (
         })
         .collect();
 
-    // Q for CommitIvk-M domain
+    // Q for CommitIvk-M domain.
+    // HashDomain::new("{domain}-M") computes Q = hash_to_curve("z.cash:SinsemillaQ")(domain_bytes).
     let q_point =
         pallas::Point::hash_to_curve("z.cash:SinsemillaQ")(b"z.cash:Orchard-CommitIvk-M");
     let q = pallas_point_to_fq(&q_point);
@@ -164,9 +189,10 @@ fn compute_orchard_constants() -> (
         q,
     };
 
-    // R-base for CommitIvk blinding
+    // R-base for CommitIvk blinding.
+    // CommitDomain uses hash_to_curve("{domain}-r")(&[]) — the domain IS the personalization.
     let r_point =
-        pallas::Point::hash_to_curve("z.cash:SinsemillaQ")(b"z.cash:Orchard-CommitIvk-r");
+        pallas::Point::hash_to_curve("z.cash:Orchard-CommitIvk-r")(&[]);
     let commit_ivk_r_base = pallas_point_to_fq(&r_point);
 
     (spend_auth_base, commit_ivk_table, commit_ivk_r_base)
@@ -189,10 +215,10 @@ fn pallas_point_to_fq(point: &pasta_curves::pallas::Point) -> (PallasFq, PallasF
 // Out-of-circuit Orchard key derivation (using the orchard crate)
 // =================================================================
 
-/// Derive g_d and pk_d from a spending key.
+/// Derive g_d, pk_d, and nk from a spending key.
 fn derive_address_components(
     sk_bytes: &[u8; 32],
-) -> ((PallasFq, PallasFq), (PallasFq, PallasFq)) {
+) -> ((PallasFq, PallasFq), (PallasFq, PallasFq), PallasFq) {
     use orchard::keys::{FullViewingKey, Scope, SpendingKey};
     use pasta_curves::pallas;
 
@@ -216,7 +242,16 @@ fn derive_address_components(
     let pk_d_point = pasta_curves::pallas::Point::from(pk_d_affine);
     let pk_d = pallas_point_to_fq(&pk_d_point);
 
-    (g_d, pk_d)
+    // Compute nk = ToBase(PRF_expand(sk, 0x07)).
+    let prf_nk = blake2b_simd::Params::new()
+        .hash_length(64)
+        .personal(b"Zcash_ExpandSeed")
+        .hash(&[sk_bytes.as_slice(), &[0x07u8]].concat());
+    let nk_bytes: [u8; 64] = prf_nk.as_bytes().try_into().unwrap();
+    let nk_pasta = pasta_curves::pallas::Base::from_uniform_bytes(&nk_bytes);
+    let nk_fq = PallasFq::from_le_bytes_mod_order(&ff::PrimeField::to_repr(&nk_pasta));
+
+    (g_d, pk_d, nk_fq)
 }
 
 // =================================================================
@@ -370,7 +405,7 @@ mod tests {
             0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
         ];
-        let (g_d, pk_d) = derive_address_components(&sk);
+        let (g_d, pk_d, _nk) = derive_address_components(&sk);
         assert_ne!(g_d.0, PallasFq::from(0u64));
         assert_ne!(pk_d.0, PallasFq::from(0u64));
     }
@@ -378,7 +413,7 @@ mod tests {
     #[test]
     fn test_public_inputs_deterministic() {
         let sk: [u8; 32] = [0x42; 32];
-        let (g_d, pk_d) = derive_address_components(&sk);
+        let (g_d, pk_d, _nk) = derive_address_components(&sk);
         let bh = compute_binding_hash("test", "u1addr");
         let inputs1 = build_public_inputs(g_d, pk_d, &bh);
         let inputs2 = build_public_inputs(g_d, pk_d, &bh);

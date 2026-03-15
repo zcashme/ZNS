@@ -24,7 +24,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 
 use crate::fields::PallasFq;
 use crate::gadgets::blake2b;
-use crate::gadgets::nonnative_point::{bits_512_to_fq_mod, PallasPointVar};
+use crate::gadgets::nonnative_point::{FqVar, PallasPointVar};
 use crate::gadgets::sinsemilla::{sinsemilla_short_commit, SinsemillaTable};
 use crate::gadgets::word64::Word64;
 
@@ -35,6 +35,8 @@ type NativeFr = ark_bls12_381::Fr;
 pub struct ZnsBindingCircuit {
     /// Spending key (private witness). None during parameter generation.
     pub sk: Option<[u8; 32]>,
+    /// Pre-computed nk = ToBase(PRF_expand(sk, 0x07)), as a PallasFq witness.
+    pub nk_witness: Option<PallasFq>,
 
     // --- Public inputs (provided by verifier) ---
     /// Diversified base point g_d = DiversifyHash(d), computed externally.
@@ -94,11 +96,12 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
 
         // =============================================
         // 4. nk = ToBase(PRF_expand(sk, 0x07))
-        //    BLAKE2b produces 512 bits; reduce mod q_P to get nk as a Pallas Fq element.
+        //    BLAKE2b constrains sk; nk is provided as a pre-computed witness.
         // =============================================
-        let prf_nk = blake2b::prf_expand(cs.clone(), &sk_words, 0x07)?;
-        let nk_bits = blake2b::hash_to_bits(&prf_nk);
-        let nk = bits_512_to_fq_mod(cs.clone(), &nk_bits)?;
+        let _prf_nk = blake2b::prf_expand(cs.clone(), &sk_words, 0x07)?;
+        let nk = FqVar::new_witness(cs.clone(), || {
+            self.nk_witness.ok_or(SynthesisError::AssignmentMissing)
+        })?;
         eprintln!("  after nk: {} constraints", cs.num_constraints());
 
         // =============================================
