@@ -91,6 +91,43 @@ fn main() {
     let (g_d_xy, pk_d_xy, nk_fq) = derive_address_components(&sk_bytes);
     let binding_hash = compute_binding_hash(name, bound_u_address);
 
+    // DEBUG: print reference values from out-of-circuit computation
+    {
+        use pasta_curves::pallas;
+
+        // ask hash (raw BLAKE2b output)
+        let prf_ask = blake2b_simd::Params::new()
+            .hash_length(64).personal(b"Zcash_ExpandSeed")
+            .hash(&[sk_bytes.as_slice(), &[0x06u8]].concat());
+        eprintln!("  [REF] ask hash: {}", hex::encode(prf_ask.as_bytes()));
+
+        // ak point
+        let ask = pallas::Scalar::from_uniform_bytes(&prf_ask.as_bytes().try_into().unwrap());
+        let sab = pallas::Point::hash_to_curve("z.cash:Orchard")(b"G");
+        let ak = sab * ask;
+        let ak_affine = ak.to_affine();
+        let ak_x_bytes: [u8; 32] = ff::PrimeField::to_repr(ak_affine.coordinates().unwrap().x());
+        let ak_y_bytes: [u8; 32] = ff::PrimeField::to_repr(ak_affine.coordinates().unwrap().y());
+        eprintln!("  [REF] ak.x: {}", hex::encode(ak_x_bytes));
+        eprintln!("  [REF] ak.y: {}", hex::encode(ak_y_bytes));
+
+        // nk
+        let nk_repr = ark_ff::PrimeField::into_bigint(nk_fq);
+        eprintln!("  [REF] nk:   {}", nk_repr);
+
+        // rivk hash
+        let prf_rivk = blake2b_simd::Params::new()
+            .hash_length(64).personal(b"Zcash_ExpandSeed")
+            .hash(&[sk_bytes.as_slice(), &[0x08u8]].concat());
+        eprintln!("  [REF] rivk hash: {}", hex::encode(prf_rivk.as_bytes()));
+
+        // pk_d
+        let pk_d_x_repr = ark_ff::PrimeField::into_bigint(pk_d_xy.0);
+        let pk_d_y_repr = ark_ff::PrimeField::into_bigint(pk_d_xy.1);
+        eprintln!("  [REF] pk_d.x: {}", pk_d_x_repr);
+        eprintln!("  [REF] pk_d.y: {}", pk_d_y_repr);
+    }
+
     let circuit = ZnsBindingCircuit {
         sk: Some(sk_bytes),
         nk_witness: Some(nk_fq),
@@ -375,6 +412,360 @@ mod tests {
         let pk_d_affine = pallas::Affine::from_bytes(&pk_d_bytes).unwrap();
         eprintln!("pk_d from orchard: {}", hex::encode(pk_d_bytes));
         eprintln!("Test passed — all intermediate values match orchard crate.");
+    }
+
+    /// Test scalar multiplication correctness for small and medium scalars.
+    #[test]
+    fn test_scalar_mul_small() {
+        use pasta_curves::pallas;
+        use gadgets::nonnative_point::PallasPointVar;
+
+        // Use SpendAuthBase as our test base point.
+        let base_point = pallas::Point::hash_to_curve("z.cash:Orchard")(b"G");
+        let base_affine = base_point.to_affine();
+        let base_x = PallasFq::from_le_bytes_mod_order(
+            &ff::PrimeField::to_repr(base_affine.coordinates().unwrap().x()),
+        );
+        let base_y = PallasFq::from_le_bytes_mod_order(
+            &ff::PrimeField::to_repr(base_affine.coordinates().unwrap().y()),
+        );
+
+        // Test with scalar = 5 (small, 3 bits)
+        for (scalar_val, label) in [(5u64, "5"), (255, "255"), (12345, "12345")] {
+            let cs = ConstraintSystem::<NativeFr>::new_ref();
+            let base_var = PallasPointVar::constant(cs.clone(), base_x, base_y).unwrap();
+
+            // Create LE bit decomposition of the scalar.
+            let num_bits = 16; // enough for our test values
+            let bits: Vec<Boolean<NativeFr>> = (0..num_bits)
+                .map(|i| {
+                    Boolean::new_witness(cs.clone(), || {
+                        Ok((scalar_val >> i) & 1 == 1)
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+
+            let result = PallasPointVar::scalar_mul(cs.clone(), &bits, &base_var).unwrap();
+            assert!(cs.is_satisfied().unwrap(), "scalar_mul constraints not satisfied for scalar={}", label);
+
+            // Compare with out-of-circuit computation.
+            let expected_point = base_point * pallas::Scalar::from(scalar_val);
+            let expected_affine = expected_point.to_affine();
+            let expected_x = PallasFq::from_le_bytes_mod_order(
+                &ff::PrimeField::to_repr(expected_affine.coordinates().unwrap().x()),
+            );
+            let expected_y = PallasFq::from_le_bytes_mod_order(
+                &ff::PrimeField::to_repr(expected_affine.coordinates().unwrap().y()),
+            );
+
+            let circuit_x = result.x.value().unwrap();
+            let circuit_y = result.y.value().unwrap();
+
+            eprintln!("[scalar={}] expected x: {}", label, ark_ff::BigInteger256::from(expected_x));
+            eprintln!("[scalar={}] circuit  x: {}", label, ark_ff::BigInteger256::from(circuit_x));
+            eprintln!("[scalar={}] x match: {}", label, circuit_x == expected_x);
+            eprintln!("[scalar={}] y match: {}", label, circuit_y == expected_y);
+
+            assert_eq!(circuit_x, expected_x, "scalar_mul x mismatch for scalar={}", label);
+            assert_eq!(circuit_y, expected_y, "scalar_mul y mismatch for scalar={}", label);
+        }
+        eprintln!("All small scalar mul tests passed ✓");
+    }
+
+    /// Test scalar multiplication with the actual 512-bit ask value.
+    #[test]
+    fn test_scalar_mul_512bit() {
+        use pasta_curves::pallas;
+        use gadgets::nonnative_point::PallasPointVar;
+
+        let sk: [u8; 32] = [
+            0x42, 0x13, 0x37, 0xAB, 0xCD, 0xEF, 0x01, 0x23,
+            0x45, 0x67, 0x89, 0x0A, 0xBC, 0xDE, 0xF0, 0x12,
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        ];
+
+        // Compute ask via BLAKE2b.
+        let prf = blake2b_simd::Params::new()
+            .hash_length(64)
+            .personal(b"Zcash_ExpandSeed")
+            .hash(&[sk.as_slice(), &[0x06u8]].concat());
+        let ask_bytes: [u8; 64] = prf.as_bytes().try_into().unwrap();
+
+        // Out-of-circuit: [ask] * G using pasta_curves.
+        let ask_scalar = pallas::Scalar::from_uniform_bytes(&ask_bytes);
+        let base_point = pallas::Point::hash_to_curve("z.cash:Orchard")(b"G");
+        let expected = base_point * ask_scalar;
+        let expected_affine = expected.to_affine();
+        let expected_x = PallasFq::from_le_bytes_mod_order(
+            &ff::PrimeField::to_repr(expected_affine.coordinates().unwrap().x()),
+        );
+        let expected_y = PallasFq::from_le_bytes_mod_order(
+            &ff::PrimeField::to_repr(expected_affine.coordinates().unwrap().y()),
+        );
+
+        // In-circuit: 512-bit scalar mul.
+        let cs = ConstraintSystem::<NativeFr>::new_ref();
+        let base_x = PallasFq::from_le_bytes_mod_order(
+            &ff::PrimeField::to_repr(base_point.to_affine().coordinates().unwrap().x()),
+        );
+        let base_y = PallasFq::from_le_bytes_mod_order(
+            &ff::PrimeField::to_repr(base_point.to_affine().coordinates().unwrap().y()),
+        );
+        let base_var = PallasPointVar::constant(cs.clone(), base_x, base_y).unwrap();
+
+        // Decompose ask_bytes to 512 LE bits.
+        let bits: Vec<Boolean<NativeFr>> = (0..512)
+            .map(|i| {
+                let byte_idx = i / 8;
+                let bit_idx = i % 8;
+                let bit = (ask_bytes[byte_idx] >> bit_idx) & 1 == 1;
+                Boolean::new_witness(cs.clone(), || Ok(bit))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let result = PallasPointVar::scalar_mul(cs.clone(), &bits, &base_var).unwrap();
+
+        let circuit_x = result.x.value().unwrap();
+        let circuit_y = result.y.value().unwrap();
+
+        eprintln!("[512bit] expected x: {}", ark_ff::BigInteger256::from(expected_x));
+        eprintln!("[512bit] circuit  x: {}", ark_ff::BigInteger256::from(circuit_x));
+        eprintln!("[512bit] x match: {}", circuit_x == expected_x);
+        eprintln!("[512bit] y match: {}", circuit_y == expected_y);
+        eprintln!("[512bit] satisfied: {}", cs.is_satisfied().unwrap());
+
+        assert_eq!(circuit_x, expected_x, "512-bit scalar mul x mismatch");
+        assert_eq!(circuit_y, expected_y, "512-bit scalar mul y mismatch");
+        assert!(cs.is_satisfied().unwrap(), "512-bit scalar mul constraints not satisfied");
+    }
+
+    /// Compute ivk out-of-circuit using the raw Sinsemilla algorithm
+    /// and compare with the circuit's ivk.
+    #[test]
+    fn test_commit_ivk_reference() {
+        use ff::{PrimeField as FfPrimeField, PrimeFieldBits};
+        use group::{Curve, Group};
+        use pasta_curves::pallas;
+
+        let sk: [u8; 32] = [
+            0x42, 0x13, 0x37, 0xAB, 0xCD, 0xEF, 0x01, 0x23,
+            0x45, 0x67, 0x89, 0x0A, 0xBC, 0xDE, 0xF0, 0x12,
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        ];
+
+        // --- Derive ak, nk, rivk from sk ---
+        let prf_ask = blake2b_simd::Params::new()
+            .hash_length(64).personal(b"Zcash_ExpandSeed")
+            .hash(&[sk.as_slice(), &[0x06u8]].concat());
+        let ask = pallas::Scalar::from_uniform_bytes(&prf_ask.as_bytes().try_into().unwrap());
+        let sab = pallas::Point::hash_to_curve("z.cash:Orchard")(b"G");
+        let ak_point = sab * ask;
+        let ak_x: pallas::Base = *ak_point.to_affine().coordinates().unwrap().x();
+
+        let prf_nk = blake2b_simd::Params::new()
+            .hash_length(64).personal(b"Zcash_ExpandSeed")
+            .hash(&[sk.as_slice(), &[0x07u8]].concat());
+        let nk = pallas::Base::from_uniform_bytes(&prf_nk.as_bytes().try_into().unwrap());
+
+        let prf_rivk = blake2b_simd::Params::new()
+            .hash_length(64).personal(b"Zcash_ExpandSeed")
+            .hash(&[sk.as_slice(), &[0x08u8]].concat());
+        let rivk = pallas::Scalar::from_uniform_bytes(&prf_rivk.as_bytes().try_into().unwrap());
+
+        // --- Build the 520-bit message: I2LEBSP_255(ak.x) || I2LEBSP_255(nk) || 0^10 ---
+        let ak_bits: Vec<bool> = ak_x.to_le_bits().into_iter().take(255).collect();
+        let nk_bits: Vec<bool> = nk.to_le_bits().into_iter().take(255).collect();
+        let mut msg_bits: Vec<bool> = Vec::with_capacity(520);
+        msg_bits.extend_from_slice(&ak_bits);
+        msg_bits.extend_from_slice(&nk_bits);
+        msg_bits.extend(std::iter::repeat(false).take(10)); // pad to 520
+        assert_eq!(msg_bits.len(), 520);
+
+        // --- Use the actual sinsemilla crate's CommitDomain ---
+        // Add sinsemilla as a dependency and call it directly
+        // For now, replicate exactly what the sinsemilla crate does:
+        // It uses PRECOMPUTED S-table entries via from_xy, and incomplete addition
+        // via (acc + S_chunk) + acc pattern.
+        use pasta_curves::arithmetic::CurveAffine;
+
+        let q = pallas::Point::hash_to_curve("z.cash:SinsemillaQ")(b"z.cash:Orchard-CommitIvk-M");
+        let mut acc = q;
+        for chunk in msg_bits.chunks(10) {
+            let chunk_val: u32 = chunk.iter().enumerate()
+                .map(|(i, &b)| if b { 1u32 << i } else { 0 })
+                .sum();
+            // Use the same approach as the sinsemilla crate: hash_to_curve -> to_affine -> from_xy
+            let s_proj = pallas::Point::hash_to_curve("z.cash:SinsemillaS")(
+                &chunk_val.to_le_bytes(),
+            );
+            let s_affine = s_proj.to_affine();
+            let s_coords = s_affine.coordinates().unwrap();
+            let s_point = pallas::Affine::from_xy(*s_coords.x(), *s_coords.y()).unwrap();
+            // (acc + S_chunk) + acc  (incomplete addition pattern)
+            let old_acc = acc;
+            acc = (acc + s_point) + old_acc;
+        }
+
+        // --- Sinsemilla commit: hash_point + [rivk] * R ---
+        let r_base = pallas::Point::hash_to_curve("z.cash:Orchard-CommitIvk-r")(b"");
+        let commit_point = acc + r_base * rivk;
+
+        // ivk = x-coordinate
+        let ivk_ref: pallas::Base = *commit_point.to_affine().coordinates().unwrap().x();
+
+        // Convert to arkworks PallasFq for comparison
+        let ivk_fq = PallasFq::from_le_bytes_mod_order(
+            &ff::PrimeField::to_repr(&ivk_ref),
+        );
+        let ivk_repr = ark_ff::PrimeField::into_bigint(ivk_fq);
+        eprintln!("[REF] ivk (sinsemilla): {}", ivk_repr);
+
+        // Compare with the circuit's ivk from the debug output
+        // Circuit reported: 14874307776488897617966116555048561529990581765238354550869242546432540106343
+        // If they match, the circuit's Sinsemilla is correct and the bug is elsewhere.
+        // If they don't match, the circuit's Sinsemilla has a bug.
+
+        // --- Compare inputs to commit_ivk: our values vs orchard crate's FVK ---
+        use orchard::keys::{SpendingKey, FullViewingKey, Scope};
+        let osk = SpendingKey::from_bytes(sk).unwrap();
+        let fvk = FullViewingKey::from(&osk);
+        let fvk_bytes = fvk.to_bytes(); // 96 bytes: ak(32) || nk(32) || rivk(32)
+
+        // FVK ak: compressed point (x-coordinate with sign bit in MSB of last byte)
+        let fvk_ak_bytes: [u8; 32] = fvk_bytes[..32].try_into().unwrap();
+        let mut fvk_ak_x_bytes = fvk_ak_bytes;
+        fvk_ak_x_bytes[31] &= 0x7F; // clear sign bit to get pure x-coordinate
+
+        // Our ak.x
+        let our_ak_x_bytes: [u8; 32] = FfPrimeField::to_repr(&ak_x);
+
+        eprintln!("[CMP] our ak.x:  {}", hex::encode(our_ak_x_bytes));
+        eprintln!("[CMP] fvk ak.x:  {}", hex::encode(fvk_ak_x_bytes));
+        eprintln!("[CMP] ak.x match: {}", our_ak_x_bytes == fvk_ak_x_bytes);
+
+        // FVK nk
+        let fvk_nk_bytes: [u8; 32] = fvk_bytes[32..64].try_into().unwrap();
+        let our_nk_bytes: [u8; 32] = FfPrimeField::to_repr(&nk);
+        eprintln!("[CMP] our nk:    {}", hex::encode(our_nk_bytes));
+        eprintln!("[CMP] fvk nk:    {}", hex::encode(fvk_nk_bytes));
+        eprintln!("[CMP] nk match:  {}", our_nk_bytes == fvk_nk_bytes);
+
+        // FVK rivk
+        let fvk_rivk_bytes: [u8; 32] = fvk_bytes[64..96].try_into().unwrap();
+        let our_rivk_bytes: [u8; 32] = FfPrimeField::to_repr(&rivk);
+        eprintln!("[CMP] our rivk:  {}", hex::encode(our_rivk_bytes));
+        eprintln!("[CMP] fvk rivk:  {}", hex::encode(fvk_rivk_bytes));
+        eprintln!("[CMP] rivk match: {}", our_rivk_bytes == fvk_rivk_bytes);
+
+        // Now compute ivk using the FVK's values instead of ours
+        let fvk_ak_point = pallas::Point::from(
+            pallas::Affine::from_bytes(&fvk_ak_bytes).unwrap()
+        );
+        let fvk_ak_x: pallas::Base = *fvk_ak_point.to_affine().coordinates().unwrap().x();
+        let fvk_nk = <pallas::Base as FfPrimeField>::from_repr_vartime(fvk_nk_bytes).unwrap();
+        let fvk_rivk = <pallas::Scalar as FfPrimeField>::from_repr_vartime(fvk_rivk_bytes).unwrap();
+
+        // Rebuild message with FVK values
+        let fvk_ak_bits: Vec<bool> = fvk_ak_x.to_le_bits().into_iter().take(255).collect();
+        let fvk_nk_bits: Vec<bool> = fvk_nk.to_le_bits().into_iter().take(255).collect();
+        let mut fvk_msg: Vec<bool> = Vec::with_capacity(520);
+        fvk_msg.extend_from_slice(&fvk_ak_bits);
+        fvk_msg.extend_from_slice(&fvk_nk_bits);
+        fvk_msg.extend(std::iter::repeat(false).take(10));
+
+        // Sinsemilla with FVK values
+        let mut fvk_acc = q;
+        for chunk in fvk_msg.chunks(10) {
+            let chunk_val: u32 = chunk.iter().enumerate()
+                .map(|(i, &b)| if b { 1u32 << i } else { 0 })
+                .sum();
+            let s_proj = pallas::Point::hash_to_curve("z.cash:SinsemillaS")(
+                &chunk_val.to_le_bytes(),
+            );
+            let s_affine = s_proj.to_affine();
+            let s_coords = s_affine.coordinates().unwrap();
+            let s_point = pallas::Affine::from_xy(*s_coords.x(), *s_coords.y()).unwrap();
+            let old_acc = fvk_acc;
+            fvk_acc = (fvk_acc + s_point) + old_acc;
+        }
+        let fvk_commit = fvk_acc + r_base * fvk_rivk;
+        let fvk_ivk: pallas::Base = *fvk_commit.to_affine().coordinates().unwrap().x();
+        let fvk_ivk_fq = PallasFq::from_le_bytes_mod_order(
+            &FfPrimeField::to_repr(&fvk_ivk),
+        );
+        eprintln!("[CMP] ivk (our inputs):  {}", ark_ff::PrimeField::into_bigint(ivk_fq));
+        eprintln!("[CMP] ivk (fvk inputs):  {}", ark_ff::PrimeField::into_bigint(fvk_ivk_fq));
+
+        // Verify FVK-derived ivk produces correct pk_d
+        let addr = fvk.address_at(0u32, Scope::External);
+        let raw = addr.to_raw_address_bytes();
+        let d: [u8; 11] = raw[..11].try_into().unwrap();
+        let pk_d_bytes: [u8; 32] = raw[11..43].try_into().unwrap();
+
+        let g_d = pallas::Point::hash_to_curve("z.cash:Orchard-gd")(&d);
+
+        // The orchard crate converts ivk (Fq) to scalar (Fr) via mod_r_p:
+        //   pallas::Scalar::from_repr(x.to_repr()).unwrap()
+        // q_P (base) is slightly smaller than r_P (scalar) for Pallas,
+        // so from_repr always succeeds (every Fq value < r_P).
+        let ivk_repr: [u8; 32] = FfPrimeField::to_repr(&fvk_ivk);
+        let fvk_ivk_scalar = <pallas::Scalar as FfPrimeField>::from_repr(ivk_repr);
+        eprintln!("[CMP] ivk as scalar (from_repr): is_some={}", bool::from(fvk_ivk_scalar.is_some()));
+        let fvk_ivk_scalar = fvk_ivk_scalar.unwrap();
+        eprintln!("[CMP] ivk scalar repr: {}", hex::encode(FfPrimeField::to_repr(&fvk_ivk_scalar)));
+        eprintln!("[CMP] ivk base   repr: {}", hex::encode(ivk_repr));
+
+        // Also print g_d and pk_d for debugging
+        let gd_affine = g_d.to_affine();
+        eprintln!("[CMP] g_d.x: {}", hex::encode(FfPrimeField::to_repr(gd_affine.coordinates().unwrap().x())));
+        eprintln!("[CMP] g_d.y: {}", hex::encode(FfPrimeField::to_repr(gd_affine.coordinates().unwrap().y())));
+        eprintln!("[CMP] pk_d (from addr): {}", hex::encode(pk_d_bytes));
+
+        let pk_d_computed = g_d * fvk_ivk_scalar;
+        let computed_affine = pk_d_computed.to_affine();
+        eprintln!("[CMP] pk_d computed.x: {}", hex::encode(FfPrimeField::to_repr(computed_affine.coordinates().unwrap().x())));
+        eprintln!("[CMP] pk_d computed.y: {}", hex::encode(FfPrimeField::to_repr(computed_affine.coordinates().unwrap().y())));
+        let pk_d_from_addr = pallas::Point::from(
+            pallas::Affine::from_bytes(&pk_d_bytes).unwrap()
+        );
+        let computed_affine = pk_d_computed.to_affine();
+        let expected_affine = pk_d_from_addr.to_affine();
+        let x_match = computed_affine.coordinates().unwrap().x() ==
+                      expected_affine.coordinates().unwrap().x();
+
+        eprintln!("[CMP] fvk ivk produces correct pk_d: {}", x_match);
+
+        // --- Use the REAL sinsemilla crate to compute ivk ---
+        let real_domain = sinsemilla::CommitDomain::new("z.cash:Orchard-CommitIvk");
+        let real_ivk = real_domain.short_commit(
+            fvk_ak_x.to_le_bits().iter().by_vals().take(255)
+                .chain(fvk_nk.to_le_bits().iter().by_vals().take(255)),
+            &fvk_rivk,
+        ).unwrap();
+        let real_ivk_fq = PallasFq::from_le_bytes_mod_order(
+            &FfPrimeField::to_repr(&real_ivk),
+        );
+        eprintln!("[CMP] ivk (real sinsemilla crate): {}", ark_ff::PrimeField::into_bigint(real_ivk_fq));
+
+        // Compare real crate ivk with ours
+        let real_matches_ours = FfPrimeField::to_repr(&real_ivk) == FfPrimeField::to_repr(&fvk_ivk);
+        eprintln!("[CMP] real sinsemilla matches ours: {}", real_matches_ours);
+
+        // Does the REAL ivk produce correct pk_d?
+        let real_ivk_scalar = <pallas::Scalar as FfPrimeField>::from_repr(
+            FfPrimeField::to_repr(&real_ivk)
+        ).unwrap();
+        let real_pk_d = g_d * real_ivk_scalar;
+        let real_pk_d_affine = real_pk_d.to_affine();
+        let real_x_match = real_pk_d_affine.coordinates().unwrap().x() ==
+                           expected_affine.coordinates().unwrap().x();
+        eprintln!("[CMP] REAL ivk produces correct pk_d: {}", real_x_match);
+
+        assert!(real_x_match, "Even the real sinsemilla crate's ivk doesn't produce correct pk_d");
     }
 
     #[test]

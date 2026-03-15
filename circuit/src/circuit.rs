@@ -83,6 +83,11 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
         let ask_bits = blake2b::hash_to_bits(&prf_ask);
         eprintln!("  after BLAKE2b(ask): {} constraints", cs.num_constraints());
 
+        // DEBUG: print ask bits as bytes
+        if let Some(ask_bytes) = bits_to_bytes(&ask_bits) {
+            eprintln!("  [DBG] ask hash: {}", hex::encode(&ask_bytes));
+        }
+
         // =============================================
         // 3. Derive ak = [ask] * SpendAuthBase
         // =============================================
@@ -94,6 +99,15 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
         let ak_point = PallasPointVar::scalar_mul(cs.clone(), &ask_bits, &spend_auth_base)?;
         eprintln!("  after ak scalar mul: {} constraints", cs.num_constraints());
 
+        // DEBUG: print ak point coordinates as hex LE bytes for comparison with [REF]
+        if let (Some(ak_x), Some(ak_y)) = (ak_point.x.value().ok(), ak_point.y.value().ok()) {
+            use ark_ff::BigInteger;
+            let ak_x_bytes = ark_ff::BigInteger256::from(ak_x).to_bytes_le();
+            let ak_y_bytes = ark_ff::BigInteger256::from(ak_y).to_bytes_le();
+            eprintln!("  [DBG] ak.x (hex LE): {}", hex::encode(&ak_x_bytes));
+            eprintln!("  [DBG] ak.y (hex LE): {}", hex::encode(&ak_y_bytes));
+        }
+
         // =============================================
         // 4. nk = ToBase(PRF_expand(sk, 0x07))
         //    BLAKE2b constrains sk; nk is provided as a pre-computed witness.
@@ -104,6 +118,11 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
         })?;
         eprintln!("  after nk: {} constraints", cs.num_constraints());
 
+        // DEBUG: print nk value
+        if let Some(nk_val) = nk.value().ok() {
+            eprintln!("  [DBG] nk (circuit): {}", ark_ff::BigInteger256::from(nk_val));
+        }
+
         // =============================================
         // 5. Derive rivk bits via BLAKE2b
         //    Used as scalar for blinding in SinsemillaCommit.
@@ -111,6 +130,11 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
         let prf_rivk = blake2b::prf_expand(cs.clone(), &sk_words, 0x08)?;
         let rivk_bits = blake2b::hash_to_bits(&prf_rivk);
         eprintln!("  after rivk: {} constraints", cs.num_constraints());
+
+        // DEBUG: print rivk bits as bytes
+        if let Some(rivk_bytes) = bits_to_bytes(&rivk_bits) {
+            eprintln!("  [DBG] rivk hash: {}", hex::encode(&rivk_bytes));
+        }
 
         // =============================================
         // 6. Compute ivk = SinsemillaShortCommit(
@@ -123,13 +147,10 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
         let nk_bits = nk.to_bits_le()?;
 
         // Message = I2LEBSP_255(ak_x) || I2LEBSP_255(nk) = 510 bits.
-        // Pad to 520 bits (multiple of 10) for Sinsemilla.
-        let mut commit_msg_bits = Vec::with_capacity(520);
+        // 510 is already a multiple of 10 (51 chunks), no padding needed.
+        let mut commit_msg_bits = Vec::with_capacity(510);
         commit_msg_bits.extend_from_slice(&ak_x_bits[..255]);
         commit_msg_bits.extend_from_slice(&nk_bits[..255]);
-        for _ in 0..10 {
-            commit_msg_bits.push(Boolean::constant(false));
-        }
 
         let ivk = sinsemilla_short_commit(
             cs.clone(),
@@ -138,6 +159,11 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
             &commit_msg_bits,
             &rivk_bits,
         )?;
+
+        // DEBUG: print ivk value
+        if let Some(ivk_val) = ivk.value().ok() {
+            eprintln!("  [DBG] ivk (circuit): {}", ark_ff::BigInteger256::from(ivk_val));
+        }
 
         // =============================================
         // 7. Compute pk_d = [ivk] * g_d
@@ -154,6 +180,12 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
         let ivk_bits = ivk.to_bits_le()?;
         let pk_d_computed = PallasPointVar::scalar_mul(cs.clone(), &ivk_bits, &g_d_var)?;
 
+        // DEBUG: print pk_d_computed
+        if let (Some(cx), Some(cy)) = (pk_d_computed.x.value().ok(), pk_d_computed.y.value().ok()) {
+            eprintln!("  [DBG] pk_d_computed.x: {}", ark_ff::BigInteger256::from(cx));
+            eprintln!("  [DBG] pk_d_computed.y: {}", ark_ff::BigInteger256::from(cy));
+        }
+
         // =============================================
         // 8. Allocate pk_d as public input and enforce equality
         // =============================================
@@ -162,6 +194,13 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
             self.pk_d.map(|(x, _)| x),
             self.pk_d.map(|(_, y)| y),
         )?;
+
+        // DEBUG: print pk_d (expected)
+        if let (Some(ex), Some(ey)) = (pk_d_var.x.value().ok(), pk_d_var.y.value().ok()) {
+            eprintln!("  [DBG] pk_d_expected.x: {}", ark_ff::BigInteger256::from(ex));
+            eprintln!("  [DBG] pk_d_expected.y: {}", ark_ff::BigInteger256::from(ey));
+        }
+
         pk_d_computed.enforce_equal(&pk_d_var)?;
 
         // =============================================
@@ -187,6 +226,25 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
 
         Ok(())
     }
+}
+
+// ============================
+// Debug helpers
+// ============================
+
+/// Extract Boolean bit values as bytes (for debug printing).
+fn bits_to_bytes<F: ark_ff::PrimeField>(bits: &[Boolean<F>]) -> Option<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(bits.len() / 8);
+    for chunk in bits.chunks(8) {
+        let mut byte = 0u8;
+        for (i, bit) in chunk.iter().enumerate() {
+            if bit.value().ok()? {
+                byte |= 1 << i;
+            }
+        }
+        bytes.push(byte);
+    }
+    Some(bytes)
 }
 
 // ============================

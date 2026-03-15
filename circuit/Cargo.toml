@@ -42,3 +42,6 @@ ff = "0.13"
 hex = "0.4"
 base64 = "0.22"
 rand = "0.8"
+
+# Sinsemilla primitives (for testing)
+sinsemilla = "0.1"
