@@ -3,17 +3,23 @@
 // Scans confirmed blocks, trial-decrypts Orchard notes, and writes
 // ZNS registrations to SQLite.
 
+mod service;
+
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use orchard::keys::PreparedIncomingViewingKey;
 use orchard::note_encryption::{CompactAction, OrchardDomain};
 use rusqlite::Connection;
+use tonic::transport::Server;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
 use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, TxFilter};
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_primitives::consensus::BranchId;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, Network};
+
+use service::{ZnsServer, ZnsServiceServer};
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -22,10 +28,11 @@ const DB_PATH: &str = "zns.db";
 const BIRTHDAY: u64 = 3_265_357;
 const UIVK_STR: &str = "uivk1cpxzaa8rck580qfekjd3xma32zzk4mwm0p4c99qglpy4atgw74up0lexqvz5tq2wwj7s980c8fe9s98x7g9t9l603pjj6rsp44ufdj6dh0u3d28xm8rmcjdlej40unnvjrwtex45er8uxy3jk6tt22gu9a36t546kplsy280qq92ssz4sscev8529k347r8v2x3xzduuldjdltjjjy02sgv59hgjx2fud6u6y70nvu6g3h9p4n20gtcmmhjwsvqv2ykr2jlc3ert3qa4n99d7p0mg8g743jm5y96frmnu4aheyh6wf3wh9g4hz8jhy70s9xda9rmyg0aqdnec44j84hwjwxar9";
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
+const GRPC_PORT: u16 = 50051;
 
 // ── Database ─────────────────────────────────────────────────────────────────
 
-fn open_db() -> rusqlite::Result<Connection> {
+fn open_db() -> rusqlite::Result<Arc<Mutex<Connection>>> {
     let conn = Connection::open(DB_PATH)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS registrations (
@@ -35,7 +42,7 @@ fn open_db() -> rusqlite::Result<Connection> {
             height  INTEGER NOT NULL
         );",
     )?;
-    Ok(conn)
+    Ok(Arc::new(Mutex::new(conn)))
 }
 
 fn is_registered(db: &Connection, name: &str, ua: &str) -> bool {
@@ -106,7 +113,7 @@ fn parse_memo(memo: &[u8; 512]) -> Option<Registration> {
 
 async fn run_block_sync(
     mut client: CompactTxStreamerClient<tonic::transport::Channel>,
-    db: &Connection,
+    db: Arc<Mutex<Connection>>,
     pivk: &PreparedIncomingViewingKey,
 ) {
     let mut last_scanned_height = BIRTHDAY - 100;
@@ -213,17 +220,19 @@ async fn run_block_sync(
                                                 &domain, pivk, action,
                                             )
                                             && let Some(reg) = parse_memo(&memo)
-                                            && !is_registered(db, &reg.name, &reg.ua)
                                         {
-                                            if let Err(e) = create_registration(
-                                                db, &reg.name, &reg.ua, &txid_hash, height,
-                                            ) {
-                                                eprintln!("DB error: {e}");
-                                            } else {
-                                                println!(
-                                                    "Registered: {} → {} (height {})",
-                                                    reg.name, reg.ua, height
-                                                );
+                                            let db = db.lock().unwrap();
+                                            if !is_registered(&db, &reg.name, &reg.ua) {
+                                                if let Err(e) = create_registration(
+                                                    &db, &reg.name, &reg.ua, &txid_hash, height,
+                                                ) {
+                                                    eprintln!("DB error: {e}");
+                                                } else {
+                                                    println!(
+                                                        "Registered: {} → {} (height {})",
+                                                        reg.name, reg.ua, height
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -270,7 +279,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connecting to {LWD_URL}...");
     let client = CompactTxStreamerClient::connect(LWD_URL).await?;
 
-    run_block_sync(client, &db, &pivk).await;
+    // Start gRPC server and block indexer concurrently
+    let grpc_addr = format!("0.0.0.0:{GRPC_PORT}").parse()?;
+    let grpc_server = Server::builder()
+        .add_service(ZnsServiceServer::new(ZnsServer::new(Arc::clone(&db))))
+        .serve(grpc_addr);
+
+    println!("gRPC server listening on {grpc_addr}");
+
+    tokio::select! {
+        result = grpc_server => {
+            eprintln!("gRPC server exited: {result:?}");
+        }
+        _ = run_block_sync(client, db, &pivk) => {
+            eprintln!("Block sync exited unexpectedly");
+        }
+    }
 
     Ok(())
 }
