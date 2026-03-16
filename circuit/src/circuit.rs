@@ -24,6 +24,10 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 
 use crate::fields::PallasFq;
 use crate::gadgets::blake2b;
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 use crate::gadgets::nonnative_point::{FqVar, PallasPointVar};
 use crate::gadgets::sinsemilla::{sinsemilla_short_commit, SinsemillaTable};
 use crate::gadgets::word64::Word64;
@@ -85,7 +89,7 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
 
         // DEBUG: print ask bits as bytes
         if let Some(ask_bytes) = bits_to_bytes(&ask_bits) {
-            eprintln!("  [DBG] ask hash: {}", hex::encode(&ask_bytes));
+            eprintln!("  [DBG] ask hash: {}", bytes_to_hex(&ask_bytes));
         }
 
         // =============================================
@@ -104,8 +108,8 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
             use ark_ff::BigInteger;
             let ak_x_bytes = ark_ff::BigInteger256::from(ak_x).to_bytes_le();
             let ak_y_bytes = ark_ff::BigInteger256::from(ak_y).to_bytes_le();
-            eprintln!("  [DBG] ak.x (hex LE): {}", hex::encode(&ak_x_bytes));
-            eprintln!("  [DBG] ak.y (hex LE): {}", hex::encode(&ak_y_bytes));
+            eprintln!("  [DBG] ak.x (hex LE): {}", bytes_to_hex(&ak_x_bytes));
+            eprintln!("  [DBG] ak.y (hex LE): {}", bytes_to_hex(&ak_y_bytes));
         }
 
         // =============================================
@@ -133,7 +137,7 @@ impl ConstraintSynthesizer<NativeFr> for ZnsBindingCircuit {
 
         // DEBUG: print rivk bits as bytes
         if let Some(rivk_bytes) = bits_to_bytes(&rivk_bits) {
-            eprintln!("  [DBG] rivk hash: {}", hex::encode(&rivk_bytes));
+            eprintln!("  [DBG] rivk hash: {}", bytes_to_hex(&rivk_bytes));
         }
 
         // =============================================

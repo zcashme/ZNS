@@ -122,13 +122,50 @@ is computed out-of-circuit and exposed as 256 public input bits.
 No in-circuit constraints — Groth16's verification equation binds the
 proof to this specific (name, address) pair, preventing replay.
 
+## Scalar handling
+
+`ask` (step 2) and `rivk` (step 5) are used as raw 512-bit values for
+scalar multiplication without explicit mod-reduction. This is sound because
+`[x]G = [x mod r]G` for any group of order `r` — the group operation
+performs the reduction implicitly.
+
+`nk` (step 4) requires explicit reduction because it is used as a field
+element (input to Sinsemilla), not as a scalar for point multiplication.
+
+## Verifier responsibilities
+
+The circuit does **not** prove:
+- That `g_d` is correctly derived from a diversifier (`g_d = DiversifyHash(d)`)
+- That `g_d` or `pk_d` are valid points on the Pallas curve
+- That the address is well-formed
+
+The verifier must independently compute `g_d` and `pk_d` from the claimed
+unified address before checking the proof. Curve membership and correct
+derivation are the verifier's responsibility.
+
+## Security of binding_hash
+
+`binding_hash` is exposed as 256 public input bits with no in-circuit
+constraints. This is sound because Groth16's verification equation binds
+all public inputs into the pairing check — a proof generated for one set
+of public inputs will not verify against a different set. The hash
+therefore acts as an implicit commitment: the proof is only valid for the
+specific `(name, address)` pair that produced the hash.
+
 ## Cost profile
 
-| Component | Dominant cost |
-|---|---|
-| 3 × BLAKE2b-512 | Word64 decomposition, G-mixing rounds |
-| 2 × Non-native scalar mul | Pallas arithmetic over BLS12-381 Fq |
-| 1 × Sinsemilla commit | Lookup-based hash on non-native curve |
+| Component | Constraints | Cumulative |
+|---|---|---|
+| 3 × BLAKE2b-512 | ~135k each | ~406k |
+| ak scalar mul ([ask] × SpendAuthBase) | ~5.9M | ~6.0M |
+| nk ToBase reduction (512b → Fq) | ~135k | ~6.2M |
+| Sinsemilla CommitIvk | ~3.2M | ~9.4M |
+| ivk scalar mul ([ivk] × g_d) | ~5.9M | ~15.3M |
+| pk_d equality + binding_hash | ~1M | ~16.4M |
+| **Total** | | **~16.4M constraints** |
+
+324 public input scalars (BLS12-381 Fr), ~16.2M witness variables.
 
 The non-native field arithmetic (embedding Pallas inside BLS12-381) is the
-primary constraint cost.
+primary constraint cost — the two scalar multiplications alone account for
+~72% of total constraints.

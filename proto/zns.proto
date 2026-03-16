@@ -6,17 +6,58 @@ service ZnsService {
   rpc GetZnsRecord (ZnsQuery) returns (ZnsRecord);
 }
 
-// Input: resolve by name or by address.
+enum RecordType {
+  REGISTRATION = 0;  // default
+  LISTING      = 1;
+  BIDS         = 2;
+  ALL          = 3;
+}
+
+// Input: resolve by name or by address, and what you want back.
 message ZnsQuery {
   oneof query {
     string name    = 1;  // "alice", "alice.zec", "alice.zcash"
     string address = 2;  // "u1..."
   }
+  RecordType record_type = 3;  // defaults to REGISTRATION
 }
 
-// Output: the canonical name/address pair.
-// One name per address — each UA can hold at most one registered name.
+// Output: everything the indexer knows.
 message ZnsRecord {
-  string name    = 1;
-  string address = 2;
+  string name = 1;
+
+  // Registration (empty if not registered)
+  Registration registration = 2;
+
+  // Listing (empty if not listed for sale)
+  Listing listing = 3;
+
+  // All bids on this name, ordered by bid_number
+  repeated Bid bids = 4;
+}
+
+message Registration {
+  string address = 1;
+  bytes  proof   = 2;
+  bytes  txid    = 3;
+  uint64 height  = 4;
+}
+
+message Listing {
+  uint64 min_price = 1;
+  uint64 buy_now   = 2;
+  uint64 expiry    = 3;
+  bytes  proof     = 4;
+  bytes  txid      = 5;
+  uint64 height    = 6;
+}
+
+message Bid {
+  uint64 bid_number = 1;
+  string address    = 2;
+  uint64 amount     = 3;
+  bytes  proof      = 4;
+  bytes  txid       = 5;
+  uint64 height     = 6;
+  bool   refunded   = 7;
 }
