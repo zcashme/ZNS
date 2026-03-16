@@ -13,8 +13,14 @@ zcash_keys = { version = "0.12", features = ["orchard"] }
 zcash_primitives = "0.26"
 zcash_protocol = "0.7"
 zip32 = "0.2"
+prost = "0.14"
+tonic-prost = "0.14"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", features = ["ring"], default-features = false }
 hex = "0.4"
 
+[build-dependencies]
+tonic-prost-build = "0.14"
+
 [dev-dependencies]
+tokio-stream = "0.1"
