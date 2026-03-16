@@ -1,0 +1,11 @@
+[package]
+name = "derive-address"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zcash_keys = { version = "0.5", features = ["orchard"] }
+zcash_protocol = "0.4"
+zcash_address = "0.7"
+zip321 = "0.2"
+base64 = "0.22"

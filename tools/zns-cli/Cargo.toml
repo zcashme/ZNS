@@ -1,0 +1,46 @@
+[package]
+name = "zns-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ZNS circuit (proof generation)
+zns-circuit = { path = "../../circuit", features = ["prover"] }
+
+# BIP39 seed derivation
+bip39 = "2.2"
+
+# Orchard key derivation
+orchard = "0.10"
+zip32 = "0.1"
+
+# Zcash address encoding
+zcash_keys = { version = "0.5", features = ["orchard"] }
+zcash_protocol = "0.4"
+zcash_address = "0.7"
+
+# Pallas curve
+pasta_curves = { version = "0.5", features = ["alloc"] }
+group = "0.13"
+ff = "0.13"
+
+# Arkworks (for Groth16)
+ark-groth16 = "0.4"
+ark-bls12-381 = "0.4"
+ark-serialize = "0.4"
+ark-snark = "0.4"
+ark-std = "0.4"
+ark-ff = "0.4"
+ark-relations = "0.4"
+ark-r1cs-std = "0.4"
+
+# Hashing
+blake2b_simd = "1"
+
+# Encoding
+base64 = "0.22"
+base91 = "0.1"
+hex = "0.4"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
