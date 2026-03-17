@@ -10,17 +10,19 @@ pub fn open_db(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS registrations (
-            name    TEXT PRIMARY KEY,
-            ua      TEXT NOT NULL UNIQUE,
-            txid    TEXT NOT NULL,
-            height  INTEGER NOT NULL,
-            nonce   INTEGER NOT NULL DEFAULT 0
+            name      TEXT PRIMARY KEY,
+            ua        TEXT NOT NULL UNIQUE,
+            txid      TEXT NOT NULL,
+            height    INTEGER NOT NULL,
+            nonce     INTEGER NOT NULL DEFAULT 0,
+            signature TEXT
         );
         CREATE TABLE IF NOT EXISTS listings (
-            name    TEXT PRIMARY KEY REFERENCES registrations(name),
-            price   INTEGER NOT NULL,
-            txid    TEXT NOT NULL,
-            height  INTEGER NOT NULL
+            name      TEXT PRIMARY KEY REFERENCES registrations(name),
+            price     INTEGER NOT NULL,
+            txid      TEXT NOT NULL,
+            height    INTEGER NOT NULL,
+            signature TEXT NOT NULL
         );",
     )?;
     Ok(conn)
@@ -72,13 +74,14 @@ pub fn create_listing(
     db: &Connection,
     name: &str,
     price: u64,
+    signature: &str,
     txid: &[u8],
     height: u64,
 ) -> rusqlite::Result<()> {
     let txid_hex = txid.iter().rev().map(|b| format!("{b:02x}")).collect::<String>();
     db.execute(
-        "INSERT OR REPLACE INTO listings (name, price, txid, height) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![name, price as i64, txid_hex, height as i64],
+        "INSERT OR REPLACE INTO listings (name, price, signature, txid, height) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![name, price as i64, signature, txid_hex, height as i64],
     )?;
     Ok(())
 }
@@ -109,7 +112,11 @@ pub fn process_buy(
     tx.commit()
 }
 
-pub fn delete_listing(db: &Connection, name: &str) -> rusqlite::Result<()> {
+pub fn delete_listing(db: &Connection, name: &str, signature: &str) -> rusqlite::Result<()> {
+    db.execute(
+        "UPDATE registrations SET signature = ?1 WHERE name = ?2",
+        rusqlite::params![signature, name],
+    )?;
     db.execute("DELETE FROM listings WHERE name = ?1", [name])?;
     Ok(())
 }
@@ -118,13 +125,14 @@ pub fn update_address(
     db: &Connection,
     name: &str,
     new_ua: &str,
+    signature: &str,
     txid: &[u8],
     height: u64,
 ) -> rusqlite::Result<()> {
     let txid_hex = txid.iter().rev().map(|b| format!("{b:02x}")).collect::<String>();
     db.execute(
-        "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3 WHERE name = ?4",
-        rusqlite::params![new_ua, txid_hex, height as i64, name],
+        "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, signature = ?4 WHERE name = ?5",
+        rusqlite::params![new_ua, txid_hex, height as i64, signature, name],
     )?;
     Ok(())
 }

@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use base64::Engine;
 use orchard::keys::PreparedIncomingViewingKey;
 use orchard::note_encryption::{CompactAction, OrchardDomain};
 use rusqlite::Connection;
@@ -92,7 +93,8 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &[u
             if let Err(e) = registry::increment_nonce(db, &name, nonce) {
                 eprintln!("DB error (nonce): {e}"); return;
             }
-            match registry::create_listing(db, &name, price, txid, height) {
+            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&signature);
+            match registry::create_listing(db, &name, price, &sig_b64, txid, height) {
                 Ok(()) => println!("Listed: {name} for {price} zats (height {height})"),
                 Err(e) => eprintln!("DB error (list): {e}"),
             }
@@ -118,7 +120,8 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &[u
             if let Err(e) = registry::increment_nonce(db, &name, nonce) {
                 eprintln!("DB error (nonce): {e}"); return;
             }
-            match registry::delete_listing(db, &name) {
+            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&signature);
+            match registry::delete_listing(db, &name, &sig_b64) {
                 Ok(()) => println!("Delisted: {name} (height {height})"),
                 Err(e) => eprintln!("DB error (delist): {e}"),
             }
@@ -140,7 +143,8 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &[u
             if let Err(e) = registry::increment_nonce(db, &name, nonce) {
                 eprintln!("DB error (nonce): {e}"); return;
             }
-            match registry::update_address(db, &name, &new_ua, txid, height) {
+            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&signature);
+            match registry::update_address(db, &name, &new_ua, &sig_b64, txid, height) {
                 Ok(()) => println!("Updated: {name} → {new_ua} (height {height})"),
                 Err(e) => eprintln!("DB error (update): {e}"),
             }
