@@ -15,3 +15,5 @@ zcash_protocol = "0.7"
 zip32 = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", features = ["ring"], default-features = false }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
