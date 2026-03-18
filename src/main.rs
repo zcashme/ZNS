@@ -11,15 +11,21 @@
 //   UPDATE    — change the address behind a name (admin-signed)
 //   BUY       — purchase a listed name by sending sufficient ZEC
 
-mod decrypter;  // block streaming, trial decryption, action dispatch
+mod decrypter;  // block streaming and trial decryption
 mod memo;       // memo protocol: parsing, validation, signature verification
 mod registry;   // SQLite storage for registrations and listings
+mod rpc;        // JSON-RPC read-only API
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
+use base64::Engine;
+use rusqlite::Connection;
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::consensus::Network;
+
+use crate::memo::MemoAction;
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -28,6 +34,9 @@ const DB_PATH: &str = "zns.db";
 const BIRTHDAY: u64 = 3_901_175;
 const UFVK_STR: &str = "uviewtest1h075nwxk0s66hyw0gmy5l2gmr37eahe9ewzgu2lff90rc85mazdhc66udklmd2p7cqm3mg2up8487pusvh78dh89y7mzlfgdl57tncqxrwshhc2kf26js0ymdwd476r0v7qn6es0etgjeg3g0y3pngvvf8zdawg6nlwca7jqy2fv82rc5skauw05ptfuf5twj67u0gzzvhakvkxpvx8rvf2rlh5yh560fdr6p28368kjxez5gu9azam5cm08ygre0uqwhvrkz7sr7ld0nyv05a0xrqeffdvhujafq3ke860skmxzshtjlrlew72vycu54pkgjtyp2phr6fmmkqlxvsan54jh7mc59r7kazgwwrcfnmqjm5pt40kjeafp6lwtx2lp4gm5pzg9c9ugphrsclfnz50spnsrersk34ht5mrevw9yvspkfjg9mjhusc588d855hdch0z82pr5fhkvaz3p4cmjlxujxqw2w20tpgyt3rzkwuuwl4r7";
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
+const RPC_ADDR: &str = "127.0.0.1:3000";
+
+// ── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,11 +44,102 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ufvk = UnifiedFullViewingKey::decode(&Network::TestNetwork, UFVK_STR)
         .map_err(|e| format!("Failed to decode UFVK: {e}"))?;
 
+    let pivk = decrypter::prepare_viewing_key(&ufvk);
     let db = registry::open_db(DB_PATH)?;
 
-    println!("Connecting to {LWD_URL}...");
-    let client = CompactTxStreamerClient::connect(LWD_URL).await?;
-    decrypter::run_block_sync(client, &db, &ufvk).await;
+    let synced_height = Arc::new(AtomicU64::new(0));
+    let rpc_state = Arc::new(rpc::RpcState {
+        db_path: DB_PATH.to_string(),
+        synced_height: synced_height.clone(),
+        admin_pubkey: base64::engine::general_purpose::STANDARD.encode(memo::ZNS_LISTING_PUBKEY),
+        ufvk: UFVK_STR.to_string(),
+    });
+    tokio::spawn(rpc::serve(RPC_ADDR, rpc_state));
 
-    Ok(())
+    println!("Connecting to {LWD_URL}...");
+    let mut client = decrypter::Client::connect(LWD_URL).await?;
+
+    let mut last_scanned = BIRTHDAY - 100;
+
+    loop {
+        let Some(tip) = decrypter::get_chain_tip(&mut client).await else {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        };
+        if last_scanned >= tip {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        }
+
+        let start = last_scanned + 1;
+        println!("Scanning {start}..={tip}");
+
+        let (notes, scanned_to) = decrypter::scan_range(&mut client, &pivk, start, tip).await;
+        for note in notes {
+            let Some(action) = memo::parse_memo(&note.memo) else { continue };
+            handle_action(&db, action, note.value, &note.txid.to_string(), note.height);
+        }
+        last_scanned = scanned_to;
+        synced_height.store(last_scanned, Ordering::Relaxed);
+
+        println!("Synced to {last_scanned}.");
+    }
+}
+
+// ── Action dispatch ──────────────────────────────────────────────────────────
+
+fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &str, height: u64) {
+    match action {
+        MemoAction::Register { name, ua } => {
+            if registry::is_registered(db, &name, &ua) { return; }
+            match registry::create_registration(db, &name, &ua, txid, height) {
+                Ok(true) => println!("Registered: {name} → {ua} (height {height})"),
+                Ok(false) => eprintln!("Registration ignored (conflict): {name}"),
+                Err(e) => eprintln!("DB error (register): {e}"),
+            }
+        }
+        MemoAction::List { name, price, nonce, signature } => {
+            if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
+                eprintln!("LIST: {e}"); return;
+            }
+            match registry::create_listing(db, &name, price, &signature, txid, height) {
+                Ok(()) => println!("Listed: {name} for {price} zats (height {height})"),
+                Err(e) => eprintln!("DB error (list): {e}"),
+            }
+        }
+        MemoAction::Delist { name, nonce, signature } => {
+            if registry::get_listing_price(db, &name).is_none() {
+                eprintln!("DELIST for unlisted name {name}"); return;
+            }
+
+            if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
+                eprintln!("DELIST: {e}"); return;
+            }
+            match registry::delete_listing(db, &name, &signature) {
+                Ok(()) => println!("Delisted: {name} (height {height})"),
+                Err(e) => eprintln!("DB error (delist): {e}"),
+            }
+        }
+        MemoAction::Update { name, new_ua, nonce, signature } => {
+            if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
+                eprintln!("UPDATE: {e}"); return;
+            }
+            match registry::update_address(db, &name, &new_ua, &signature, txid, height) {
+                Ok(()) => println!("Updated: {name} → {new_ua} (height {height})"),
+                Err(e) => eprintln!("DB error (update): {e}"),
+            }
+        }
+        MemoAction::Buy { name, buyer_ua } => {
+            let Some(price) = registry::get_listing_price(db, &name) else {
+                eprintln!("BUY for unlisted name {name}"); return;
+            };
+            if note_value < price {
+                eprintln!("BUY underpayment for {name}: {note_value} < {price}"); return;
+            }
+            match registry::process_buy(db, &name, &buyer_ua, txid, height) {
+                Ok(()) => println!("Sold: {name} → {buyer_ua} for {price} zats (height {height})"),
+                Err(e) => eprintln!("DB error (buy): {e}"),
+            }
+        }
+    }
 }

@@ -5,7 +5,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use zcash_address::ZcashAddress;
 
 // THROWAWAY test key — do NOT use in production
-const ZNS_LISTING_PUBKEY: [u8; 32] = [
+pub const ZNS_LISTING_PUBKEY: [u8; 32] = [
     0x78, 0x9d, 0x66, 0x66, 0xa7, 0x98, 0x69, 0x02,
     0x9e, 0xef, 0xbf, 0x5c, 0x80, 0xca, 0xc5, 0x0f,
     0x9b, 0x20, 0x50, 0x56, 0x19, 0xcd, 0x3a, 0x0a,
@@ -14,9 +14,9 @@ const ZNS_LISTING_PUBKEY: [u8; 32] = [
 
 pub enum MemoAction {
     Register { name: String, ua: String },
-    List { name: String, price: u64, nonce: u64, signature: Vec<u8> },
-    Delist { name: String, nonce: u64, signature: Vec<u8> },
-    Update { name: String, new_ua: String, nonce: u64, signature: Vec<u8> },
+    List { name: String, price: u64, nonce: u64, signature: String },
+    Delist { name: String, nonce: u64, signature: String },
+    Update { name: String, new_ua: String, nonce: u64, signature: String },
     Buy { name: String, buyer_ua: String },
 }
 
@@ -56,8 +56,11 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
         if !validate_name(name) { return None; }
         let price: u64 = price_str.parse().ok()?;
         let nonce: u64 = nonce_str.parse().ok()?;
-        let signature = base64::engine::general_purpose::STANDARD.decode(sig_b64).ok()?;
-        return Some(MemoAction::List { name: name.into(), price, nonce, signature });
+        let payload = format!("LIST:{name}:{price}:{nonce}");
+        verify_signature(&payload, sig_b64)?;
+        return Some(MemoAction::List {
+            name: name.into(), price, nonce, signature: sig_b64.into(),
+        });
     }
 
     if let Some(rest) = s.strip_prefix("ZNS:DELIST:") {
@@ -66,8 +69,11 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
         let (name, nonce_str, sig_b64) = (parts[0], parts[1], parts[2]);
         if !validate_name(name) { return None; }
         let nonce: u64 = nonce_str.parse().ok()?;
-        let signature = base64::engine::general_purpose::STANDARD.decode(sig_b64).ok()?;
-        return Some(MemoAction::Delist { name: name.into(), nonce, signature });
+        let payload = format!("DELIST:{name}:{nonce}");
+        verify_signature(&payload, sig_b64)?;
+        return Some(MemoAction::Delist {
+            name: name.into(), nonce, signature: sig_b64.into(),
+        });
     }
 
     if let Some(rest) = s.strip_prefix("ZNS:UPDATE:") {
@@ -76,8 +82,11 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
         let (name, new_ua, nonce_str, sig_b64) = (parts[0], parts[1], parts[2], parts[3]);
         if !validate_name(name) || !validate_ua(new_ua) { return None; }
         let nonce: u64 = nonce_str.parse().ok()?;
-        let signature = base64::engine::general_purpose::STANDARD.decode(sig_b64).ok()?;
-        return Some(MemoAction::Update { name: name.into(), new_ua: new_ua.into(), nonce, signature });
+        let payload = format!("UPDATE:{name}:{new_ua}:{nonce}");
+        verify_signature(&payload, sig_b64)?;
+        return Some(MemoAction::Update {
+            name: name.into(), new_ua: new_ua.into(), nonce, signature: sig_b64.into(),
+        });
     }
 
     if let Some(rest) = s.strip_prefix("ZNS:BUY:") {
@@ -93,12 +102,9 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
 
 // ── Signature verification ───────────────────────────────────────────────────
 
-pub fn verify_signed_action(payload: &str, sig_bytes: &[u8]) -> bool {
-    let Ok(vk) = VerifyingKey::from_bytes(&ZNS_LISTING_PUBKEY) else { return false };
-    verify_signed_action_with_key(&vk, payload, sig_bytes)
-}
-
-pub fn verify_signed_action_with_key(vk: &VerifyingKey, payload: &str, sig_bytes: &[u8]) -> bool {
-    let Ok(sig) = Signature::from_slice(sig_bytes) else { return false };
-    vk.verify(payload.as_bytes(), &sig).is_ok()
+fn verify_signature(payload: &str, sig_b64: &str) -> Option<()> {
+    let sig_bytes = base64::engine::general_purpose::STANDARD.decode(sig_b64).ok()?;
+    let vk = VerifyingKey::from_bytes(&ZNS_LISTING_PUBKEY).ok()?;
+    let sig = Signature::from_slice(&sig_bytes).ok()?;
+    vk.verify(payload.as_bytes(), &sig).ok()
 }

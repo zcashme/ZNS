@@ -1,9 +1,6 @@
-// ZNS registry — SQLite storage for name registrations and marketplace listings.
+// ZNS registry — SQLite write path for the indexer.
 
 use rusqlite::Connection;
-
-/// Listing price in zats.
-pub type Listing = u64;
 
 /// Opens (or creates) the registry database and ensures the schema exists.
 pub fn open_db(path: &str) -> rusqlite::Result<Connection> {
@@ -37,20 +34,19 @@ pub fn is_registered(db: &Connection, name: &str, ua: &str) -> bool {
     .is_ok()
 }
 
-pub fn get_nonce(db: &Connection, name: &str) -> Option<u64> {
-    db.query_row(
+pub fn validate_and_increment_nonce(db: &Connection, name: &str, nonce: u64) -> Result<(), String> {
+    let current: u64 = db.query_row(
         "SELECT nonce FROM registrations WHERE name = ?1",
         [name],
         |row| Ok(row.get::<_, i64>(0)? as u64),
-    )
-    .ok()
-}
-
-pub fn increment_nonce(db: &Connection, name: &str, new_nonce: u64) -> rusqlite::Result<()> {
+    ).map_err(|_| format!("unregistered name {name}"))?;
+    if nonce <= current {
+        return Err(format!("replay rejected for {name}: nonce {nonce} <= {current}"));
+    }
     db.execute(
         "UPDATE registrations SET nonce = ?1 WHERE name = ?2",
-        rusqlite::params![new_nonce as i64, name],
-    )?;
+        rusqlite::params![nonce as i64, name],
+    ).map_err(|e| format!("DB error (nonce): {e}"))?;
     Ok(())
 }
 
@@ -59,13 +55,12 @@ pub fn create_registration(
     db: &Connection,
     name: &str,
     ua: &str,
-    txid: &[u8],
+    txid: &str,
     height: u64,
 ) -> rusqlite::Result<bool> {
-    let txid_hex = txid.iter().rev().map(|b| format!("{b:02x}")).collect::<String>();
     db.execute(
         "INSERT OR IGNORE INTO registrations (name, ua, txid, height) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![name, ua, txid_hex, height as i64],
+        rusqlite::params![name, ua, txid, height as i64],
     )?;
     Ok(db.changes() > 0)
 }
@@ -75,22 +70,21 @@ pub fn create_listing(
     name: &str,
     price: u64,
     signature: &str,
-    txid: &[u8],
+    txid: &str,
     height: u64,
 ) -> rusqlite::Result<()> {
-    let txid_hex = txid.iter().rev().map(|b| format!("{b:02x}")).collect::<String>();
     db.execute(
         "INSERT OR REPLACE INTO listings (name, price, signature, txid, height) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![name, price as i64, signature, txid_hex, height as i64],
+        rusqlite::params![name, price as i64, signature, txid, height as i64],
     )?;
     Ok(())
 }
 
-pub fn get_listing(db: &Connection, name: &str) -> Option<Listing> {
+pub fn get_listing_price(db: &Connection, name: &str) -> Option<u64> {
     db.query_row(
         "SELECT price FROM listings WHERE name = ?1",
         [name],
-        |row| Ok(row.get::<_, i64>(0)? as Listing),
+        |row| Ok(row.get::<_, i64>(0)? as u64),
     )
     .ok()
 }
@@ -99,14 +93,13 @@ pub fn process_buy(
     db: &Connection,
     name: &str,
     new_ua: &str,
-    txid: &[u8],
+    txid: &str,
     height: u64,
 ) -> rusqlite::Result<()> {
-    let txid_hex = txid.iter().rev().map(|b| format!("{b:02x}")).collect::<String>();
     let tx = db.unchecked_transaction()?;
     tx.execute(
         "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, nonce = 0 WHERE name = ?4",
-        rusqlite::params![new_ua, txid_hex, height as i64, name],
+        rusqlite::params![new_ua, txid, height as i64, name],
     )?;
     tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
     tx.commit()
@@ -126,13 +119,12 @@ pub fn update_address(
     name: &str,
     new_ua: &str,
     signature: &str,
-    txid: &[u8],
+    txid: &str,
     height: u64,
 ) -> rusqlite::Result<()> {
-    let txid_hex = txid.iter().rev().map(|b| format!("{b:02x}")).collect::<String>();
     db.execute(
         "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, signature = ?4 WHERE name = ?5",
-        rusqlite::params![new_ua, txid_hex, height as i64, signature, name],
+        rusqlite::params![new_ua, txid, height as i64, signature, name],
     )?;
     Ok(())
 }

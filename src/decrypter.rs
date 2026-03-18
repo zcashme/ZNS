@@ -1,12 +1,10 @@
-// ZNS block decrypter — streams compact blocks, trial-decrypts Orchard notes,
-// and dispatches validated ZNS actions to the registry.
-
+// ZNS block decrypter — streams compact blocks and trial-decrypts Orchard notes.
+//
+//
 use std::collections::HashSet;
 
-use base64::Engine;
 use orchard::keys::PreparedIncomingViewingKey;
 use orchard::note_encryption::{CompactAction, OrchardDomain};
-use rusqlite::Connection;
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
 use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, TxFilter};
@@ -14,19 +12,67 @@ use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::consensus::BranchId;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, Network};
+use zcash_protocol::TxId;
 use zip32::Scope;
 
-use crate::memo::{self, MemoAction};
-use crate::registry;
+pub type Client = CompactTxStreamerClient<tonic::transport::Channel>;
 
-type Client = CompactTxStreamerClient<tonic::transport::Channel>;
+/// A single decrypted Orchard note with its chain context.
+pub struct DecryptedNote {
+    pub memo: [u8; 512],
+    pub value: u64,
+    pub txid: TxId,
+    pub height: u64,
+}
 
-/// Scan one block: trial-decrypt to find our notes, fetch full txs, process memos.
+/// Derive the prepared incoming viewing key from a UFVK.
+pub fn prepare_viewing_key(ufvk: &UnifiedFullViewingKey) -> PreparedIncomingViewingKey {
+    let orchard_fvk = ufvk.orchard().expect("UFVK has no Orchard key");
+    PreparedIncomingViewingKey::new(&orchard_fvk.to_ivk(Scope::External))
+}
+
+/// Ask lightwalletd for the current chain tip height.
+pub async fn get_chain_tip(client: &mut Client) -> Option<u64> {
+    client
+        .get_latest_block(ChainSpec {})
+        .await
+        .ok()
+        .map(|r| r.into_inner().height)
+}
+
+/// Stream and decrypt a range of blocks, returning all decrypted notes
+/// and the height of the last block that was fully scanned.
+pub async fn scan_range(
+    client: &mut Client,
+    pivk: &PreparedIncomingViewingKey,
+    start: u64,
+    end: u64,
+) -> (Vec<DecryptedNote>, u64) {
+    let mut notes = Vec::new();
+    let mut last_scanned = start.saturating_sub(1);
+
+    let range = BlockRange {
+        start: Some(BlockId { height: start, hash: vec![] }),
+        end: Some(BlockId { height: end, hash: vec![] }),
+    };
+    let Ok(mut stream) = client.get_block_range(range).await.map(|r| r.into_inner()) else {
+        return (notes, last_scanned);
+    };
+
+    while let Ok(Some(block)) = stream.message().await {
+        scan_block(client, pivk, &block, &mut notes).await;
+        last_scanned = block.height;
+    }
+
+    (notes, last_scanned)
+}
+
+/// Scan one block: trial-decrypt compact actions, fetch full txs, collect notes.
 async fn scan_block(
     client: &mut Client,
-    db: &Connection,
     pivk: &PreparedIncomingViewingKey,
     block: &CompactBlock,
+    notes: &mut Vec<DecryptedNote>,
 ) {
     let height = block.height;
 
@@ -47,152 +93,24 @@ async fn scan_block(
         .filter_map(|(r, (_, txid))| r.as_ref().map(|_| txid.clone()))
         .collect();
 
-    // Fetch full transactions, decrypt memos, and dispatch actions
+    // Fetch full transactions and decrypt memos
     let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(height as u32));
     for txid in &matched {
         let Ok(data) = client.get_transaction(TxFilter { block: None, index: 0, hash: txid.clone() })
             .await.map(|r| r.into_inner().data) else { continue };
         let Ok(tx) = Transaction::read(&data[..], branch) else { continue };
+        let tx_id = tx.txid();
         let Some(bundle) = tx.orchard_bundle() else { continue };
 
         for action in bundle.actions() {
             let domain = OrchardDomain::for_action(action);
             let Some((note, _, memo_bytes)) = zcash_note_encryption::try_note_decryption(&domain, pivk, action) else { continue };
-            let Some(memo_action) = memo::parse_memo(&memo_bytes) else { continue };
-
-            handle_action(db, memo_action, note.value().inner(), txid, height);
+            notes.push(DecryptedNote {
+                memo: memo_bytes,
+                value: note.value().inner(),
+                txid: tx_id,
+                height,
+            });
         }
-    }
-}
-
-/// Apply a single validated ZNS action to the registry.
-fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &[u8], height: u64) {
-    match action {
-        MemoAction::Register { name, ua } => {
-            if registry::is_registered(db, &name, &ua) { return; }
-            match registry::create_registration(db, &name, &ua, txid, height) {
-                Ok(true) => println!("Registered: {name} → {ua} (height {height})"),
-                Ok(false) => eprintln!("Registration ignored (conflict): {name}"),
-                Err(e) => eprintln!("DB error (register): {e}"),
-            }
-        }
-        MemoAction::List { name, price, nonce, signature } => {
-            let payload = format!("LIST:{name}:{price}:{nonce}");
-            if !memo::verify_signed_action(&payload, &signature) {
-                eprintln!("Invalid LIST signature for {name}");
-                return;
-            }
-            let Some(current_nonce) = registry::get_nonce(db, &name) else {
-                eprintln!("LIST for unregistered name {name}");
-                return;
-            };
-            if nonce <= current_nonce {
-                eprintln!("LIST replay rejected for {name}: nonce {nonce} <= {current_nonce}");
-                return;
-            }
-            if let Err(e) = registry::increment_nonce(db, &name, nonce) {
-                eprintln!("DB error (nonce): {e}"); return;
-            }
-            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&signature);
-            match registry::create_listing(db, &name, price, &sig_b64, txid, height) {
-                Ok(()) => println!("Listed: {name} for {price} zats (height {height})"),
-                Err(e) => eprintln!("DB error (list): {e}"),
-            }
-        }
-        MemoAction::Delist { name, nonce, signature } => {
-            let payload = format!("DELIST:{name}:{nonce}");
-            if !memo::verify_signed_action(&payload, &signature) {
-                eprintln!("Invalid DELIST signature for {name}");
-                return;
-            }
-            let Some(current_nonce) = registry::get_nonce(db, &name) else {
-                eprintln!("DELIST for unregistered name {name}");
-                return;
-            };
-            if nonce <= current_nonce {
-                eprintln!("DELIST replay rejected for {name}: nonce {nonce} <= {current_nonce}");
-                return;
-            }
-            if registry::get_listing(db, &name).is_none() {
-                eprintln!("DELIST for unlisted name {name}");
-                return;
-            }
-            if let Err(e) = registry::increment_nonce(db, &name, nonce) {
-                eprintln!("DB error (nonce): {e}"); return;
-            }
-            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&signature);
-            match registry::delete_listing(db, &name, &sig_b64) {
-                Ok(()) => println!("Delisted: {name} (height {height})"),
-                Err(e) => eprintln!("DB error (delist): {e}"),
-            }
-        }
-        MemoAction::Update { name, new_ua, nonce, signature } => {
-            let payload = format!("UPDATE:{name}:{new_ua}:{nonce}");
-            if !memo::verify_signed_action(&payload, &signature) {
-                eprintln!("Invalid UPDATE signature for {name}");
-                return;
-            }
-            let Some(current_nonce) = registry::get_nonce(db, &name) else {
-                eprintln!("UPDATE for unregistered name {name}");
-                return;
-            };
-            if nonce <= current_nonce {
-                eprintln!("UPDATE replay rejected for {name}: nonce {nonce} <= {current_nonce}");
-                return;
-            }
-            if let Err(e) = registry::increment_nonce(db, &name, nonce) {
-                eprintln!("DB error (nonce): {e}"); return;
-            }
-            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&signature);
-            match registry::update_address(db, &name, &new_ua, &sig_b64, txid, height) {
-                Ok(()) => println!("Updated: {name} → {new_ua} (height {height})"),
-                Err(e) => eprintln!("DB error (update): {e}"),
-            }
-        }
-        MemoAction::Buy { name, buyer_ua } => {
-            let Some(listing) = registry::get_listing(db, &name) else {
-                eprintln!("BUY for unlisted name {name}");
-                return;
-            };
-            if note_value < listing {
-                eprintln!("BUY underpayment for {name}: {note_value} < {listing}");
-                return;
-            }
-            match registry::process_buy(db, &name, &buyer_ua, txid, height) {
-                Ok(()) => println!("Sold: {name} → {buyer_ua} for {listing} zats (height {height})"),
-                Err(e) => eprintln!("DB error (buy): {e}"),
-            }
-        }
-    }
-}
-
-/// Continuously stream and scan new blocks from lightwalletd.
-pub async fn run_block_sync(mut client: Client, db: &Connection, ufvk: &UnifiedFullViewingKey) {
-    let orchard_fvk = ufvk.orchard().expect("UFVK has no Orchard key");
-    let pivk = PreparedIncomingViewingKey::new(&orchard_fvk.to_ivk(Scope::External));
-    let mut last_scanned = crate::BIRTHDAY - 100;
-
-    loop {
-        let Ok(tip) = client.get_latest_block(ChainSpec {}).await.map(|r| r.into_inner().height) else {
-            tokio::time::sleep(crate::POLL_INTERVAL).await; continue;
-        };
-        if last_scanned >= tip { tokio::time::sleep(crate::POLL_INTERVAL).await; continue; }
-
-        let start = last_scanned + 1;
-        println!("Scanning {start}..={tip}");
-
-        let range = BlockRange {
-            start: Some(BlockId { height: start, hash: vec![] }),
-            end: Some(BlockId { height: tip, hash: vec![] }),
-        };
-        let Ok(mut stream) = client.get_block_range(range).await.map(|r| r.into_inner()) else {
-            tokio::time::sleep(crate::POLL_INTERVAL).await; continue;
-        };
-
-        while let Ok(Some(block)) = stream.message().await {
-            scan_block(&mut client, db, &pivk, &block).await;
-            last_scanned = block.height;
-        }
-        println!("Synced to {tip}.");
     }
 }
