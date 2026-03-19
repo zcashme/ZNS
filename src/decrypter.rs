@@ -11,8 +11,8 @@ use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, TxFil
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::consensus::BranchId;
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight, Network};
 use zcash_protocol::TxId;
+use zcash_protocol::consensus::{BlockHeight, Network};
 use zip32::Scope;
 
 pub type Client = CompactTxStreamerClient<tonic::transport::Channel>;
@@ -52,8 +52,14 @@ pub async fn scan_range(
     let mut last_scanned = start.saturating_sub(1);
 
     let range = BlockRange {
-        start: Some(BlockId { height: start, hash: vec![] }),
-        end: Some(BlockId { height: end, hash: vec![] }),
+        start: Some(BlockId {
+            height: start,
+            hash: vec![],
+        }),
+        end: Some(BlockId {
+            height: end,
+            hash: vec![],
+        }),
     };
     let Ok(mut stream) = client.get_block_range(range).await.map(|r| r.into_inner()) else {
         return (notes, last_scanned);
@@ -77,34 +83,64 @@ async fn scan_block(
     let height = block.height;
 
     // Trial-decrypt compact actions to find transactions addressed to us
-    let candidates: Vec<_> = block.vtx.iter()
-        .flat_map(|tx| tx.actions.iter()
-            .filter_map(|a| CompactAction::try_from(a).ok().map(|ca| (ca, tx.hash.clone()))))
+    let candidates: Vec<_> = block
+        .vtx
+        .iter()
+        .flat_map(|tx| {
+            tx.actions.iter().filter_map(|a| {
+                CompactAction::try_from(a)
+                    .ok()
+                    .map(|ca| (ca, tx.hash.clone()))
+            })
+        })
         .collect();
-    if candidates.is_empty() { return; }
+    if candidates.is_empty() {
+        return;
+    }
 
-    let pairs: Vec<_> = candidates.iter()
+    let pairs: Vec<_> = candidates
+        .iter()
         .map(|(ca, _)| (OrchardDomain::for_compact_action(ca), ca.clone()))
         .collect();
     let results = zcash_note_encryption::batch::try_compact_note_decryption(
-        std::slice::from_ref(pivk), &pairs,
+        std::slice::from_ref(pivk),
+        &pairs,
     );
-    let matched: HashSet<_> = results.iter().zip(&candidates)
+    let matched: HashSet<_> = results
+        .iter()
+        .zip(&candidates)
         .filter_map(|(r, (_, txid))| r.as_ref().map(|_| txid.clone()))
         .collect();
 
     // Fetch full transactions and decrypt memos
     let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(height as u32));
     for txid in &matched {
-        let Ok(data) = client.get_transaction(TxFilter { block: None, index: 0, hash: txid.clone() })
-            .await.map(|r| r.into_inner().data) else { continue };
-        let Ok(tx) = Transaction::read(&data[..], branch) else { continue };
+        let Ok(data) = client
+            .get_transaction(TxFilter {
+                block: None,
+                index: 0,
+                hash: txid.clone(),
+            })
+            .await
+            .map(|r| r.into_inner().data)
+        else {
+            continue;
+        };
+        let Ok(tx) = Transaction::read(&data[..], branch) else {
+            continue;
+        };
         let tx_id = tx.txid();
-        let Some(bundle) = tx.orchard_bundle() else { continue };
+        let Some(bundle) = tx.orchard_bundle() else {
+            continue;
+        };
 
         for action in bundle.actions() {
             let domain = OrchardDomain::for_action(action);
-            let Some((note, _, memo_bytes)) = zcash_note_encryption::try_note_decryption(&domain, pivk, action) else { continue };
+            let Some((note, _, memo_bytes)) =
+                zcash_note_encryption::try_note_decryption(&domain, pivk, action)
+            else {
+                continue;
+            };
             notes.push(DecryptedNote {
                 memo: memo_bytes,
                 value: note.value().inner(),

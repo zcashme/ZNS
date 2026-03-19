@@ -35,18 +35,23 @@ pub fn is_registered(db: &Connection, name: &str, ua: &str) -> bool {
 }
 
 pub fn validate_and_increment_nonce(db: &Connection, name: &str, nonce: u64) -> Result<(), String> {
-    let current: u64 = db.query_row(
-        "SELECT nonce FROM registrations WHERE name = ?1",
-        [name],
-        |row| Ok(row.get::<_, i64>(0)? as u64),
-    ).map_err(|_| format!("unregistered name {name}"))?;
+    let current: u64 = db
+        .query_row(
+            "SELECT nonce FROM registrations WHERE name = ?1",
+            [name],
+            |row| Ok(row.get::<_, i64>(0)? as u64),
+        )
+        .map_err(|_| format!("unregistered name {name}"))?;
     if nonce <= current {
-        return Err(format!("replay rejected for {name}: nonce {nonce} <= {current}"));
+        return Err(format!(
+            "replay rejected for {name}: nonce {nonce} <= {current}"
+        ));
     }
     db.execute(
         "UPDATE registrations SET nonce = ?1 WHERE name = ?2",
         rusqlite::params![nonce as i64, name],
-    ).map_err(|e| format!("DB error (nonce): {e}"))?;
+    )
+    .map_err(|e| format!("DB error (nonce): {e}"))?;
     Ok(())
 }
 

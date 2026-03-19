@@ -1,11 +1,11 @@
 // ZNS JSON-RPC server — read-only API over raw TCP.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use zcash_address::ZcashAddress;
@@ -115,13 +115,16 @@ fn handle_list_for_sale(db: &Connection, id: Value) -> Value {
 }
 
 fn handle_status(db: &Connection, id: Value, state: &RpcState) -> Value {
-    jsonrpc_ok(id, json!({
-        "synced_height": state.synced_height.load(Ordering::Relaxed),
-        "admin_pubkey": state.admin_pubkey,
-        "ufvk": state.ufvk,
-        "registered": count_rows(db, "registrations"),
-        "listed": count_rows(db, "listings"),
-    }))
+    jsonrpc_ok(
+        id,
+        json!({
+            "synced_height": state.synced_height.load(Ordering::Relaxed),
+            "admin_pubkey": state.admin_pubkey,
+            "ufvk": state.ufvk,
+            "registered": count_rows(db, "registrations"),
+            "listed": count_rows(db, "listings"),
+        }),
+    )
 }
 
 // ── JSON-RPC envelope ────────────────────────────────────────────────────────
@@ -159,14 +162,16 @@ fn resolve_by_name(db: &Connection, name: &str) -> Option<Registration> {
     db.query_row(
         "SELECT name, ua, txid, height, nonce, signature FROM registrations WHERE name = ?1",
         [name],
-        |row| Ok(Registration {
-            name: row.get(0)?,
-            address: row.get(1)?,
-            txid: row.get(2)?,
-            height: row.get::<_, i64>(3)? as u64,
-            nonce: row.get::<_, i64>(4)? as u64,
-            signature: row.get(5)?,
-        }),
+        |row| {
+            Ok(Registration {
+                name: row.get(0)?,
+                address: row.get(1)?,
+                txid: row.get(2)?,
+                height: row.get::<_, i64>(3)? as u64,
+                nonce: row.get::<_, i64>(4)? as u64,
+                signature: row.get(5)?,
+            })
+        },
     )
     .ok()
 }
@@ -175,14 +180,16 @@ fn resolve_by_address(db: &Connection, address: &str) -> Option<Registration> {
     db.query_row(
         "SELECT name, ua, txid, height, nonce, signature FROM registrations WHERE ua = ?1",
         [address],
-        |row| Ok(Registration {
-            name: row.get(0)?,
-            address: row.get(1)?,
-            txid: row.get(2)?,
-            height: row.get::<_, i64>(3)? as u64,
-            nonce: row.get::<_, i64>(4)? as u64,
-            signature: row.get(5)?,
-        }),
+        |row| {
+            Ok(Registration {
+                name: row.get(0)?,
+                address: row.get(1)?,
+                txid: row.get(2)?,
+                height: row.get::<_, i64>(3)? as u64,
+                nonce: row.get::<_, i64>(4)? as u64,
+                signature: row.get(5)?,
+            })
+        },
     )
     .ok()
 }
@@ -191,34 +198,44 @@ fn get_listing(db: &Connection, name: &str) -> Option<Listing> {
     db.query_row(
         "SELECT name, price, txid, height, signature FROM listings WHERE name = ?1",
         [name],
-        |row| Ok(Listing {
-            name: row.get(0)?,
-            price: row.get::<_, i64>(1)? as u64,
-            txid: row.get(2)?,
-            height: row.get::<_, i64>(3)? as u64,
-            signature: row.get(4)?,
-        }),
+        |row| {
+            Ok(Listing {
+                name: row.get(0)?,
+                price: row.get::<_, i64>(1)? as u64,
+                txid: row.get(2)?,
+                height: row.get::<_, i64>(3)? as u64,
+                signature: row.get(4)?,
+            })
+        },
     )
     .ok()
 }
 
 fn list_for_sale(db: &Connection) -> Vec<Listing> {
-    let mut stmt = db.prepare(
-        "SELECT l.name, l.price, l.txid, l.height, l.signature
+    let mut stmt = db
+        .prepare(
+            "SELECT l.name, l.price, l.txid, l.height, l.signature
          FROM listings l
-         ORDER BY l.height DESC"
-    ).unwrap();
-    stmt.query_map([], |row| Ok(Listing {
-        name: row.get(0)?,
-        price: row.get::<_, i64>(1)? as u64,
-        txid: row.get(2)?,
-        height: row.get::<_, i64>(3)? as u64,
-        signature: row.get(4)?,
-    })).unwrap().filter_map(|r| r.ok()).collect()
+         ORDER BY l.height DESC",
+        )
+        .unwrap();
+    stmt.query_map([], |row| {
+        Ok(Listing {
+            name: row.get(0)?,
+            price: row.get::<_, i64>(1)? as u64,
+            txid: row.get(2)?,
+            height: row.get::<_, i64>(3)? as u64,
+            signature: row.get(4)?,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
 }
 
 fn count_rows(db: &Connection, table: &str) -> u64 {
     db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
         Ok(row.get::<_, i64>(0)? as u64)
-    }).unwrap_or(0)
+    })
+    .unwrap_or(0)
 }
