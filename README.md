@@ -1,8 +1,8 @@
-# ZNS — Zcash Name Service (Testnet)
+# ZNS - Zcash Name Service (Testnet)
 
-> **This is experimental software under active development. Testnet only — not production ready.**
+> **[This is experimental software under active development. Testnet only, not production ready.]**
 
-ZNS maps human-readable names to Zcash Unified Addresses, registered on-chain via shielded Orchard memos. It includes a marketplace for buying and selling names, with admin actions authenticated by Ed25519 signatures.
+ZNS maps human-readable names to Zcash Unified Addresses, claimed on-chain via shielded Orchard memos. It includes a marketplace for buying and selling names, with admin actions authenticated by Ed25519 signatures.
 
 ## How it works
 
@@ -16,7 +16,7 @@ All memos are UTF-8 strings in the 512-byte Orchard memo field.
 
 | Action | Memo format | Auth |
 |--------|------------|------|
-| Register | `ZNS:REGISTER:<name>:<ua>` | None (FCFS) |
+| Claim | `ZNS:CLAIM:<name>:<ua>` | Payment >= claim cost (FCFS) |
 | List for sale | `ZNS:LIST:<name>:<price>:<nonce>:<sig>` | Ed25519 signature |
 | Delist | `ZNS:DELIST:<name>:<nonce>:<sig>` | Ed25519 signature |
 | Update address | `ZNS:UPDATE:<name>:<new_ua>:<nonce>:<sig>` | Ed25519 signature |
@@ -34,13 +34,13 @@ The signature is base64-encoded and appended as the final field in the memo. Non
 
 ### Name rules
 
-- 1–62 characters
+- 1-62 characters
 - Lowercase alphanumeric and hyphens only (`a-z`, `0-9`, `-`)
 - No leading, trailing, or consecutive hyphens
 
 ## Status
 
-- All 5 actions (REGISTER, LIST, BUY, UPDATE, DELIST) tested end-to-end on testnet
+- All 5 actions (CLAIM, LIST, BUY, UPDATE, DELIST) tested end-to-end on testnet
 - No gRPC API yet
 - No automated tests yet
 - Signing key is a throwaway test key
