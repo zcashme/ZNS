@@ -72,6 +72,7 @@ fn handle_request(body: &str, state: &RpcState) -> Value {
         "resolve" => handle_resolve(&db, id, &params),
         "list_for_sale" => handle_list_for_sale(&db, id),
         "status" => handle_status(&db, id, state),
+        "events" => handle_events(&db, id, &params),
         _ => jsonrpc_error(id, -32601, "Method not found"),
     }
 }
@@ -156,6 +157,86 @@ struct Listing {
     txid: String,
     height: u64,
     signature: String,
+}
+
+fn handle_events(db: &Connection, id: Value, params: &Value) -> Value {
+    let name = params.get("name").and_then(|v| v.as_str());
+    let actions: Vec<&str> = match params.get("action") {
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
+        _ => vec![],
+    };
+    let since_height = params.get("since_height").and_then(|v| v.as_u64());
+    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).min(500) as i64;
+    let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+
+    let mut conditions = Vec::new();
+    let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(n) = name {
+        conditions.push(format!("name = ?{}", bind.len() + 1));
+        bind.push(Box::new(n.to_string()));
+    }
+    if !actions.is_empty() {
+        let placeholders: Vec<String> = actions.iter().enumerate().map(|(i, _)| {
+            format!("?{}", bind.len() + i + 1)
+        }).collect();
+        conditions.push(format!("action IN ({})", placeholders.join(",")));
+        for a in &actions {
+            bind.push(Box::new(a.to_string()));
+        }
+    }
+    if let Some(h) = since_height {
+        conditions.push(format!("height > ?{}", bind.len() + 1));
+        bind.push(Box::new(h as i64));
+    }
+
+    let where_clause = if conditions.is_empty() {
+        "1=1".to_string()
+    } else {
+        conditions.join(" AND ")
+    };
+
+    // Count total matching events
+    let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_clause}");
+    let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
+    let total: u64 = db
+        .query_row(&count_sql, &*bind_refs, |row| Ok(row.get::<_, i64>(0)? as u64))
+        .unwrap_or(0);
+
+    // Fetch page of events
+    let query_sql = format!(
+        "SELECT id, name, action, txid, height, ua, price, nonce, signature \
+         FROM events WHERE {where_clause} ORDER BY height DESC, id DESC LIMIT ?{} OFFSET ?{}",
+        bind.len() + 1,
+        bind.len() + 2,
+    );
+    bind.push(Box::new(limit));
+    bind.push(Box::new(offset));
+    let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
+
+    let mut stmt = match db.prepare(&query_sql) {
+        Ok(s) => s,
+        Err(_) => return jsonrpc_error(id, -32603, "Internal error"),
+    };
+    let events: Vec<Value> = match stmt.query_map(&*bind_refs, |row| {
+        Ok(json!({
+            "id": row.get::<_, i64>(0)?,
+            "name": row.get::<_, String>(1)?,
+            "action": row.get::<_, String>(2)?,
+            "txid": row.get::<_, String>(3)?,
+            "height": row.get::<_, i64>(4)?,
+            "ua": row.get::<_, Option<String>>(5)?,
+            "price": row.get::<_, Option<i64>>(6)?,
+            "nonce": row.get::<_, Option<i64>>(7)?,
+            "signature": row.get::<_, Option<String>>(8)?,
+        }))
+    }) {
+        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Err(_) => return jsonrpc_error(id, -32603, "Internal error"),
+    };
+
+    jsonrpc_ok(id, json!({ "events": events, "total": total }))
 }
 
 fn resolve_by_name(db: &Connection, name: &str) -> Option<Registration> {

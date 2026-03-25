@@ -1,0 +1,514 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "ZNS Indexer API",
+    "description": "Read-only JSON-RPC API for the Zcash Name System (ZNS). Provides name resolution, marketplace listings, and indexer status for names registered on Zcash testnet via Orchard shielded memos.",
+    "version": "0.1.0",
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "name": "Local",
+      "url": "http://127.0.0.1:3000"
+    }
+  ],
+  "methods": [
+    {
+      "name": "resolve",
+      "summary": "Look up a name or address registration",
+      "description": "Resolves a ZNS registration by name or by Zcash unified address. If the query parses as a valid Zcash address, it looks up the name registered to that address. Otherwise it treats the query as a name. Returns null if no registration is found.",
+      "params": [
+        {
+          "name": "query",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "description": "A ZNS name (e.g. \"alice\") or a Zcash unified address"
+          }
+        }
+      ],
+      "result": {
+        "name": "registration",
+        "description": "The registration record, or null if not found",
+        "schema": {
+          "oneOf": [
+            { "$ref": "#/components/schemas/ResolveResult" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "errors": [
+        { "$ref": "#/components/errors/InvalidParams" }
+      ],
+      "examples": [
+        {
+          "name": "Resolve by name",
+          "params": [
+            { "name": "query", "value": "alice" }
+          ],
+          "result": {
+            "name": "found",
+            "value": {
+              "name": "alice",
+              "address": "utest1qqq...fff",
+              "txid": "abc123def456...",
+              "height": 3901200,
+              "nonce": 2,
+              "signature": "AQID...",
+              "listing": null
+            }
+          }
+        },
+        {
+          "name": "Resolve listed name",
+          "params": [
+            { "name": "query", "value": "bob" }
+          ],
+          "result": {
+            "name": "found with listing",
+            "value": {
+              "name": "bob",
+              "address": "utest1qqq...aaa",
+              "txid": "def789...",
+              "height": 3901180,
+              "nonce": 1,
+              "signature": "BQUF...",
+              "listing": {
+                "name": "bob",
+                "price": 100000,
+                "txid": "fed321...",
+                "height": 3901250,
+                "signature": "CQID..."
+              }
+            }
+          }
+        },
+        {
+          "name": "Name not found",
+          "params": [
+            { "name": "query", "value": "doesnotexist" }
+          ],
+          "result": {
+            "name": "not found",
+            "value": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "list_for_sale",
+      "summary": "Get all names currently listed for sale",
+      "description": "Returns every name that has an active marketplace listing, ordered by block height descending (newest first). Prices are in zatoshis.",
+      "params": [],
+      "result": {
+        "name": "listings",
+        "schema": {
+          "$ref": "#/components/schemas/ListForSaleResult"
+        }
+      },
+      "examples": [
+        {
+          "name": "Some listings",
+          "params": [],
+          "result": {
+            "name": "listings",
+            "value": {
+              "listings": [
+                {
+                  "name": "bob",
+                  "price": 100000,
+                  "txid": "fed321...",
+                  "height": 3901250,
+                  "signature": "CQID..."
+                },
+                {
+                  "name": "carol",
+                  "price": 500000,
+                  "txid": "aaa111...",
+                  "height": 3901200,
+                  "signature": "DQID..."
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "No listings",
+          "params": [],
+          "result": {
+            "name": "empty",
+            "value": {
+              "listings": []
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "status",
+      "summary": "Get indexer synchronization status",
+      "description": "Returns the current state of the ZNS indexer, including the latest synced block height, the admin public key used for signature verification, the UFVK being watched, and counts of registered names and active listings.",
+      "params": [],
+      "result": {
+        "name": "status",
+        "schema": {
+          "$ref": "#/components/schemas/StatusResult"
+        }
+      },
+      "examples": [
+        {
+          "name": "Indexer status",
+          "params": [],
+          "result": {
+            "name": "status",
+            "value": {
+              "synced_height": 3902500,
+              "admin_pubkey": "abc123...",
+              "ufvk": "uviewtest1qqq...fff",
+              "registered": 42,
+              "listed": 3
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "events",
+      "summary": "Query the activity log with optional filters",
+      "description": "Returns historical ZNS events (CLAIM, LIST, DELIST, UPDATE, BUY) with optional filtering by name, action type(s), and block height. Results are ordered by block height descending. Supports pagination via limit and offset.",
+      "params": [
+        {
+          "name": "name",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "description": "Filter events for a specific name"
+          }
+        },
+        {
+          "name": "action",
+          "required": false,
+          "schema": {
+            "oneOf": [
+              { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY"] },
+              {
+                "type": "array",
+                "items": { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY"] }
+              }
+            ],
+            "description": "Filter by action type(s). A single string or an array of strings."
+          }
+        },
+        {
+          "name": "since_height",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "description": "Only return events after this block height"
+          }
+        },
+        {
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "description": "Maximum number of events to return (default 50, max 500)"
+          }
+        },
+        {
+          "name": "offset",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "description": "Number of events to skip for pagination (default 0)"
+          }
+        }
+      ],
+      "result": {
+        "name": "events",
+        "schema": {
+          "$ref": "#/components/schemas/EventsResult"
+        }
+      },
+      "examples": [
+        {
+          "name": "History for a name",
+          "params": [
+            { "name": "name", "value": "alice" }
+          ],
+          "result": {
+            "name": "alice history",
+            "value": {
+              "events": [
+                {
+                  "id": 45,
+                  "name": "alice",
+                  "action": "LIST",
+                  "txid": "def456...",
+                  "height": 3901300,
+                  "ua": "utest1qqq...fff",
+                  "price": 50000000,
+                  "nonce": 1,
+                  "signature": "AQID..."
+                },
+                {
+                  "id": 12,
+                  "name": "alice",
+                  "action": "CLAIM",
+                  "txid": "abc123...",
+                  "height": 3901200,
+                  "ua": "utest1qqq...fff",
+                  "price": null,
+                  "nonce": null,
+                  "signature": null
+                }
+              ],
+              "total": 2
+            }
+          }
+        },
+        {
+          "name": "All claims",
+          "params": [
+            { "name": "action", "value": "CLAIM" },
+            { "name": "limit", "value": 10 }
+          ],
+          "result": {
+            "name": "claims",
+            "value": {
+              "events": [
+                {
+                  "id": 12,
+                  "name": "alice",
+                  "action": "CLAIM",
+                  "txid": "abc123...",
+                  "height": 3901200,
+                  "ua": "utest1qqq...fff",
+                  "price": null,
+                  "nonce": null,
+                  "signature": null
+                }
+              ],
+              "total": 1
+            }
+          }
+        },
+        {
+          "name": "Recent sales",
+          "params": [
+            { "name": "action", "value": ["BUY"] },
+            { "name": "since_height", "value": 3901000 }
+          ],
+          "result": {
+            "name": "recent buys",
+            "value": {
+              "events": [],
+              "total": 0
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "components": {
+    "schemas": {
+      "Registration": {
+        "type": "object",
+        "description": "A ZNS name registration",
+        "required": ["name", "address", "txid", "height", "nonce"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The registered name (1-62 chars, lowercase alphanumeric and hyphens)"
+          },
+          "address": {
+            "type": "string",
+            "description": "Zcash unified address bound to this name"
+          },
+          "txid": {
+            "type": "string",
+            "description": "Transaction ID of the registration memo"
+          },
+          "height": {
+            "type": "integer",
+            "description": "Block height at which the registration was confirmed"
+          },
+          "nonce": {
+            "type": "integer",
+            "description": "Replay-protection counter, incremented on each update/list/delist"
+          },
+          "signature": {
+            "type": ["string", "null"],
+            "description": "Ed25519 admin signature over the registration (null for legacy entries)"
+          }
+        }
+      },
+      "Listing": {
+        "type": "object",
+        "description": "A marketplace listing for a registered name",
+        "required": ["name", "price", "txid", "height", "signature"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The listed name"
+          },
+          "price": {
+            "type": "integer",
+            "description": "Asking price in zatoshis (1 ZEC = 100,000,000 zatoshis)"
+          },
+          "txid": {
+            "type": "string",
+            "description": "Transaction ID of the listing memo"
+          },
+          "height": {
+            "type": "integer",
+            "description": "Block height at which the listing was confirmed"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Ed25519 admin signature over the listing"
+          }
+        }
+      },
+      "ResolveResult": {
+        "type": "object",
+        "description": "A registration with optional listing info",
+        "allOf": [
+          { "$ref": "#/components/schemas/Registration" },
+          {
+            "type": "object",
+            "properties": {
+              "listing": {
+                "oneOf": [
+                  { "$ref": "#/components/schemas/Listing" },
+                  { "type": "null" }
+                ],
+                "description": "Active listing if the name is for sale, otherwise null"
+              }
+            }
+          }
+        ]
+      },
+      "ListForSaleResult": {
+        "type": "object",
+        "required": ["listings"],
+        "properties": {
+          "listings": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Listing" },
+            "description": "All active listings, newest first"
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "description": "A single ZNS activity event",
+        "required": ["id", "name", "action", "txid", "height"],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Auto-incrementing event ID"
+          },
+          "name": {
+            "type": "string",
+            "description": "The name this event relates to"
+          },
+          "action": {
+            "type": "string",
+            "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY"],
+            "description": "The type of action that occurred"
+          },
+          "txid": {
+            "type": "string",
+            "description": "Transaction ID that triggered this event"
+          },
+          "height": {
+            "type": "integer",
+            "description": "Block height at which this event was confirmed"
+          },
+          "ua": {
+            "type": ["string", "null"],
+            "description": "Relevant address: claimer (CLAIM), owner (LIST), new address (UPDATE), buyer (BUY). Null for DELIST."
+          },
+          "price": {
+            "type": ["integer", "null"],
+            "description": "Price in zatoshis. Present for LIST and BUY, null otherwise."
+          },
+          "nonce": {
+            "type": ["integer", "null"],
+            "description": "Replay-protection nonce used in the signed payload. Present for LIST, DELIST, UPDATE."
+          },
+          "signature": {
+            "type": ["string", "null"],
+            "description": "Ed25519 admin signature. Present for LIST, DELIST, UPDATE."
+          }
+        }
+      },
+      "EventsResult": {
+        "type": "object",
+        "required": ["events", "total"],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Event" },
+            "description": "Matching events, newest first"
+          },
+          "total": {
+            "type": "integer",
+            "description": "Total number of matching events (before limit/offset)"
+          }
+        }
+      },
+      "StatusResult": {
+        "type": "object",
+        "required": ["synced_height", "admin_pubkey", "ufvk", "registered", "listed"],
+        "properties": {
+          "synced_height": {
+            "type": "integer",
+            "description": "Latest block height the indexer has processed"
+          },
+          "admin_pubkey": {
+            "type": "string",
+            "description": "Hex-encoded Ed25519 public key used to verify signatures"
+          },
+          "ufvk": {
+            "type": "string",
+            "description": "Unified full viewing key the indexer watches for memos"
+          },
+          "registered": {
+            "type": "integer",
+            "description": "Total number of registered names"
+          },
+          "listed": {
+            "type": "integer",
+            "description": "Number of names currently listed for sale"
+          }
+        }
+      }
+    },
+    "errors": {
+      "ParseError": {
+        "code": -32700,
+        "message": "Parse error"
+      },
+      "InvalidRequest": {
+        "code": -32600,
+        "message": "Invalid request"
+      },
+      "MethodNotFound": {
+        "code": -32601,
+        "message": "Method not found"
+      },
+      "InvalidParams": {
+        "code": -32602,
+        "message": "Invalid params: missing 'query'"
+      },
+      "InternalError": {
+        "code": -32603,
+        "message": "Internal error"
+      }
+    }
+  }
+}

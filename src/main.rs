@@ -103,6 +103,7 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
             match registry::create_registration(db, &name, &ua, txid, height) {
                 Ok(true) => {
+                    let _ = registry::insert_event(db, &name, "CLAIM", txid, height, Some(&ua), None, None, None);
                     println!("Claimed: {name} → {ua} for {note_value} zats (height {height})")
                 }
                 Ok(false) => eprintln!("Claim ignored (conflict): {name}"),
@@ -119,8 +120,12 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 eprintln!("LIST: {e}");
                 return;
             }
+            let owner_ua = registry::get_owner_ua(db, &name);
             match registry::create_listing(db, &name, price, &signature, txid, height) {
-                Ok(()) => println!("Listed: {name} for {price} zats (height {height})"),
+                Ok(()) => {
+                    let _ = registry::insert_event(db, &name, "LIST", txid, height, owner_ua.as_deref(), Some(price), Some(nonce), Some(&signature));
+                    println!("Listed: {name} for {price} zats (height {height})")
+                }
                 Err(e) => eprintln!("DB error (list): {e}"),
             }
         }
@@ -139,7 +144,10 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 return;
             }
             match registry::delete_listing(db, &name, &signature) {
-                Ok(()) => println!("Delisted: {name} (height {height})"),
+                Ok(()) => {
+                    let _ = registry::insert_event(db, &name, "DELIST", txid, height, None, None, Some(nonce), Some(&signature));
+                    println!("Delisted: {name} (height {height})")
+                }
                 Err(e) => eprintln!("DB error (delist): {e}"),
             }
         }
@@ -154,7 +162,10 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 return;
             }
             match registry::update_address(db, &name, &new_ua, &signature, txid, height) {
-                Ok(()) => println!("Updated: {name} → {new_ua} (height {height})"),
+                Ok(()) => {
+                    let _ = registry::insert_event(db, &name, "UPDATE", txid, height, Some(&new_ua), None, Some(nonce), Some(&signature));
+                    println!("Updated: {name} → {new_ua} (height {height})")
+                }
                 Err(e) => eprintln!("DB error (update): {e}"),
             }
         }
@@ -168,7 +179,10 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 return;
             }
             match registry::process_buy(db, &name, &buyer_ua, txid, height) {
-                Ok(()) => println!("Sold: {name} → {buyer_ua} for {price} zats (height {height})"),
+                Ok(()) => {
+                    let _ = registry::insert_event(db, &name, "BUY", txid, height, Some(&buyer_ua), Some(price), None, None);
+                    println!("Sold: {name} → {buyer_ua} for {price} zats (height {height})")
+                }
                 Err(e) => eprintln!("DB error (buy): {e}"),
             }
         }

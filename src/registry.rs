@@ -20,7 +20,21 @@ pub fn open_db(path: &str) -> rusqlite::Result<Connection> {
             txid      TEXT NOT NULL,
             height    INTEGER NOT NULL,
             signature TEXT NOT NULL
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS events (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            name      TEXT NOT NULL,
+            action    TEXT NOT NULL,
+            txid      TEXT NOT NULL,
+            height    INTEGER NOT NULL,
+            ua        TEXT,
+            price     INTEGER,
+            nonce     INTEGER,
+            signature TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_events_name   ON events(name);
+        CREATE INDEX IF NOT EXISTS idx_events_action ON events(action);
+        CREATE INDEX IF NOT EXISTS idx_events_height ON events(height);",
     )?;
     Ok(conn)
 }
@@ -130,6 +144,43 @@ pub fn update_address(
     db.execute(
         "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, signature = ?4 WHERE name = ?5",
         rusqlite::params![new_ua, txid, height as i64, signature, name],
+    )?;
+    Ok(())
+}
+
+pub fn get_owner_ua(db: &Connection, name: &str) -> Option<String> {
+    db.query_row(
+        "SELECT ua FROM registrations WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+pub fn insert_event(
+    db: &Connection,
+    name: &str,
+    action: &str,
+    txid: &str,
+    height: u64,
+    ua: Option<&str>,
+    price: Option<u64>,
+    nonce: Option<u64>,
+    signature: Option<&str>,
+) -> rusqlite::Result<()> {
+    db.execute(
+        "INSERT INTO events (name, action, txid, height, ua, price, nonce, signature)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            name,
+            action,
+            txid,
+            height as i64,
+            ua,
+            price.map(|p| p as i64),
+            nonce.map(|n| n as i64),
+            signature,
+        ],
     )?;
     Ok(())
 }
