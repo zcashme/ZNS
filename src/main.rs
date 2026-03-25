@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = registry::open_db(&cfg.db_path)?;
 
     let synced_height = Arc::new(AtomicU64::new(0));
-    let rpc_addr = format!("127.0.0.1:{}", cfg.rpc_port);
+    let rpc_addr = format!("0.0.0.0:{}", cfg.rpc_port);
     let rpc_state = Arc::new(rpc::RpcState {
         db_path: cfg.db_path.clone(),
         synced_height: synced_height.clone(),
