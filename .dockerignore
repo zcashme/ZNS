@@ -1,0 +1,9 @@
+target/
+zingolib-testnet/
+tools/
+wallets/
+circuit/
+sdk/
+*.db
+.claude/
+.git/

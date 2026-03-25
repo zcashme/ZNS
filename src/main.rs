@@ -1,8 +1,8 @@
 // ZNS Indexer — Zcash Name System
 //
-// A long-running service that watches the Zcash testnet blockchain for
-// shielded ZNS protocol messages and maintains a local SQLite database
-// of name registrations and marketplace listings.
+// A long-running service that watches the Zcash blockchain for shielded ZNS
+// protocol messages and maintains a local SQLite database of name
+// registrations and marketplace listings.
 //
 // Supported actions:
 //   CLAIM     — claim a name (first-come-first-served)
@@ -11,6 +11,7 @@
 //   UPDATE    — change the address behind a name (admin-signed)
 //   BUY       — purchase a listed name by sending sufficient ZEC
 
+mod config; // env-var configuration
 mod decrypter; // block streaming and trial decryption
 mod memo; // memo protocol: parsing, validation, signature verification
 mod registry; // SQLite storage for registrations and listings
@@ -18,65 +19,60 @@ mod rpc; // JSON-RPC read-only API
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use base64::Engine;
 use rusqlite::Connection;
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_protocol::consensus::Network;
 
+use crate::config::Config;
 use crate::memo::MemoAction;
-
-// ── Config ───────────────────────────────────────────────────────────────────
-
-const LWD_URL: &str = "https://testnet.zec.rocks:443";
-const DB_PATH: &str = "zns.db";
-const BIRTHDAY: u64 = 3_901_175;
-const UFVK_STR: &str = "uviewtest1h075nwxk0s66hyw0gmy5l2gmr37eahe9ewzgu2lff90rc85mazdhc66udklmd2p7cqm3mg2up8487pusvh78dh89y7mzlfgdl57tncqxrwshhc2kf26js0ymdwd476r0v7qn6es0etgjeg3g0y3pngvvf8zdawg6nlwca7jqy2fv82rc5skauw05ptfuf5twj67u0gzzvhakvkxpvx8rvf2rlh5yh560fdr6p28368kjxez5gu9azam5cm08ygre0uqwhvrkz7sr7ld0nyv05a0xrqeffdvhujafq3ke860skmxzshtjlrlew72vycu54pkgjtyp2phr6fmmkqlxvsan54jh7mc59r7kazgwwrcfnmqjm5pt40kjeafp6lwtx2lp4gm5pzg9c9ugphrsclfnz50spnsrersk34ht5mrevw9yvspkfjg9mjhusc588d855hdch0z82pr5fhkvaz3p4cmjlxujxqw2w20tpgyt3rzkwuuwl4r7";
-const POLL_INTERVAL: Duration = Duration::from_secs(10);
-const RPC_ADDR: &str = "127.0.0.1:3000";
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let ufvk = UnifiedFullViewingKey::decode(&Network::TestNetwork, UFVK_STR)
+
+    let cfg = Config::from_env().map_err(|e| format!("config error: {e}"))?;
+
+    let ufvk = UnifiedFullViewingKey::decode(&cfg.network, &cfg.ufvk)
         .map_err(|e| format!("Failed to decode UFVK: {e}"))?;
 
     let pivk = decrypter::prepare_viewing_key(&ufvk);
-    let db = registry::open_db(DB_PATH)?;
+    let db = registry::open_db(&cfg.db_path)?;
 
     let synced_height = Arc::new(AtomicU64::new(0));
+    let rpc_addr = format!("127.0.0.1:{}", cfg.rpc_port);
     let rpc_state = Arc::new(rpc::RpcState {
-        db_path: DB_PATH.to_string(),
+        db_path: cfg.db_path.clone(),
         synced_height: synced_height.clone(),
-        admin_pubkey: base64::engine::general_purpose::STANDARD.encode(memo::ZNS_LISTING_PUBKEY),
-        ufvk: UFVK_STR.to_string(),
+        admin_pubkey: base64::engine::general_purpose::STANDARD.encode(cfg.admin_pubkey),
+        ufvk: cfg.ufvk.clone(),
     });
-    tokio::spawn(rpc::serve(RPC_ADDR, rpc_state));
+    tokio::spawn(rpc::serve(rpc_addr, rpc_state));
 
-    println!("Connecting to {LWD_URL}...");
-    let mut client = decrypter::Client::connect(LWD_URL).await?;
+    println!("Connecting to {}...", cfg.lwd_url);
+    let mut client = decrypter::Client::connect(cfg.lwd_url.clone()).await?;
 
-    let mut last_scanned = BIRTHDAY - 100;
+    let mut last_scanned = cfg.birthday - 100;
 
     loop {
         let Some(tip) = decrypter::get_chain_tip(&mut client).await else {
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::time::sleep(cfg.poll_interval).await;
             continue;
         };
         if last_scanned >= tip {
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::time::sleep(cfg.poll_interval).await;
             continue;
         }
 
         let start = last_scanned + 1;
         println!("Scanning {start}..={tip}");
 
-        let (notes, scanned_to) = decrypter::scan_range(&mut client, &pivk, start, tip).await;
+        let (notes, scanned_to) =
+            decrypter::scan_range(&mut client, &pivk, &cfg.network, start, tip).await;
         for note in notes {
-            let Some(action) = memo::parse_memo(&note.memo) else {
+            let Some(action) = memo::parse_memo(&note.memo, &cfg.admin_pubkey) else {
                 continue;
             };
             handle_action(&db, action, note.value, &note.txid.to_string(), note.height);

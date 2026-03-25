@@ -17,8 +17,8 @@ pub struct RpcState {
     pub ufvk: String,
 }
 
-pub async fn serve(addr: &str, state: Arc<RpcState>) -> std::io::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+pub async fn serve(addr: String, state: Arc<RpcState>) -> std::io::Result<()> {
+    let listener = TcpListener::bind(&addr).await?;
     println!("RPC server listening on {addr}");
 
     loop {

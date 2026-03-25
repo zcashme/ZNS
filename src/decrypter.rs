@@ -45,6 +45,7 @@ pub async fn get_chain_tip(client: &mut Client) -> Option<u64> {
 pub async fn scan_range(
     client: &mut Client,
     pivk: &PreparedIncomingViewingKey,
+    network: &Network,
     start: u64,
     end: u64,
 ) -> (Vec<DecryptedNote>, u64) {
@@ -66,7 +67,7 @@ pub async fn scan_range(
     };
 
     while let Ok(Some(block)) = stream.message().await {
-        scan_block(client, pivk, &block, &mut notes).await;
+        scan_block(client, pivk, network, &block, &mut notes).await;
         last_scanned = block.height;
     }
 
@@ -77,6 +78,7 @@ pub async fn scan_range(
 async fn scan_block(
     client: &mut Client,
     pivk: &PreparedIncomingViewingKey,
+    network: &Network,
     block: &CompactBlock,
     notes: &mut Vec<DecryptedNote>,
 ) {
@@ -113,7 +115,7 @@ async fn scan_block(
         .collect();
 
     // Fetch full transactions and decrypt memos
-    let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(height as u32));
+    let branch = BranchId::for_height(network, BlockHeight::from_u32(height as u32));
     for txid in &matched {
         let Ok(data) = client
             .get_transaction(TxFilter {
