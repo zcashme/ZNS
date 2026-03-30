@@ -96,11 +96,11 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
 
     match kind {
         ActionKind::SetPrice { prices, nonce } => {
-            if let Some(current) = registry::get_pricing_nonce(db)
-                && nonce <= current
-            {
-                eprintln!("SETPRICE: nonce {nonce} <= current {current}");
-                return;
+            if let Some(current) = registry::get_pricing_nonce(db) {
+                if nonce <= current {
+                    eprintln!("SETPRICE: nonce {nonce} <= current {current}");
+                    return;
+                }
             }
             let tiers_str: String = prices
                 .iter()
