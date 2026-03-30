@@ -193,7 +193,9 @@ pub fn store_pricing(
 /// or None if no pricing has been set yet.
 pub fn lookup_claim_cost(db: &Connection, name_len: usize) -> Option<u64> {
     let tiers_str: String = db
-        .query_row("SELECT tiers FROM pricing WHERE id = 1", [], |row| row.get(0))
+        .query_row("SELECT tiers FROM pricing WHERE id = 1", [], |row| {
+            row.get(0)
+        })
         .ok()?;
     let tiers: Vec<u64> = tiers_str
         .split(':')

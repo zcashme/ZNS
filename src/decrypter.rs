@@ -8,12 +8,10 @@ use orchard::note_encryption::{CompactAction, OrchardDomain};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
 use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, TxFilter};
-use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::consensus::BranchId;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::TxId;
 use zcash_protocol::consensus::{BlockHeight, Network};
-use zip32::Scope;
 
 pub type Client = CompactTxStreamerClient<tonic::transport::Channel>;
 
@@ -23,12 +21,6 @@ pub struct DecryptedNote {
     pub value: u64,
     pub txid: TxId,
     pub height: u64,
-}
-
-/// Derive the prepared incoming viewing key from a UFVK.
-pub fn prepare_viewing_key(ufvk: &UnifiedFullViewingKey) -> PreparedIncomingViewingKey {
-    let orchard_fvk = ufvk.orchard().expect("UFVK has no Orchard key");
-    PreparedIncomingViewingKey::new(&orchard_fvk.to_ivk(Scope::External))
 }
 
 /// Ask lightwalletd for the current chain tip height.

@@ -14,7 +14,7 @@ pub struct RpcState {
     pub db_path: String,
     pub synced_height: Arc<AtomicU64>,
     pub admin_pubkey: String,
-    pub ufvk: String,
+    pub uivk: String,
 }
 
 pub async fn serve(addr: String, state: Arc<RpcState>) -> std::io::Result<()> {
@@ -141,7 +141,7 @@ fn handle_status(db: &Connection, id: Value, state: &RpcState) -> Value {
         json!({
             "synced_height": state.synced_height.load(Ordering::Relaxed),
             "admin_pubkey": state.admin_pubkey,
-            "ufvk": state.ufvk,
+            "uivk": state.uivk,
             "registered": count_rows(db, "registrations"),
             "listed": count_rows(db, "listings"),
             "pricing": pricing,
@@ -188,7 +188,11 @@ fn handle_events(db: &Connection, id: Value, params: &Value) -> Value {
         _ => vec![],
     };
     let since_height = params.get("since_height").and_then(|v| v.as_u64());
-    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).min(500) as i64;
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .min(500) as i64;
     let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
 
     let mut conditions = Vec::new();
@@ -199,9 +203,11 @@ fn handle_events(db: &Connection, id: Value, params: &Value) -> Value {
         bind.push(Box::new(n.to_string()));
     }
     if !actions.is_empty() {
-        let placeholders: Vec<String> = actions.iter().enumerate().map(|(i, _)| {
-            format!("?{}", bind.len() + i + 1)
-        }).collect();
+        let placeholders: Vec<String> = actions
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", bind.len() + i + 1))
+            .collect();
         conditions.push(format!("action IN ({})", placeholders.join(",")));
         for a in &actions {
             bind.push(Box::new(a.to_string()));
@@ -222,7 +228,9 @@ fn handle_events(db: &Connection, id: Value, params: &Value) -> Value {
     let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_clause}");
     let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
     let total: u64 = db
-        .query_row(&count_sql, &*bind_refs, |row| Ok(row.get::<_, i64>(0)? as u64))
+        .query_row(&count_sql, &*bind_refs, |row| {
+            Ok(row.get::<_, i64>(0)? as u64)
+        })
         .unwrap_or(0);
 
     // Fetch page of events

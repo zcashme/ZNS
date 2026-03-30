@@ -21,8 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
+use orchard::keys::PreparedIncomingViewingKey;
 use rusqlite::Connection;
-use zcash_keys::keys::UnifiedFullViewingKey;
+use zcash_keys::keys::UnifiedIncomingViewingKey;
 
 use crate::config::Config;
 use crate::memo::{ActionKind, MemoAction};
@@ -35,10 +36,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = Config::from_env().map_err(|e| format!("config error: {e}"))?;
 
-    let ufvk = UnifiedFullViewingKey::decode(&cfg.network, &cfg.ufvk)
-        .map_err(|e| format!("Failed to decode UFVK: {e}"))?;
-
-    let pivk = decrypter::prepare_viewing_key(&ufvk);
+    let uivk = UnifiedIncomingViewingKey::decode(&cfg.network, &cfg.uivk)
+        .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
+    let orchard_ivk = uivk.orchard().as_ref().expect("UIVK has no Orchard key");
+    let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
     let db = registry::open_db(&cfg.db_path)?;
 
     let synced_height = Arc::new(AtomicU64::new(0));
@@ -47,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db_path: cfg.db_path.clone(),
         synced_height: synced_height.clone(),
         admin_pubkey: base64::engine::general_purpose::STANDARD.encode(cfg.admin_pubkey),
-        ufvk: cfg.ufvk.clone(),
+        uivk: cfg.uivk.clone(),
     });
     tokio::spawn(rpc::serve(rpc_addr, rpc_state));
 
@@ -87,7 +88,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // ── Action dispatch ──────────────────────────────────────────────────────────
 
 fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &str, height: u64) {
-    let MemoAction { name, signature, kind } = action;
+    let MemoAction {
+        name,
+        signature,
+        kind,
+    } = action;
 
     match kind {
         ActionKind::SetPrice { prices, nonce } => {
@@ -97,11 +102,28 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 eprintln!("SETPRICE: nonce {nonce} <= current {current}");
                 return;
             }
-            let tiers_str: String = prices.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(":");
+            let tiers_str: String = prices
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(":");
             match registry::store_pricing(db, nonce, height, &tiers_str, txid, &signature) {
                 Ok(()) => {
-                    let _ = registry::insert_event(db, "", "SETPRICE", txid, height, None, None, Some(nonce), Some(&signature));
-                    println!("Pricing set: {} tiers, nonce {nonce} (height {height})", prices.len());
+                    let _ = registry::insert_event(
+                        db,
+                        "",
+                        "SETPRICE",
+                        txid,
+                        height,
+                        None,
+                        None,
+                        Some(nonce),
+                        Some(&signature),
+                    );
+                    println!(
+                        "Pricing set: {} tiers, nonce {nonce} (height {height})",
+                        prices.len()
+                    );
                 }
                 Err(e) => eprintln!("DB error (setprice): {e}"),
             }
@@ -120,7 +142,17 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
             match registry::create_registration(db, &name, &ua, &signature, txid, height) {
                 Ok(true) => {
-                    let _ = registry::insert_event(db, &name, "CLAIM", txid, height, Some(&ua), None, None, Some(&signature));
+                    let _ = registry::insert_event(
+                        db,
+                        &name,
+                        "CLAIM",
+                        txid,
+                        height,
+                        Some(&ua),
+                        None,
+                        None,
+                        Some(&signature),
+                    );
                     println!("Claimed: {name} → {ua} for {note_value} zats (height {height})")
                 }
                 Ok(false) => eprintln!("Claim ignored (conflict): {name}"),
@@ -135,7 +167,17 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             let owner_ua = registry::get_owner_ua(db, &name);
             match registry::create_listing(db, &name, price, &signature, txid, height) {
                 Ok(()) => {
-                    let _ = registry::insert_event(db, &name, "LIST", txid, height, owner_ua.as_deref(), Some(price), Some(nonce), Some(&signature));
+                    let _ = registry::insert_event(
+                        db,
+                        &name,
+                        "LIST",
+                        txid,
+                        height,
+                        owner_ua.as_deref(),
+                        Some(price),
+                        Some(nonce),
+                        Some(&signature),
+                    );
                     println!("Listed: {name} for {price} zats (height {height})")
                 }
                 Err(e) => eprintln!("DB error (list): {e}"),
@@ -153,7 +195,17 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
             match registry::delete_listing(db, &name, &signature) {
                 Ok(()) => {
-                    let _ = registry::insert_event(db, &name, "DELIST", txid, height, None, None, Some(nonce), Some(&signature));
+                    let _ = registry::insert_event(
+                        db,
+                        &name,
+                        "DELIST",
+                        txid,
+                        height,
+                        None,
+                        None,
+                        Some(nonce),
+                        Some(&signature),
+                    );
                     println!("Delisted: {name} (height {height})")
                 }
                 Err(e) => eprintln!("DB error (delist): {e}"),
@@ -166,7 +218,17 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
             match registry::update_address(db, &name, &new_ua, &signature, txid, height) {
                 Ok(()) => {
-                    let _ = registry::insert_event(db, &name, "UPDATE", txid, height, Some(&new_ua), None, Some(nonce), Some(&signature));
+                    let _ = registry::insert_event(
+                        db,
+                        &name,
+                        "UPDATE",
+                        txid,
+                        height,
+                        Some(&new_ua),
+                        None,
+                        Some(nonce),
+                        Some(&signature),
+                    );
                     println!("Updated: {name} → {new_ua} (height {height})")
                 }
                 Err(e) => eprintln!("DB error (update): {e}"),
@@ -183,7 +245,17 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
             match registry::process_buy(db, &name, &buyer_ua, &signature, txid, height) {
                 Ok(()) => {
-                    let _ = registry::insert_event(db, &name, "BUY", txid, height, Some(&buyer_ua), Some(price), None, Some(&signature));
+                    let _ = registry::insert_event(
+                        db,
+                        &name,
+                        "BUY",
+                        txid,
+                        height,
+                        Some(&buyer_ua),
+                        Some(price),
+                        None,
+                        Some(&signature),
+                    );
                     println!("Sold: {name} → {buyer_ua} for {price} zats (height {height})")
                 }
                 Err(e) => eprintln!("DB error (buy): {e}"),

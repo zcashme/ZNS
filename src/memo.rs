@@ -4,7 +4,6 @@ use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use zcash_address::ZcashAddress;
 
-
 pub struct MemoAction {
     pub name: String,
     pub signature: String,
@@ -19,7 +18,6 @@ pub enum ActionKind {
     Buy { buyer_ua: String },
     SetPrice { prices: Vec<u64>, nonce: u64 },
 }
-
 
 // ── Validation ───────────────────────────────────────────────────────────────
 
@@ -60,10 +58,7 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         let nonce: u64 = parts[count + 1].parse().ok()?;
         let sig_b64 = parts[count + 2];
 
-        let payload = format!(
-            "SETPRICE:{}",
-            parts[..parts.len() - 1].join(":")
-        );
+        let payload = format!("SETPRICE:{}", parts[..parts.len() - 1].join(":"));
         verify_signature(&payload, sig_b64, admin_pubkey)?;
 
         return Some(MemoAction {
@@ -145,7 +140,10 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            kind: ActionKind::Update { new_ua: new_ua.into(), nonce },
+            kind: ActionKind::Update {
+                new_ua: new_ua.into(),
+                nonce,
+            },
         });
     }
 
@@ -163,7 +161,9 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            kind: ActionKind::Buy { buyer_ua: buyer_ua.into() },
+            kind: ActionKind::Buy {
+                buyer_ua: buyer_ua.into(),
+            },
         });
     }
 

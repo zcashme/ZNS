@@ -7,7 +7,7 @@ use zcash_protocol::consensus::Network;
 pub struct Config {
     pub network: Network,
     pub lwd_url: String,
-    pub ufvk: String,
+    pub uivk: String,
     pub birthday: u64,
     pub db_path: String,
     pub rpc_port: u16,
@@ -19,7 +19,7 @@ impl Config {
     /// Build configuration from environment variables.
     ///
     /// Required:
-    ///   ZNS_UFVK         — Unified Full Viewing Key for the indexer wallet
+    ///   ZNS_UIVK         — Unified Incoming Viewing Key for the indexer wallet
     ///   ZNS_ADMIN_PUBKEY — hex-encoded 32-byte Ed25519 admin public key
     ///
     /// Optional (with defaults):
@@ -33,7 +33,11 @@ impl Config {
         let network = match env_or("ZNS_NETWORK", "testnet").as_str() {
             "testnet" => Network::TestNetwork,
             "mainnet" => Network::MainNetwork,
-            other => return Err(format!("ZNS_NETWORK must be 'testnet' or 'mainnet', got '{other}'")),
+            other => {
+                return Err(format!(
+                    "ZNS_NETWORK must be 'testnet' or 'mainnet', got '{other}'"
+                ));
+            }
         };
 
         let lwd_url = env_or(
@@ -44,28 +48,29 @@ impl Config {
             },
         );
 
-        let ufvk = std::env::var("ZNS_UFVK")
-            .map_err(|_| "ZNS_UFVK is required")?;
+        let uivk = std::env::var("ZNS_UIVK").map_err(|_| "ZNS_UIVK is required")?;
 
-        let birthday = env_parse::<u64>("ZNS_BIRTHDAY", match network {
-            Network::TestNetwork => 3_901_175,
-            Network::MainNetwork => 2_800_000,
-        })?;
+        let birthday = env_parse::<u64>(
+            "ZNS_BIRTHDAY",
+            match network {
+                Network::TestNetwork => 3_901_175,
+                Network::MainNetwork => 2_800_000,
+            },
+        )?;
 
         let db_path = env_or("ZNS_DB_PATH", "zns.db");
         let rpc_port = env_parse::<u16>("ZNS_RPC_PORT", 3000)?;
         let poll_interval = Duration::from_secs(env_parse::<u64>("ZNS_POLL_INTERVAL", 10)?);
 
         let admin_pubkey = parse_hex_32(
-            &std::env::var("ZNS_ADMIN_PUBKEY")
-                .map_err(|_| "ZNS_ADMIN_PUBKEY is required")?,
+            &std::env::var("ZNS_ADMIN_PUBKEY").map_err(|_| "ZNS_ADMIN_PUBKEY is required")?,
         )
         .map_err(|e| format!("ZNS_ADMIN_PUBKEY: {e}"))?;
 
         Ok(Config {
             network,
             lwd_url,
-            ufvk,
+            uivk,
             birthday,
             db_path,
             rpc_port,
