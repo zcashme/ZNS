@@ -1,7 +1,9 @@
-// Types
+// ── Core types & errors (all consumers) ──────────────────────────────────────
+
 export type {
   Registration,
   Listing,
+  Pricing,
   ResolveResult,
   ListForSaleResult,
   StatusResult,
@@ -10,79 +12,40 @@ export type {
   EventsResult,
 } from "./types.js";
 
-// Errors
 export { ZNSError, ErrorType } from "./errors.js";
 
-// Protocol constants
-export { DEFAULT_URL, UFVK, CLAIM_PRICES, DEFAULT_CLAIM_PRICE } from "./constants.js";
+// ── Validation (all consumers) ───────────────────────────────────────────────
 
-// Validation
 export { isValidName } from "./validation.js";
 
-// Pricing
+// ── RPC client + constants (explorers, indexer consumers) ────────────────────
+
+export { createClient } from "./client.js";
+export type { ZNSClient, ClientOptions } from "./client.js";
+export { DEFAULT_URL, TESTNET_UIVK, MAINNET_UIVK, KNOWN_UIVKS } from "./constants.js";
+
+// ── Pricing (needs tiers from client.status()) ──────────────────────────────
+
 export { claimCost } from "./pricing.js";
 
-// Memo builders + signing payloads
+// ── Memo builders + signing payloads (wallets) ──────────────────────────────
+
 export {
+  claimPayload,
+  buyPayload,
   listPayload,
   delistPayload,
   updatePayload,
+  setPricePayload,
   buildClaimMemo,
   buildBuyMemo,
   buildListMemo,
   buildDelistMemo,
   buildUpdateMemo,
+  buildSetPriceMemo,
 } from "./memo.js";
 
-// ZIP-321
+// ── ZIP-321 URI helpers (wallets) ────────────────────────────────────────────
+
 export { toBase64Url, decodeBase64Url, buildZcashUri, parseZip321Uri } from "./zip321.js";
 export type { Zip321Parts } from "./zip321.js";
-
-// Client
-export { createClient } from "./client.js";
-export type { ZNSClient, ClientOptions } from "./client.js";
-
-// ── Convenience functions (lazy default client) ─────────────────────────────
-
-import type { ResolveResult, Listing, StatusResult, EventsFilter, EventsResult } from "./types.js";
-import type { ZNSClient } from "./client.js";
-import { createClient } from "./client.js";
-import { DEFAULT_URL } from "./constants.js";
-
-let defaultClient: ZNSClient | null = null;
-let defaultClientPromise: Promise<ZNSClient> | null = null;
-
-function getDefaultClient(): Promise<ZNSClient> {
-  if (defaultClient) return Promise.resolve(defaultClient);
-  if (!defaultClientPromise) {
-    defaultClientPromise = createClient(DEFAULT_URL).then((c) => {
-      defaultClient = c;
-      return c;
-    });
-  }
-  return defaultClientPromise;
-}
-
-export async function resolve(query: string): Promise<ResolveResult | null> {
-  return (await getDefaultClient()).resolve(query);
-}
-
-export async function listings(): Promise<Listing[]> {
-  return (await getDefaultClient()).listings();
-}
-
-export async function status(): Promise<StatusResult> {
-  return (await getDefaultClient()).status();
-}
-
-export async function isAvailable(name: string): Promise<boolean> {
-  return (await getDefaultClient()).isAvailable(name);
-}
-
-export async function events(filter?: EventsFilter): Promise<EventsResult> {
-  return (await getDefaultClient()).events(filter);
-}
-
-export async function getNonce(name: string): Promise<number | null> {
-  return (await getDefaultClient()).getNonce(name);
-}

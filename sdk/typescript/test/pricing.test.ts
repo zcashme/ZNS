@@ -2,33 +2,29 @@ import { describe, it, expect } from "vitest";
 import { claimCost } from "../src/pricing.js";
 
 describe("claimCost", () => {
-  it("returns 6 ZEC for 1-char names", () => {
-    expect(claimCost(1)).toBe(600_000_000);
+  const tiers = [600_000_000, 425_000_000, 300_000_000, 150_000_000, 75_000_000, 50_000_000];
+
+  it("returns null for empty tiers", () => {
+    expect(claimCost([], 3)).toBeNull();
   });
 
-  it("returns 4.25 ZEC for 2-char names", () => {
-    expect(claimCost(2)).toBe(425_000_000);
+  it("returns tier by name length index", () => {
+    expect(claimCost(tiers, 1)).toBe(600_000_000);
+    expect(claimCost(tiers, 3)).toBe(300_000_000);
+    expect(claimCost(tiers, 6)).toBe(50_000_000);
   });
 
-  it("returns 3 ZEC for 3-char names", () => {
-    expect(claimCost(3)).toBe(300_000_000);
+  it("clamps long names to last tier", () => {
+    expect(claimCost(tiers, 7)).toBe(50_000_000);
+    expect(claimCost(tiers, 62)).toBe(50_000_000);
   });
 
-  it("returns 1.5 ZEC for 4-char names", () => {
-    expect(claimCost(4)).toBe(150_000_000);
+  it("single-tier array returns that tier for all lengths", () => {
+    expect(claimCost([25_000_000], 1)).toBe(25_000_000);
+    expect(claimCost([25_000_000], 10)).toBe(25_000_000);
   });
 
-  it("returns 0.75 ZEC for 5-char names", () => {
-    expect(claimCost(5)).toBe(75_000_000);
-  });
-
-  it("returns 0.50 ZEC for 6-char names", () => {
-    expect(claimCost(6)).toBe(50_000_000);
-  });
-
-  it("returns 0.25 ZEC for 7+ char names", () => {
-    expect(claimCost(7)).toBe(25_000_000);
-    expect(claimCost(10)).toBe(25_000_000);
-    expect(claimCost(62)).toBe(25_000_000);
+  it("treats nameLength 0 as 1", () => {
+    expect(claimCost(tiers, 0)).toBe(600_000_000);
   });
 });

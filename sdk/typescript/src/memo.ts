@@ -2,6 +2,14 @@ import { isValidName } from "./validation.js";
 
 // ── Signing payloads ────────────────────────────────────────────────────────
 
+export function claimPayload(name: string, ua: string): string {
+  return `CLAIM:${name}:${ua}`;
+}
+
+export function buyPayload(name: string, buyerUa: string): string {
+  return `BUY:${name}:${buyerUa}`;
+}
+
 export function listPayload(name: string, price: number, nonce: number): string {
   return `LIST:${name}:${price}:${nonce}`;
 }
@@ -14,16 +22,20 @@ export function updatePayload(name: string, newUa: string, nonce: number): strin
   return `UPDATE:${name}:${newUa}:${nonce}`;
 }
 
-// ── Memo builders ───────────────────────────────────────────────────────────
-
-export function buildClaimMemo(name: string, ua: string): string {
-  if (!isValidName(name)) throw new Error(`Invalid name: ${name}`);
-  return `ZNS:CLAIM:${name}:${ua}`;
+export function setPricePayload(prices: number[], nonce: number): string {
+  return `SETPRICE:${prices.length}:${prices.join(":")}:${nonce}`;
 }
 
-export function buildBuyMemo(name: string, buyerUa: string): string {
+// ── Memo builders ───────────────────────────────────────────────────────────
+
+export function buildClaimMemo(name: string, ua: string, signature: string): string {
   if (!isValidName(name)) throw new Error(`Invalid name: ${name}`);
-  return `ZNS:BUY:${name}:${buyerUa}`;
+  return `ZNS:CLAIM:${name}:${ua}:${signature}`;
+}
+
+export function buildBuyMemo(name: string, buyerUa: string, signature: string): string {
+  if (!isValidName(name)) throw new Error(`Invalid name: ${name}`);
+  return `ZNS:BUY:${name}:${buyerUa}:${signature}`;
 }
 
 export function buildListMemo(
@@ -49,4 +61,12 @@ export function buildUpdateMemo(
 ): string {
   if (!isValidName(name)) throw new Error(`Invalid name: ${name}`);
   return `ZNS:UPDATE:${name}:${newUa}:${nonce}:${signature}`;
+}
+
+export function buildSetPriceMemo(
+  prices: number[],
+  nonce: number,
+  signature: string,
+): string {
+  return `ZNS:SETPRICE:${prices.length}:${prices.join(":")}:${nonce}:${signature}`;
 }

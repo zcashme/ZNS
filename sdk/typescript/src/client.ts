@@ -1,6 +1,6 @@
 import type { ResolveResult, Listing, StatusResult, ListForSaleResult, EventsFilter, EventsResult } from "./types.js";
 import { ZNSError, ErrorType } from "./errors.js";
-import { DEFAULT_URL, UFVK } from "./constants.js";
+import { DEFAULT_URL, KNOWN_UIVKS } from "./constants.js";
 import { rpc } from "./rpc.js";
 
 export interface ClientOptions {
@@ -31,10 +31,10 @@ export async function createClient(
 
   if (!options.skipVerify) {
     const s = await call<StatusResult>("status");
-    if (s.ufvk !== UFVK) {
+    if (!KNOWN_UIVKS.includes(s.uivk)) {
       throw new ZNSError(
-        ErrorType.UfvkMismatch,
-        `UFVK mismatch: indexer returned "${s.ufvk.slice(0, 20)}..." but expected "${UFVK.slice(0, 20)}..."`,
+        ErrorType.UivkMismatch,
+        `UIVK mismatch: indexer returned "${s.uivk.slice(0, 20)}..." which is not a known ZNS instance`,
       );
     }
     verified = true;

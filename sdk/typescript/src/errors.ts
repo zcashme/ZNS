@@ -5,7 +5,7 @@ export enum ErrorType {
   InvalidParams = -32602,
   InternalError = -32603,
   HttpError = -1,
-  UfvkMismatch = -2,
+  UivkMismatch = -2,
 }
 
 export class ZNSError extends Error {
