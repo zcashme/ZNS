@@ -5,32 +5,18 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use zcash_address::ZcashAddress;
 
 
-pub enum MemoAction {
-    Claim {
-        name: String,
-        ua: String,
-    },
-    List {
-        name: String,
-        price: u64,
-        nonce: u64,
-        signature: String,
-    },
-    Delist {
-        name: String,
-        nonce: u64,
-        signature: String,
-    },
-    Update {
-        name: String,
-        new_ua: String,
-        nonce: u64,
-        signature: String,
-    },
-    Buy {
-        name: String,
-        buyer_ua: String,
-    },
+pub struct MemoAction {
+    pub name: String,
+    pub signature: String,
+    pub kind: ActionKind,
+}
+
+pub enum ActionKind {
+    Claim { ua: String },
+    List { price: u64, nonce: u64 },
+    Delist { nonce: u64 },
+    Update { new_ua: String, nonce: u64 },
+    Buy { buyer_ua: String },
 }
 
 // ── Pricing ─────────────────────────────────────────────────────────────────
@@ -72,17 +58,20 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
     let s = s.trim_end_matches('\0');
 
     if let Some(rest) = s.strip_prefix("ZNS:CLAIM:") {
-        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-        if parts.len() != 2 {
+        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+        if parts.len() != 3 {
             return None;
         }
-        let (name, ua) = (parts[0], parts[1]);
+        let (name, ua, sig_b64) = (parts[0], parts[1], parts[2]);
         if !validate_name(name) || !validate_ua(ua) {
             return None;
         }
-        return Some(MemoAction::Claim {
+        let payload = format!("CLAIM:{name}:{ua}");
+        verify_signature(&payload, sig_b64, admin_pubkey)?;
+        return Some(MemoAction {
             name: name.into(),
-            ua: ua.into(),
+            signature: sig_b64.into(),
+            kind: ActionKind::Claim { ua: ua.into() },
         });
     }
 
@@ -99,11 +88,10 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         let nonce: u64 = nonce_str.parse().ok()?;
         let payload = format!("LIST:{name}:{price}:{nonce}");
         verify_signature(&payload, sig_b64, admin_pubkey)?;
-        return Some(MemoAction::List {
+        return Some(MemoAction {
             name: name.into(),
-            price,
-            nonce,
             signature: sig_b64.into(),
+            kind: ActionKind::List { price, nonce },
         });
     }
 
@@ -119,10 +107,10 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         let nonce: u64 = nonce_str.parse().ok()?;
         let payload = format!("DELIST:{name}:{nonce}");
         verify_signature(&payload, sig_b64, admin_pubkey)?;
-        return Some(MemoAction::Delist {
+        return Some(MemoAction {
             name: name.into(),
-            nonce,
             signature: sig_b64.into(),
+            kind: ActionKind::Delist { nonce },
         });
     }
 
@@ -138,26 +126,28 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         let nonce: u64 = nonce_str.parse().ok()?;
         let payload = format!("UPDATE:{name}:{new_ua}:{nonce}");
         verify_signature(&payload, sig_b64, admin_pubkey)?;
-        return Some(MemoAction::Update {
+        return Some(MemoAction {
             name: name.into(),
-            new_ua: new_ua.into(),
-            nonce,
             signature: sig_b64.into(),
+            kind: ActionKind::Update { new_ua: new_ua.into(), nonce },
         });
     }
 
     if let Some(rest) = s.strip_prefix("ZNS:BUY:") {
-        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-        if parts.len() != 2 {
+        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+        if parts.len() != 3 {
             return None;
         }
-        let (name, buyer_ua) = (parts[0], parts[1]);
+        let (name, buyer_ua, sig_b64) = (parts[0], parts[1], parts[2]);
         if !validate_name(name) || !validate_ua(buyer_ua) {
             return None;
         }
-        return Some(MemoAction::Buy {
+        let payload = format!("BUY:{name}:{buyer_ua}");
+        verify_signature(&payload, sig_b64, admin_pubkey)?;
+        return Some(MemoAction {
             name: name.into(),
-            buyer_ua: buyer_ua.into(),
+            signature: sig_b64.into(),
+            kind: ActionKind::Buy { buyer_ua: buyer_ua.into() },
         });
     }
 

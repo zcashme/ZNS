@@ -74,12 +74,13 @@ pub fn create_registration(
     db: &Connection,
     name: &str,
     ua: &str,
+    signature: &str,
     txid: &str,
     height: u64,
 ) -> rusqlite::Result<bool> {
     db.execute(
-        "INSERT OR IGNORE INTO registrations (name, ua, txid, height) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![name, ua, txid, height as i64],
+        "INSERT OR IGNORE INTO registrations (name, ua, signature, txid, height) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![name, ua, signature, txid, height as i64],
     )?;
     Ok(db.changes() > 0)
 }
@@ -112,13 +113,14 @@ pub fn process_buy(
     db: &Connection,
     name: &str,
     new_ua: &str,
+    signature: &str,
     txid: &str,
     height: u64,
 ) -> rusqlite::Result<()> {
     let tx = db.unchecked_transaction()?;
     tx.execute(
-        "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, nonce = 0 WHERE name = ?4",
-        rusqlite::params![new_ua, txid, height as i64, name],
+        "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, nonce = 0, signature = ?4 WHERE name = ?5",
+        rusqlite::params![new_ua, txid, height as i64, signature, name],
     )?;
     tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
     tx.commit()

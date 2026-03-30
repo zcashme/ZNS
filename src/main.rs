@@ -5,11 +5,11 @@
 // registrations and marketplace listings.
 //
 // Supported actions:
-//   CLAIM     — claim a name (first-come-first-served)
+//   CLAIM     — claim a name (admin-signed, first-come-first-served)
 //   LIST      — put a name up for sale at a price (admin-signed)
 //   DELIST    — remove a listing (admin-signed)
 //   UPDATE    — change the address behind a name (admin-signed)
-//   BUY       — purchase a listed name by sending sufficient ZEC
+//   BUY       — purchase a listed name (admin-signed)
 
 mod config; // env-var configuration
 mod decrypter; // block streaming and trial decryption
@@ -25,7 +25,7 @@ use rusqlite::Connection;
 use zcash_keys::keys::UnifiedFullViewingKey;
 
 use crate::config::Config;
-use crate::memo::MemoAction;
+use crate::memo::{ActionKind, MemoAction};
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -87,8 +87,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // ── Action dispatch ──────────────────────────────────────────────────────────
 
 fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &str, height: u64) {
-    match action {
-        MemoAction::Claim { name, ua } => {
+    let MemoAction { name, signature, kind } = action;
+
+    match kind {
+        ActionKind::Claim { ua } => {
             if registry::is_registered(db, &name, &ua) {
                 return;
             }
@@ -97,21 +99,16 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 eprintln!("CLAIM underpayment for {name}: {note_value} < {cost} zats");
                 return;
             }
-            match registry::create_registration(db, &name, &ua, txid, height) {
+            match registry::create_registration(db, &name, &ua, &signature, txid, height) {
                 Ok(true) => {
-                    let _ = registry::insert_event(db, &name, "CLAIM", txid, height, Some(&ua), None, None, None);
+                    let _ = registry::insert_event(db, &name, "CLAIM", txid, height, Some(&ua), None, None, Some(&signature));
                     println!("Claimed: {name} → {ua} for {note_value} zats (height {height})")
                 }
                 Ok(false) => eprintln!("Claim ignored (conflict): {name}"),
                 Err(e) => eprintln!("DB error (claim): {e}"),
             }
         }
-        MemoAction::List {
-            name,
-            price,
-            nonce,
-            signature,
-        } => {
+        ActionKind::List { price, nonce } => {
             if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
                 eprintln!("LIST: {e}");
                 return;
@@ -125,11 +122,7 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 Err(e) => eprintln!("DB error (list): {e}"),
             }
         }
-        MemoAction::Delist {
-            name,
-            nonce,
-            signature,
-        } => {
+        ActionKind::Delist { nonce } => {
             if registry::get_listing_price(db, &name).is_none() {
                 eprintln!("DELIST for unlisted name {name}");
                 return;
@@ -147,12 +140,7 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 Err(e) => eprintln!("DB error (delist): {e}"),
             }
         }
-        MemoAction::Update {
-            name,
-            new_ua,
-            nonce,
-            signature,
-        } => {
+        ActionKind::Update { new_ua, nonce } => {
             if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
                 eprintln!("UPDATE: {e}");
                 return;
@@ -165,7 +153,7 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 Err(e) => eprintln!("DB error (update): {e}"),
             }
         }
-        MemoAction::Buy { name, buyer_ua } => {
+        ActionKind::Buy { buyer_ua } => {
             let Some(price) = registry::get_listing_price(db, &name) else {
                 eprintln!("BUY for unlisted name {name}");
                 return;
@@ -174,9 +162,9 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 eprintln!("BUY underpayment for {name}: {note_value} < {price}");
                 return;
             }
-            match registry::process_buy(db, &name, &buyer_ua, txid, height) {
+            match registry::process_buy(db, &name, &buyer_ua, &signature, txid, height) {
                 Ok(()) => {
-                    let _ = registry::insert_event(db, &name, "BUY", txid, height, Some(&buyer_ua), Some(price), None, None);
+                    let _ = registry::insert_event(db, &name, "BUY", txid, height, Some(&buyer_ua), Some(price), None, Some(&signature));
                     println!("Sold: {name} → {buyer_ua} for {price} zats (height {height})")
                 }
                 Err(e) => eprintln!("DB error (buy): {e}"),
