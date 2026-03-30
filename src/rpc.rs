@@ -124,7 +124,8 @@ fn handle_status(db: &Connection, id: Value, state: &RpcState) -> Value {
                 let tiers_str: String = row.get(2)?;
                 let tiers: Vec<u64> = tiers_str
                     .split(':')
-                    .filter_map(|s| s.parse().ok())
+                    .filter_map(|s| s.parse::<u64>().ok())
+                    .map(|t| t * 10_000)
                     .collect();
                 Ok(json!({
                     "nonce": row.get::<_, i64>(0)?,

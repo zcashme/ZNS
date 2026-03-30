@@ -44,7 +44,7 @@ impl Config {
             "ZNS_LWD_URL",
             match network {
                 Network::TestNetwork => "https://testnet.zec.rocks:443",
-                Network::MainNetwork => "https://mainnet.zec.rocks:443",
+                Network::MainNetwork => "https://zec.rocks:443",
             },
         );
 
