@@ -17,22 +17,9 @@ pub enum ActionKind {
     Delist { nonce: u64 },
     Update { new_ua: String, nonce: u64 },
     Buy { buyer_ua: String },
+    SetPrice { prices: Vec<u64>, nonce: u64 },
 }
 
-// ── Pricing ─────────────────────────────────────────────────────────────────
-
-/// Returns the claim cost in zatoshis based on name length.
-pub fn claim_cost(name_len: usize) -> u64 {
-    match name_len {
-        1 => 600_000_000, // 6 ZEC
-        2 => 425_000_000, // 4.25 ZEC
-        3 => 300_000_000, // 3 ZEC
-        4 => 150_000_000, // 1.5 ZEC
-        5 => 75_000_000,  // 0.75 ZEC
-        6 => 50_000_000,  // 0.50 ZEC
-        _ => 25_000_000,  // 0.25 ZEC (7+)
-    }
-}
 
 // ── Validation ───────────────────────────────────────────────────────────────
 
@@ -56,6 +43,35 @@ pub fn validate_name(name: &str) -> bool {
 pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoAction> {
     let s = std::str::from_utf8(memo).ok()?;
     let s = s.trim_end_matches('\0');
+
+    if let Some(rest) = s.strip_prefix("ZNS:SETPRICE:") {
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.len() < 3 {
+            return None;
+        }
+        let count: usize = parts[0].parse().ok()?;
+        if parts.len() != count + 3 {
+            return None;
+        }
+        let mut prices = Vec::with_capacity(count);
+        for p in &parts[1..=count] {
+            prices.push(p.parse::<u64>().ok()?);
+        }
+        let nonce: u64 = parts[count + 1].parse().ok()?;
+        let sig_b64 = parts[count + 2];
+
+        let payload = format!(
+            "SETPRICE:{}",
+            parts[..parts.len() - 1].join(":")
+        );
+        verify_signature(&payload, sig_b64, admin_pubkey)?;
+
+        return Some(MemoAction {
+            name: String::new(),
+            signature: sig_b64.into(),
+            kind: ActionKind::SetPrice { prices, nonce },
+        });
+    }
 
     if let Some(rest) = s.strip_prefix("ZNS:CLAIM:") {
         let parts: Vec<&str> = rest.splitn(3, ':').collect();

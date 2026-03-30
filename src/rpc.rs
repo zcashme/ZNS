@@ -116,6 +116,26 @@ fn handle_list_for_sale(db: &Connection, id: Value) -> Value {
 }
 
 fn handle_status(db: &Connection, id: Value, state: &RpcState) -> Value {
+    let pricing = db
+        .query_row(
+            "SELECT nonce, height, tiers FROM pricing WHERE id = 1",
+            [],
+            |row| {
+                let tiers_str: String = row.get(2)?;
+                let tiers: Vec<u64> = tiers_str
+                    .split(':')
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                Ok(json!({
+                    "nonce": row.get::<_, i64>(0)?,
+                    "height": row.get::<_, i64>(1)?,
+                    "tiers": tiers,
+                }))
+            },
+        )
+        .ok()
+        .unwrap_or(Value::Null);
+
     jsonrpc_ok(
         id,
         json!({
@@ -124,6 +144,7 @@ fn handle_status(db: &Connection, id: Value, state: &RpcState) -> Value {
             "ufvk": state.ufvk,
             "registered": count_rows(db, "registrations"),
             "listed": count_rows(db, "listings"),
+            "pricing": pricing,
         }),
     )
 }

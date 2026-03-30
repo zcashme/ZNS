@@ -34,7 +34,15 @@ pub fn open_db(path: &str) -> rusqlite::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_events_name   ON events(name);
         CREATE INDEX IF NOT EXISTS idx_events_action ON events(action);
-        CREATE INDEX IF NOT EXISTS idx_events_height ON events(height);",
+        CREATE INDEX IF NOT EXISTS idx_events_height ON events(height);
+        CREATE TABLE IF NOT EXISTS pricing (
+            id        INTEGER PRIMARY KEY CHECK (id = 1),
+            nonce     INTEGER NOT NULL,
+            tiers     TEXT NOT NULL,
+            height    INTEGER NOT NULL,
+            txid      TEXT NOT NULL,
+            signature TEXT NOT NULL
+        );",
     )?;
     Ok(conn)
 }
@@ -157,6 +165,45 @@ pub fn get_owner_ua(db: &Connection, name: &str) -> Option<String> {
         |row| row.get(0),
     )
     .ok()
+}
+
+pub fn get_pricing_nonce(db: &Connection) -> Option<u64> {
+    db.query_row("SELECT nonce FROM pricing WHERE id = 1", [], |row| {
+        Ok(row.get::<_, i64>(0)? as u64)
+    })
+    .ok()
+}
+
+pub fn store_pricing(
+    db: &Connection,
+    nonce: u64,
+    height: u64,
+    tiers_json: &str,
+    txid: &str,
+    signature: &str,
+) -> rusqlite::Result<()> {
+    db.execute(
+        "INSERT OR REPLACE INTO pricing (id, nonce, tiers, height, txid, signature) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![nonce as i64, tiers_json, height as i64, txid, signature],
+    )?;
+    Ok(())
+}
+
+/// Returns the claim cost in zatoshis for a name of the given length,
+/// or None if no pricing has been set yet.
+pub fn lookup_claim_cost(db: &Connection, name_len: usize) -> Option<u64> {
+    let tiers_str: String = db
+        .query_row("SELECT tiers FROM pricing WHERE id = 1", [], |row| row.get(0))
+        .ok()?;
+    let tiers: Vec<u64> = tiers_str
+        .split(':')
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if tiers.is_empty() {
+        return None;
+    }
+    let idx = (name_len.saturating_sub(1)).min(tiers.len() - 1);
+    Some(tiers[idx] * 10_000)
 }
 
 pub fn insert_event(

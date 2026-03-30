@@ -90,12 +90,31 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
     let MemoAction { name, signature, kind } = action;
 
     match kind {
+        ActionKind::SetPrice { prices, nonce } => {
+            if let Some(current) = registry::get_pricing_nonce(db)
+                && nonce <= current
+            {
+                eprintln!("SETPRICE: nonce {nonce} <= current {current}");
+                return;
+            }
+            let tiers_str: String = prices.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(":");
+            match registry::store_pricing(db, nonce, height, &tiers_str, txid, &signature) {
+                Ok(()) => {
+                    let _ = registry::insert_event(db, "", "SETPRICE", txid, height, None, None, Some(nonce), Some(&signature));
+                    println!("Pricing set: {} tiers, nonce {nonce} (height {height})", prices.len());
+                }
+                Err(e) => eprintln!("DB error (setprice): {e}"),
+            }
+        }
         ActionKind::Claim { ua } => {
             if registry::is_registered(db, &name, &ua) {
                 return;
             }
-            let cost = memo::claim_cost(name.len());
-            if note_value < cost {
+            let Some(cost) = registry::lookup_claim_cost(db, name.len()) else {
+                eprintln!("CLAIM rejected for {name}: no pricing set");
+                return;
+            };
+            if cost > 0 && note_value < cost {
                 eprintln!("CLAIM underpayment for {name}: {note_value} < {cost} zats");
                 return;
             }
