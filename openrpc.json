@@ -2,7 +2,7 @@
   "openrpc": "1.3.2",
   "info": {
     "title": "ZNS Indexer API",
-    "description": "Read-only JSON-RPC API for the Zcash Name System (ZNS). Provides name resolution, marketplace listings, and indexer status for names registered on Zcash testnet via Orchard shielded memos.",
+    "description": "Read-only JSON-RPC API for the Zcash Name System (ZNS). Provides name resolution, marketplace listings, and indexer status for names registered on Zcash (mainnet or testnet) via Orchard shielded memos.",
     "version": "0.1.0",
     "license": {
       "name": "MIT"
@@ -149,7 +149,7 @@
     {
       "name": "status",
       "summary": "Get indexer synchronization status",
-      "description": "Returns the current state of the ZNS indexer, including the latest synced block height, the admin public key used for signature verification, the UFVK being watched, and counts of registered names and active listings.",
+      "description": "Returns the current state of the ZNS indexer, including the latest synced block height, the admin public key used for signature verification, the UIVK being watched, counts of registered names and active listings, and the current pricing tiers.",
       "params": [],
       "result": {
         "name": "status",
@@ -166,9 +166,14 @@
             "value": {
               "synced_height": 3902500,
               "admin_pubkey": "abc123...",
-              "ufvk": "uviewtest1qqq...fff",
+              "uivk": "uivktest1qqq...fff",
               "registered": 42,
-              "listed": 3
+              "listed": 3,
+              "pricing": {
+                "nonce": 1,
+                "height": 3901000,
+                "tiers": [500000000, 100000000, 50000000, 10000000, 5000000]
+              }
             }
           }
         }
@@ -177,7 +182,7 @@
     {
       "name": "events",
       "summary": "Query the activity log with optional filters",
-      "description": "Returns historical ZNS events (CLAIM, LIST, DELIST, UPDATE, BUY) with optional filtering by name, action type(s), and block height. Results are ordered by block height descending. Supports pagination via limit and offset.",
+      "description": "Returns historical ZNS events (CLAIM, LIST, DELIST, UPDATE, BUY, SETPRICE) with optional filtering by name, action type(s), and block height. Results are ordered by block height descending. Supports pagination via limit and offset.",
       "params": [
         {
           "name": "name",
@@ -192,10 +197,10 @@
           "required": false,
           "schema": {
             "oneOf": [
-              { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY"] },
+              { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY", "SETPRICE"] },
               {
                 "type": "array",
-                "items": { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY"] }
+                "items": { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY", "SETPRICE"] }
               }
             ],
             "description": "Filter by action type(s). A single string or an array of strings."
@@ -262,7 +267,7 @@
                   "ua": "utest1qqq...fff",
                   "price": null,
                   "nonce": null,
-                  "signature": null
+                  "signature": "AQID..."
                 }
               ],
               "total": 2
@@ -288,7 +293,7 @@
                   "ua": "utest1qqq...fff",
                   "price": null,
                   "nonce": null,
-                  "signature": null
+                  "signature": "AQID..."
                 }
               ],
               "total": 1
@@ -417,7 +422,7 @@
           },
           "action": {
             "type": "string",
-            "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY"],
+            "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY", "SETPRICE"],
             "description": "The type of action that occurred"
           },
           "txid": {
@@ -442,7 +447,7 @@
           },
           "signature": {
             "type": ["string", "null"],
-            "description": "Ed25519 admin signature. Present for LIST, DELIST, UPDATE."
+            "description": "Ed25519 admin signature. Present for all action types."
           }
         }
       },
@@ -463,7 +468,7 @@
       },
       "StatusResult": {
         "type": "object",
-        "required": ["synced_height", "admin_pubkey", "ufvk", "registered", "listed"],
+        "required": ["synced_height", "admin_pubkey", "uivk", "registered", "listed", "pricing"],
         "properties": {
           "synced_height": {
             "type": "integer",
@@ -471,11 +476,11 @@
           },
           "admin_pubkey": {
             "type": "string",
-            "description": "Hex-encoded Ed25519 public key used to verify signatures"
+            "description": "Base64-encoded Ed25519 public key used to verify signatures"
           },
-          "ufvk": {
+          "uivk": {
             "type": "string",
-            "description": "Unified full viewing key the indexer watches for memos"
+            "description": "Unified incoming viewing key the indexer watches for memos"
           },
           "registered": {
             "type": "integer",
@@ -484,6 +489,32 @@
           "listed": {
             "type": "integer",
             "description": "Number of names currently listed for sale"
+          },
+          "pricing": {
+            "type": "object",
+            "description": "Current pricing configuration, or null if not yet set",
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["nonce", "height", "tiers"],
+                "properties": {
+                  "nonce": {
+                    "type": "integer",
+                    "description": "Replay-protection counter for the pricing record"
+                  },
+                  "height": {
+                    "type": "integer",
+                    "description": "Block height at which this pricing was set"
+                  },
+                  "tiers": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "Claim costs in zatoshis, indexed by name length (index 0 = 1-char names)"
+                  }
+                }
+              },
+              { "type": "null" }
+            ]
           }
         }
       }
