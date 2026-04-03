@@ -143,6 +143,13 @@ pub fn delete_listing(db: &Connection, name: &str, signature: &str) -> rusqlite:
     Ok(())
 }
 
+pub fn delete_registration(db: &Connection, name: &str) -> rusqlite::Result<()> {
+    let tx = db.unchecked_transaction()?;
+    tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
+    tx.execute("DELETE FROM registrations WHERE name = ?1", [name])?;
+    tx.commit()
+}
+
 pub fn update_address(
     db: &Connection,
     name: &str,

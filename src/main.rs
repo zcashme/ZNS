@@ -211,6 +211,33 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 Err(e) => eprintln!("DB error (delist): {e}"),
             }
         }
+        ActionKind::Release { nonce } => {
+            if registry::get_owner_ua(db, &name).is_none() {
+                eprintln!("RELEASE for unregistered name {name}");
+                return;
+            }
+            if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
+                eprintln!("RELEASE: {e}");
+                return;
+            }
+            match registry::delete_registration(db, &name) {
+                Ok(()) => {
+                    let _ = registry::insert_event(
+                        db,
+                        &name,
+                        "RELEASE",
+                        txid,
+                        height,
+                        None,
+                        None,
+                        Some(nonce),
+                        Some(&signature),
+                    );
+                    println!("Released: {name} (height {height})")
+                }
+                Err(e) => eprintln!("DB error (release): {e}"),
+            }
+        }
         ActionKind::Update { new_ua, nonce } => {
             if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
                 eprintln!("UPDATE: {e}");

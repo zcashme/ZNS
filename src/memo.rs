@@ -14,6 +14,7 @@ pub enum ActionKind {
     Claim { ua: String },
     List { price: u64, nonce: u64 },
     Delist { nonce: u64 },
+    Release { nonce: u64 },
     Update { new_ua: String, nonce: u64 },
     Buy { buyer_ua: String },
     SetPrice { prices: Vec<u64>, nonce: u64 },
@@ -122,6 +123,25 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
             name: name.into(),
             signature: sig_b64.into(),
             kind: ActionKind::Delist { nonce },
+        });
+    }
+
+    if let Some(rest) = s.strip_prefix("ZNS:RELEASE:") {
+        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let (name, nonce_str, sig_b64) = (parts[0], parts[1], parts[2]);
+        if !validate_name(name) {
+            return None;
+        }
+        let nonce: u64 = nonce_str.parse().ok()?;
+        let payload = format!("RELEASE:{name}:{nonce}");
+        verify_signature(&payload, sig_b64, admin_pubkey)?;
+        return Some(MemoAction {
+            name: name.into(),
+            signature: sig_b64.into(),
+            kind: ActionKind::Release { nonce },
         });
     }
 
