@@ -182,7 +182,7 @@
     {
       "name": "events",
       "summary": "Query the activity log with optional filters",
-      "description": "Returns historical ZNS events (CLAIM, LIST, DELIST, UPDATE, BUY, SETPRICE) with optional filtering by name, action type(s), and block height. Results are ordered by block height descending. Supports pagination via limit and offset.",
+      "description": "Returns historical ZNS events (CLAIM, LIST, DELIST, RELEASE, UPDATE, BUY, SETPRICE) with optional filtering by name, action type(s), and block height. Results are ordered by block height descending. Supports pagination via limit and offset.",
       "params": [
         {
           "name": "name",
@@ -197,10 +197,10 @@
           "required": false,
           "schema": {
             "oneOf": [
-              { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY", "SETPRICE"] },
+              { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "RELEASE", "UPDATE", "BUY", "SETPRICE"] },
               {
                 "type": "array",
-                "items": { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY", "SETPRICE"] }
+                "items": { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "RELEASE", "UPDATE", "BUY", "SETPRICE"] }
               }
             ],
             "description": "Filter by action type(s). A single string or an array of strings."
@@ -422,7 +422,7 @@
           },
           "action": {
             "type": "string",
-            "enum": ["CLAIM", "LIST", "DELIST", "UPDATE", "BUY", "SETPRICE"],
+            "enum": ["CLAIM", "LIST", "DELIST", "RELEASE", "UPDATE", "BUY", "SETPRICE"],
             "description": "The type of action that occurred"
           },
           "txid": {
