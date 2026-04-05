@@ -7,17 +7,18 @@ use zcash_address::ZcashAddress;
 pub struct MemoAction {
     pub name: String,
     pub signature: String,
+    pub nonce: Option<u64>,
     pub kind: ActionKind,
 }
 
 pub enum ActionKind {
     Claim { ua: String },
-    List { price: u64, nonce: u64 },
-    Delist { nonce: u64 },
-    Release { nonce: u64 },
-    Update { new_ua: String, nonce: u64 },
+    List { price: u64 },
+    Delist,
+    Release,
+    Update { new_ua: String },
     Buy { buyer_ua: String },
-    SetPrice { prices: Vec<u64>, nonce: u64 },
+    SetPrice { prices: Vec<u64> },
 }
 
 // ── Validation ───────────────────────────────────────────────────────────────
@@ -65,7 +66,8 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         return Some(MemoAction {
             name: String::new(),
             signature: sig_b64.into(),
-            kind: ActionKind::SetPrice { prices, nonce },
+            nonce: Some(nonce),
+            kind: ActionKind::SetPrice { prices },
         });
     }
 
@@ -83,6 +85,7 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
+            nonce: None,
             kind: ActionKind::Claim { ua: ua.into() },
         });
     }
@@ -103,7 +106,8 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            kind: ActionKind::List { price, nonce },
+            nonce: Some(nonce),
+            kind: ActionKind::List { price },
         });
     }
 
@@ -122,7 +126,8 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            kind: ActionKind::Delist { nonce },
+            nonce: Some(nonce),
+            kind: ActionKind::Delist,
         });
     }
 
@@ -141,7 +146,8 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            kind: ActionKind::Release { nonce },
+            nonce: Some(nonce),
+            kind: ActionKind::Release,
         });
     }
 
@@ -160,9 +166,9 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
+            nonce: Some(nonce),
             kind: ActionKind::Update {
                 new_ua: new_ua.into(),
-                nonce,
             },
         });
     }
@@ -181,6 +187,7 @@ pub fn parse_memo(memo: &[u8; 512], admin_pubkey: &[u8; 32]) -> Option<MemoActio
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
+            nonce: None,
             kind: ActionKind::Buy {
                 buyer_ua: buyer_ua.into(),
             },

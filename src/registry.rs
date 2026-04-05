@@ -2,6 +2,8 @@
 
 use rusqlite::Connection;
 
+use crate::memo::MemoAction;
+
 pub struct Registry {
     db: Connection,
 }
@@ -230,27 +232,25 @@ impl Registry {
 
     pub fn insert_event(
         &self,
-        name: &str,
-        action: &str,
+        memo: &MemoAction,
+        action_label: &str,
         txid: &str,
         height: u64,
         ua: Option<&str>,
         price: Option<u64>,
-        nonce: Option<u64>,
-        signature: Option<&str>,
     ) -> rusqlite::Result<()> {
         self.db.execute(
             "INSERT INTO events (name, action, txid, height, ua, price, nonce, signature)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
-                name,
-                action,
+                memo.name,
+                action_label,
                 txid,
                 height as i64,
                 ua,
                 price.map(|p| p as i64),
-                nonce.map(|n| n as i64),
-                signature,
+                memo.nonce.map(|n| n as i64),
+                memo.signature,
             ],
         )?;
         Ok(())
