@@ -33,7 +33,7 @@ impl Registry {
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 name      TEXT NOT NULL,
                 action    TEXT NOT NULL,
-                txid      TEXT NOT NULL,
+                txid      TEXT NOT NULL UNIQUE,
                 height    INTEGER NOT NULL,
                 ua        TEXT,
                 price     INTEGER,
@@ -240,7 +240,7 @@ impl Registry {
         price: Option<u64>,
     ) -> rusqlite::Result<()> {
         self.db.execute(
-            "INSERT INTO events (name, action, txid, height, ua, price, nonce, signature)
+            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, price, nonce, signature)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 memo.name,
