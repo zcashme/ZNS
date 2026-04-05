@@ -24,7 +24,6 @@ use base64::Engine;
 use orchard::keys::PreparedIncomingViewingKey;
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 
-use crate::config::Config;
 use crate::memo::{ActionKind, MemoAction};
 use crate::registry::Registry;
 
@@ -34,36 +33,37 @@ use crate::registry::Registry;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let cfg = Config::from_env().map_err(|e| format!("config error: {e}"))?;
+    let (uivk_str, admin_pubkey) =
+        config::load_secrets().map_err(|e| format!("config error: {e}"))?;
 
-    let uivk = UnifiedIncomingViewingKey::decode(&cfg.network, &cfg.uivk)
+    let uivk = UnifiedIncomingViewingKey::decode(&config::NETWORK, &uivk_str)
         .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
     let orchard_ivk = uivk.orchard().as_ref().expect("UIVK has no Orchard key");
     let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
-    let reg = Registry::open(&cfg.db_path)?;
+    let reg = Registry::open(config::DB_PATH)?;
 
     let synced_height = Arc::new(AtomicU64::new(0));
-    let rpc_addr = format!("0.0.0.0:{}", cfg.rpc_port);
+    let rpc_addr = format!("0.0.0.0:{}", config::RPC_PORT);
     let rpc_state = Arc::new(rpc::RpcState {
-        db_path: cfg.db_path.clone(),
+        db_path: config::DB_PATH.to_string(),
         synced_height: synced_height.clone(),
-        admin_pubkey: base64::engine::general_purpose::STANDARD.encode(cfg.admin_pubkey),
-        uivk: cfg.uivk.clone(),
+        admin_pubkey: base64::engine::general_purpose::STANDARD.encode(admin_pubkey),
+        uivk: uivk_str,
     });
     tokio::spawn(rpc::serve(rpc_addr, rpc_state));
 
-    println!("Connecting to {}...", cfg.lwd_url);
-    let mut client = decrypter::Client::connect(cfg.lwd_url.clone()).await?;
+    println!("Connecting to {}...", config::LWD_URL);
+    let mut client = decrypter::Client::connect(config::LWD_URL.to_string()).await?;
 
-    let mut last_scanned = cfg.birthday - 100;
+    let mut last_scanned = config::BIRTHDAY - 100;
 
     loop {
         let Some(tip) = decrypter::get_chain_tip(&mut client).await else {
-            tokio::time::sleep(cfg.poll_interval).await;
+            tokio::time::sleep(config::POLL_INTERVAL).await;
             continue;
         };
         if last_scanned >= tip {
-            tokio::time::sleep(cfg.poll_interval).await;
+            tokio::time::sleep(config::POLL_INTERVAL).await;
             continue;
         }
 
@@ -71,9 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Scanning {start}..={tip}");
 
         let (notes, scanned_to) =
-            decrypter::scan_range(&mut client, &pivk, &cfg.network, start, tip).await;
+            decrypter::scan_range(&mut client, &pivk, &config::NETWORK, start, tip).await;
         for note in notes {
-            let Some(action) = memo::parse_memo(&note.memo, &cfg.admin_pubkey) else {
+            let Some(action) = memo::parse_memo(&note.memo, &admin_pubkey) else {
                 continue;
             };
             handle_action(&reg, action, note.value, &note.txid.to_string(), note.height);
