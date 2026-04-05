@@ -2,7 +2,28 @@
 
 use std::time::Duration;
 
+#[cfg(all(feature = "testnet", feature = "mainnet"))]
+compile_error!("features 'testnet' and 'mainnet' are mutually exclusive");
+
+#[cfg(not(any(feature = "testnet", feature = "mainnet")))]
+compile_error!("exactly one of 'testnet' or 'mainnet' must be enabled");
+
 use zcash_protocol::consensus::Network;
+
+#[cfg(feature = "testnet")]
+pub const NETWORK: Network = Network::TestNetwork;
+#[cfg(feature = "mainnet")]
+pub const NETWORK: Network = Network::MainNetwork;
+
+#[cfg(feature = "testnet")]
+const DEFAULT_LWD_URL: &str = "https://testnet.zec.rocks:443";
+#[cfg(feature = "mainnet")]
+const DEFAULT_LWD_URL: &str = "https://zec.rocks:443";
+
+#[cfg(feature = "testnet")]
+const DEFAULT_BIRTHDAY: u64 = 1_842_420; // NU5 activation
+#[cfg(feature = "mainnet")]
+const DEFAULT_BIRTHDAY: u64 = 1_687_104; // NU5 activation
 
 pub struct Config {
     pub network: Network,
@@ -30,33 +51,9 @@ impl Config {
     ///   ZNS_RPC_PORT     — RPC server port (default: 3000)
     ///   ZNS_POLL_INTERVAL — seconds between chain tip polls (default: 10)
     pub fn from_env() -> Result<Self, String> {
-        let network = match env_or("ZNS_NETWORK", "testnet").as_str() {
-            "testnet" => Network::TestNetwork,
-            "mainnet" => Network::MainNetwork,
-            other => {
-                return Err(format!(
-                    "ZNS_NETWORK must be 'testnet' or 'mainnet', got '{other}'"
-                ));
-            }
-        };
-
-        let lwd_url = env_or(
-            "ZNS_LWD_URL",
-            match network {
-                Network::TestNetwork => "https://testnet.zec.rocks:443",
-                Network::MainNetwork => "https://zec.rocks:443",
-            },
-        );
-
+        let lwd_url = env_or("ZNS_LWD_URL", DEFAULT_LWD_URL);
         let uivk = std::env::var("ZNS_UIVK").map_err(|_| "ZNS_UIVK is required")?;
-
-        let birthday = env_parse::<u64>(
-            "ZNS_BIRTHDAY",
-            match network {
-                Network::TestNetwork => 3_901_175,
-                Network::MainNetwork => 2_800_000,
-            },
-        )?;
+        let birthday = env_parse::<u64>("ZNS_BIRTHDAY", DEFAULT_BIRTHDAY)?;
 
         let db_path = env_or("ZNS_DB_PATH", "zns.db");
         let rpc_port = env_parse::<u16>("ZNS_RPC_PORT", 3000)?;
@@ -68,7 +65,7 @@ impl Config {
         .map_err(|e| format!("ZNS_ADMIN_PUBKEY: {e}"))?;
 
         Ok(Config {
-            network,
+            network: NETWORK,
             lwd_url,
             uivk,
             birthday,
