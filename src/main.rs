@@ -22,11 +22,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
 use orchard::keys::PreparedIncomingViewingKey;
-use rusqlite::Connection;
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 
 use crate::config::Config;
 use crate::memo::{ActionKind, MemoAction};
+use crate::registry::Registry;
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
     let orchard_ivk = uivk.orchard().as_ref().expect("UIVK has no Orchard key");
     let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
-    let db = registry::open_db(&cfg.db_path)?;
+    let reg = Registry::open(&cfg.db_path)?;
 
     let synced_height = Arc::new(AtomicU64::new(0));
     let rpc_addr = format!("0.0.0.0:{}", cfg.rpc_port);
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(action) = memo::parse_memo(&note.memo, &cfg.admin_pubkey) else {
                 continue;
             };
-            handle_action(&db, action, note.value, &note.txid.to_string(), note.height);
+            handle_action(&reg, action, note.value, &note.txid.to_string(), note.height);
         }
         last_scanned = scanned_to;
         synced_height.store(last_scanned, Ordering::Relaxed);
@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // ── Action dispatch ──────────────────────────────────────────────────────────
 
-fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &str, height: u64) {
+fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str, height: u64) {
     let MemoAction {
         name,
         signature,
@@ -96,7 +96,7 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
 
     match kind {
         ActionKind::SetPrice { prices, nonce } => {
-            if let Some(current) = registry::get_pricing_nonce(db) {
+            if let Some(current) = reg.get_pricing_nonce() {
                 if nonce <= current {
                     eprintln!("SETPRICE: nonce {nonce} <= current {current}");
                     return;
@@ -107,10 +107,9 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 .map(|p| p.to_string())
                 .collect::<Vec<_>>()
                 .join(":");
-            match registry::store_pricing(db, nonce, height, &tiers_str, txid, &signature) {
+            match reg.store_pricing(nonce, height, &tiers_str, txid, &signature) {
                 Ok(()) => {
-                    let _ = registry::insert_event(
-                        db,
+                    let _ = reg.insert_event(
                         "",
                         "SETPRICE",
                         txid,
@@ -129,10 +128,10 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
         }
         ActionKind::Claim { ua } => {
-            if registry::is_registered(db, &name) {
+            if reg.is_registered(&name) {
                 return;
             }
-            let Some(cost) = registry::lookup_claim_cost(db, name.len()) else {
+            let Some(cost) = reg.lookup_claim_cost(name.len()) else {
                 eprintln!("CLAIM rejected for {name}: no pricing set");
                 return;
             };
@@ -140,10 +139,9 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 eprintln!("CLAIM underpayment for {name}: {note_value} < {cost} zats");
                 return;
             }
-            match registry::create_registration(db, &name, &ua, &signature, txid, height) {
+            match reg.create_registration(&name, &ua, &signature, txid, height) {
                 Ok(true) => {
-                    let _ = registry::insert_event(
-                        db,
+                    let _ = reg.insert_event(
                         &name,
                         "CLAIM",
                         txid,
@@ -160,15 +158,14 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
         }
         ActionKind::List { price, nonce } => {
-            if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
+            if let Err(e) = reg.validate_and_increment_nonce(&name, nonce) {
                 eprintln!("LIST: {e}");
                 return;
             }
-            let owner_ua = registry::get_owner_ua(db, &name);
-            match registry::create_listing(db, &name, price, &signature, txid, height) {
+            let owner_ua = reg.get_owner_ua(&name);
+            match reg.create_listing(&name, price, &signature, txid, height) {
                 Ok(()) => {
-                    let _ = registry::insert_event(
-                        db,
+                    let _ = reg.insert_event(
                         &name,
                         "LIST",
                         txid,
@@ -184,19 +181,18 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
         }
         ActionKind::Delist { nonce } => {
-            if registry::get_listing_price(db, &name).is_none() {
+            if reg.get_listing_price(&name).is_none() {
                 eprintln!("DELIST for unlisted name {name}");
                 return;
             }
 
-            if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
+            if let Err(e) = reg.validate_and_increment_nonce(&name, nonce) {
                 eprintln!("DELIST: {e}");
                 return;
             }
-            match registry::delete_listing(db, &name, &signature) {
+            match reg.delete_listing(&name, &signature) {
                 Ok(()) => {
-                    let _ = registry::insert_event(
-                        db,
+                    let _ = reg.insert_event(
                         &name,
                         "DELIST",
                         txid,
@@ -212,18 +208,17 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
         }
         ActionKind::Release { nonce } => {
-            if registry::get_owner_ua(db, &name).is_none() {
+            if reg.get_owner_ua(&name).is_none() {
                 eprintln!("RELEASE for unregistered name {name}");
                 return;
             }
-            if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
+            if let Err(e) = reg.validate_and_increment_nonce(&name, nonce) {
                 eprintln!("RELEASE: {e}");
                 return;
             }
-            match registry::delete_registration(db, &name) {
+            match reg.delete_registration(&name) {
                 Ok(()) => {
-                    let _ = registry::insert_event(
-                        db,
+                    let _ = reg.insert_event(
                         &name,
                         "RELEASE",
                         txid,
@@ -239,14 +234,13 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
         }
         ActionKind::Update { new_ua, nonce } => {
-            if let Err(e) = registry::validate_and_increment_nonce(db, &name, nonce) {
+            if let Err(e) = reg.validate_and_increment_nonce(&name, nonce) {
                 eprintln!("UPDATE: {e}");
                 return;
             }
-            match registry::update_address(db, &name, &new_ua, &signature, txid, height) {
+            match reg.update_address(&name, &new_ua, &signature, txid, height) {
                 Ok(()) => {
-                    let _ = registry::insert_event(
-                        db,
+                    let _ = reg.insert_event(
                         &name,
                         "UPDATE",
                         txid,
@@ -262,7 +256,7 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
         }
         ActionKind::Buy { buyer_ua } => {
-            let Some(price) = registry::get_listing_price(db, &name) else {
+            let Some(price) = reg.get_listing_price(&name) else {
                 eprintln!("BUY for unlisted name {name}");
                 return;
             };
@@ -270,10 +264,9 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
                 eprintln!("BUY underpayment for {name}: {note_value} < {price}");
                 return;
             }
-            match registry::process_buy(db, &name, &buyer_ua, &signature, txid, height) {
+            match reg.process_buy(&name, &buyer_ua, &signature, txid, height) {
                 Ok(()) => {
-                    let _ = registry::insert_event(
-                        db,
+                    let _ = reg.insert_event(
                         &name,
                         "BUY",
                         txid,

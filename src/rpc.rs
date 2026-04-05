@@ -3,12 +3,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rusqlite::Connection;
-use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use zcash_address::ZcashAddress;
+
+use crate::registry::Registry;
 
 pub struct RpcState {
     pub db_path: String,
@@ -63,58 +63,70 @@ fn handle_request(body: &str, state: &RpcState) -> Value {
     };
     let params = req.get("params").cloned().unwrap_or(Value::Null);
 
-    let db = match Connection::open(&state.db_path) {
-        Ok(db) => db,
+    let reg = match Registry::open(&state.db_path) {
+        Ok(r) => r,
         Err(_) => return jsonrpc_error(id, -32603, "Internal error"),
     };
 
     match method {
-        "resolve" => handle_resolve(&db, id, &params),
-        "list_for_sale" => handle_list_for_sale(&db, id),
-        "status" => handle_status(&db, id, state),
-        "events" => handle_events(&db, id, &params),
+        "resolve" => handle_resolve(&reg, id, &params),
+        "list_for_sale" => handle_list_for_sale(&reg, id),
+        "status" => handle_status(&reg, id, state),
+        "events" => handle_events(&reg, id, &params),
         _ => jsonrpc_error(id, -32601, "Method not found"),
     }
 }
 
 // ── Method handlers ──────────────────────────────────────────────────────────
 
-fn handle_resolve(db: &Connection, id: Value, params: &Value) -> Value {
+fn handle_resolve(reg: &Registry, id: Value, params: &Value) -> Value {
     let query = match params.get("query").and_then(|q| q.as_str()) {
         Some(q) => q,
         None => return jsonrpc_error(id, -32602, "Invalid params: missing 'query'"),
     };
 
     if query.parse::<ZcashAddress>().is_ok() {
-        let regs = resolve_by_address(db, query);
+        let regs = reg.resolve_by_address(query);
         let results: Vec<Value> = regs
             .iter()
-            .map(|reg| {
-                let listing = get_listing(db, &reg.name);
+            .map(|r| {
+                let listing = reg.get_listing(&r.name);
                 json!({
-                    "name": reg.name,
-                    "address": reg.address,
-                    "txid": reg.txid,
-                    "height": reg.height,
-                    "nonce": reg.nonce,
-                    "signature": reg.signature,
-                    "listing": listing,
+                    "name": r.name,
+                    "address": r.address,
+                    "txid": r.txid,
+                    "height": r.height,
+                    "nonce": r.nonce,
+                    "signature": r.signature,
+                    "listing": listing.map(|l| json!({
+                        "name": l.name,
+                        "price": l.price,
+                        "txid": l.txid,
+                        "height": l.height,
+                        "signature": l.signature,
+                    })),
                 })
             })
             .collect();
         jsonrpc_ok(id, json!(results))
     } else {
-        let result = match resolve_by_name(db, query) {
-            Some(reg) => {
-                let listing = get_listing(db, &reg.name);
+        let result = match reg.resolve_by_name(query) {
+            Some(r) => {
+                let listing = reg.get_listing(&r.name);
                 json!({
-                    "name": reg.name,
-                    "address": reg.address,
-                    "txid": reg.txid,
-                    "height": reg.height,
-                    "nonce": reg.nonce,
-                    "signature": reg.signature,
-                    "listing": listing,
+                    "name": r.name,
+                    "address": r.address,
+                    "txid": r.txid,
+                    "height": r.height,
+                    "nonce": r.nonce,
+                    "signature": r.signature,
+                    "listing": listing.map(|l| json!({
+                        "name": l.name,
+                        "price": l.price,
+                        "txid": l.txid,
+                        "height": l.height,
+                        "signature": l.signature,
+                    })),
                 })
             }
             None => Value::Null,
@@ -123,32 +135,31 @@ fn handle_resolve(db: &Connection, id: Value, params: &Value) -> Value {
     }
 }
 
-fn handle_list_for_sale(db: &Connection, id: Value) -> Value {
-    let listings = list_for_sale(db);
+fn handle_list_for_sale(reg: &Registry, id: Value) -> Value {
+    let listings: Vec<Value> = reg
+        .list_for_sale()
+        .into_iter()
+        .map(|l| {
+            json!({
+                "name": l.name,
+                "price": l.price,
+                "txid": l.txid,
+                "height": l.height,
+                "signature": l.signature,
+            })
+        })
+        .collect();
     jsonrpc_ok(id, json!({ "listings": listings }))
 }
 
-fn handle_status(db: &Connection, id: Value, state: &RpcState) -> Value {
-    let pricing = db
-        .query_row(
-            "SELECT nonce, height, tiers FROM pricing WHERE id = 1",
-            [],
-            |row| {
-                let tiers_str: String = row.get(2)?;
-                let tiers: Vec<u64> = tiers_str
-                    .split(':')
-                    .filter_map(|s| s.parse::<u64>().ok())
-                    .map(|t| t * 10_000)
-                    .collect();
-                Ok(json!({
-                    "nonce": row.get::<_, i64>(0)?,
-                    "height": row.get::<_, i64>(1)?,
-                    "tiers": tiers,
-                }))
-            },
-        )
-        .ok()
-        .unwrap_or(Value::Null);
+fn handle_status(reg: &Registry, id: Value, state: &RpcState) -> Value {
+    let pricing = reg.get_pricing().map(|p| {
+        json!({
+            "nonce": p.nonce,
+            "height": p.height,
+            "tiers": p.tiers,
+        })
+    });
 
     jsonrpc_ok(
         id,
@@ -156,45 +167,14 @@ fn handle_status(db: &Connection, id: Value, state: &RpcState) -> Value {
             "synced_height": state.synced_height.load(Ordering::Relaxed),
             "admin_pubkey": state.admin_pubkey,
             "uivk": state.uivk,
-            "registered": count_rows(db, "registrations"),
-            "listed": count_rows(db, "listings"),
+            "registered": reg.count_registrations(),
+            "listed": reg.count_listings(),
             "pricing": pricing,
         }),
     )
 }
 
-// ── JSON-RPC envelope ────────────────────────────────────────────────────────
-
-fn jsonrpc_ok(id: Value, result: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": result })
-}
-
-fn jsonrpc_error(id: Value, code: i32, message: &str) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-}
-
-// ── DB reads ─────────────────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-struct Registration {
-    name: String,
-    address: String,
-    txid: String,
-    height: u64,
-    nonce: u64,
-    signature: Option<String>,
-}
-
-#[derive(Serialize)]
-struct Listing {
-    name: String,
-    price: u64,
-    txid: String,
-    height: u64,
-    signature: String,
-}
-
-fn handle_events(db: &Connection, id: Value, params: &Value) -> Value {
+fn handle_events(reg: &Registry, id: Value, params: &Value) -> Value {
     let name = params.get("name").and_then(|v| v.as_str());
     let actions: Vec<&str> = match params.get("action") {
         Some(Value::String(s)) => vec![s.as_str()],
@@ -206,161 +186,38 @@ fn handle_events(db: &Connection, id: Value, params: &Value) -> Value {
         .get("limit")
         .and_then(|v| v.as_u64())
         .unwrap_or(50)
-        .min(500) as i64;
-    let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        .min(500);
+    let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let mut conditions = Vec::new();
-    let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let page = reg.query_events(name, &actions, since_height, limit, offset);
 
-    if let Some(n) = name {
-        conditions.push(format!("name = ?{}", bind.len() + 1));
-        bind.push(Box::new(n.to_string()));
-    }
-    if !actions.is_empty() {
-        let placeholders: Vec<String> = actions
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", bind.len() + i + 1))
-            .collect();
-        conditions.push(format!("action IN ({})", placeholders.join(",")));
-        for a in &actions {
-            bind.push(Box::new(a.to_string()));
-        }
-    }
-    if let Some(h) = since_height {
-        conditions.push(format!("height > ?{}", bind.len() + 1));
-        bind.push(Box::new(h as i64));
-    }
-
-    let where_clause = if conditions.is_empty() {
-        "1=1".to_string()
-    } else {
-        conditions.join(" AND ")
-    };
-
-    // Count total matching events
-    let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_clause}");
-    let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
-    let total: u64 = db
-        .query_row(&count_sql, &*bind_refs, |row| {
-            Ok(row.get::<_, i64>(0)? as u64)
-        })
-        .unwrap_or(0);
-
-    // Fetch page of events
-    let query_sql = format!(
-        "SELECT id, name, action, txid, height, ua, price, nonce, signature \
-         FROM events WHERE {where_clause} ORDER BY height DESC, id DESC LIMIT ?{} OFFSET ?{}",
-        bind.len() + 1,
-        bind.len() + 2,
-    );
-    bind.push(Box::new(limit));
-    bind.push(Box::new(offset));
-    let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
-
-    let mut stmt = match db.prepare(&query_sql) {
-        Ok(s) => s,
-        Err(_) => return jsonrpc_error(id, -32603, "Internal error"),
-    };
-    let events: Vec<Value> = match stmt.query_map(&*bind_refs, |row| {
-        Ok(json!({
-            "id": row.get::<_, i64>(0)?,
-            "name": row.get::<_, String>(1)?,
-            "action": row.get::<_, String>(2)?,
-            "txid": row.get::<_, String>(3)?,
-            "height": row.get::<_, i64>(4)?,
-            "ua": row.get::<_, Option<String>>(5)?,
-            "price": row.get::<_, Option<i64>>(6)?,
-            "nonce": row.get::<_, Option<i64>>(7)?,
-            "signature": row.get::<_, Option<String>>(8)?,
-        }))
-    }) {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(_) => return jsonrpc_error(id, -32603, "Internal error"),
-    };
-
-    jsonrpc_ok(id, json!({ "events": events, "total": total }))
-}
-
-fn resolve_by_name(db: &Connection, name: &str) -> Option<Registration> {
-    db.query_row(
-        "SELECT name, ua, txid, height, nonce, signature FROM registrations WHERE name = ?1",
-        [name],
-        |row| {
-            Ok(Registration {
-                name: row.get(0)?,
-                address: row.get(1)?,
-                txid: row.get(2)?,
-                height: row.get::<_, i64>(3)? as u64,
-                nonce: row.get::<_, i64>(4)? as u64,
-                signature: row.get(5)?,
+    let events: Vec<Value> = page
+        .events
+        .into_iter()
+        .map(|e| {
+            json!({
+                "id": e.id,
+                "name": e.name,
+                "action": e.action,
+                "txid": e.txid,
+                "height": e.height,
+                "ua": e.ua,
+                "price": e.price,
+                "nonce": e.nonce,
+                "signature": e.signature,
             })
-        },
-    )
-    .ok()
-}
-
-fn resolve_by_address(db: &Connection, address: &str) -> Vec<Registration> {
-    let mut stmt = db
-        .prepare("SELECT name, ua, txid, height, nonce, signature FROM registrations WHERE ua = ?1")
-        .unwrap();
-    stmt.query_map([address], |row| {
-        Ok(Registration {
-            name: row.get(0)?,
-            address: row.get(1)?,
-            txid: row.get(2)?,
-            height: row.get::<_, i64>(3)? as u64,
-            nonce: row.get::<_, i64>(4)? as u64,
-            signature: row.get(5)?,
         })
-    })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect()
+        .collect();
+
+    jsonrpc_ok(id, json!({ "events": events, "total": page.total }))
 }
 
-fn get_listing(db: &Connection, name: &str) -> Option<Listing> {
-    db.query_row(
-        "SELECT name, price, txid, height, signature FROM listings WHERE name = ?1",
-        [name],
-        |row| {
-            Ok(Listing {
-                name: row.get(0)?,
-                price: row.get::<_, i64>(1)? as u64,
-                txid: row.get(2)?,
-                height: row.get::<_, i64>(3)? as u64,
-                signature: row.get(4)?,
-            })
-        },
-    )
-    .ok()
+// ── JSON-RPC envelope ────────────────────────────────────────────────────────
+
+fn jsonrpc_ok(id: Value, result: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
-fn list_for_sale(db: &Connection) -> Vec<Listing> {
-    let mut stmt = db
-        .prepare(
-            "SELECT l.name, l.price, l.txid, l.height, l.signature
-         FROM listings l
-         ORDER BY l.height DESC",
-        )
-        .unwrap();
-    stmt.query_map([], |row| {
-        Ok(Listing {
-            name: row.get(0)?,
-            price: row.get::<_, i64>(1)? as u64,
-            txid: row.get(2)?,
-            height: row.get::<_, i64>(3)? as u64,
-            signature: row.get(4)?,
-        })
-    })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect()
-}
-
-fn count_rows(db: &Connection, table: &str) -> u64 {
-    db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-        Ok(row.get::<_, i64>(0)? as u64)
-    })
-    .unwrap_or(0)
+fn jsonrpc_error(id: Value, code: i32, message: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
