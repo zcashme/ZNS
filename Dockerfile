@@ -1,9 +1,11 @@
 # --- Build stage ---
-FROM rust:1.86-bookworm AS builder
+FROM rust:1.94-bookworm AS builder
+ARG FEATURES
+RUN test -n "$FEATURES" || (echo "FEATURES required (testnet or mainnet)" && exit 1)
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
-RUN cargo build --release
+RUN cargo build --release --features "$FEATURES"
 
 # --- Runtime stage ---
 FROM debian:bookworm-slim

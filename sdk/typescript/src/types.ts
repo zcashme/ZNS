@@ -44,7 +44,7 @@ export interface StatusResult {
 export interface Event {
   id: number;
   name: string;
-  action: "CLAIM" | "LIST" | "DELIST" | "UPDATE" | "BUY";
+  action: "CLAIM" | "LIST" | "DELIST" | "RELEASE" | "UPDATE" | "BUY" | "SETPRICE";
   txid: string;
   height: number;
   ua: string | null;
@@ -55,7 +55,7 @@ export interface Event {
 
 export interface EventsFilter {
   name?: string;
-  action?: string | string[];
+  action?: string;
   since_height?: number;
   limit?: number;
   offset?: number;

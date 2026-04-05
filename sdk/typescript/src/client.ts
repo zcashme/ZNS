@@ -10,7 +10,7 @@ export interface ClientOptions {
 export interface ZNSClient {
   readonly url: string;
   readonly verified: boolean;
-  resolve(query: string): Promise<ResolveResult | null>;
+  resolve(query: string): Promise<ResolveResult | ResolveResult[] | null>;
   listings(): Promise<Listing[]>;
   status(): Promise<StatusResult>;
   events(filter?: EventsFilter): Promise<EventsResult>;
@@ -45,7 +45,7 @@ export async function createClient(
     verified,
 
     async resolve(query: string) {
-      return call<ResolveResult | null>("resolve", { query });
+      return call<ResolveResult | ResolveResult[] | null>("resolve", { query });
     },
 
     async listings() {
@@ -68,7 +68,8 @@ export async function createClient(
 
     async getNonce(name: string) {
       const result = await client.resolve(name);
-      return result?.nonce ?? null;
+      if (result === null || Array.isArray(result)) return null;
+      return result.nonce;
     },
   };
 
