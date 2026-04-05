@@ -85,29 +85,42 @@ fn handle_resolve(db: &Connection, id: Value, params: &Value) -> Value {
         None => return jsonrpc_error(id, -32602, "Invalid params: missing 'query'"),
     };
 
-    let registration = if query.parse::<ZcashAddress>().is_ok() {
-        resolve_by_address(db, query)
-    } else {
-        resolve_by_name(db, query)
-    };
-
-    let result = match registration {
-        Some(reg) => {
-            let listing = get_listing(db, &reg.name);
-            json!({
-                "name": reg.name,
-                "address": reg.address,
-                "txid": reg.txid,
-                "height": reg.height,
-                "nonce": reg.nonce,
-                "signature": reg.signature,
-                "listing": listing,
+    if query.parse::<ZcashAddress>().is_ok() {
+        let regs = resolve_by_address(db, query);
+        let results: Vec<Value> = regs
+            .iter()
+            .map(|reg| {
+                let listing = get_listing(db, &reg.name);
+                json!({
+                    "name": reg.name,
+                    "address": reg.address,
+                    "txid": reg.txid,
+                    "height": reg.height,
+                    "nonce": reg.nonce,
+                    "signature": reg.signature,
+                    "listing": listing,
+                })
             })
-        }
-        None => Value::Null,
-    };
-
-    jsonrpc_ok(id, result)
+            .collect();
+        jsonrpc_ok(id, json!(results))
+    } else {
+        let result = match resolve_by_name(db, query) {
+            Some(reg) => {
+                let listing = get_listing(db, &reg.name);
+                json!({
+                    "name": reg.name,
+                    "address": reg.address,
+                    "txid": reg.txid,
+                    "height": reg.height,
+                    "nonce": reg.nonce,
+                    "signature": reg.signature,
+                    "listing": listing,
+                })
+            }
+            None => Value::Null,
+        };
+        jsonrpc_ok(id, result)
+    }
 }
 
 fn handle_list_for_sale(db: &Connection, id: Value) -> Value {
@@ -287,22 +300,23 @@ fn resolve_by_name(db: &Connection, name: &str) -> Option<Registration> {
     .ok()
 }
 
-fn resolve_by_address(db: &Connection, address: &str) -> Option<Registration> {
-    db.query_row(
-        "SELECT name, ua, txid, height, nonce, signature FROM registrations WHERE ua = ?1",
-        [address],
-        |row| {
-            Ok(Registration {
-                name: row.get(0)?,
-                address: row.get(1)?,
-                txid: row.get(2)?,
-                height: row.get::<_, i64>(3)? as u64,
-                nonce: row.get::<_, i64>(4)? as u64,
-                signature: row.get(5)?,
-            })
-        },
-    )
-    .ok()
+fn resolve_by_address(db: &Connection, address: &str) -> Vec<Registration> {
+    let mut stmt = db
+        .prepare("SELECT name, ua, txid, height, nonce, signature FROM registrations WHERE ua = ?1")
+        .unwrap();
+    stmt.query_map([address], |row| {
+        Ok(Registration {
+            name: row.get(0)?,
+            address: row.get(1)?,
+            txid: row.get(2)?,
+            height: row.get::<_, i64>(3)? as u64,
+            nonce: row.get::<_, i64>(4)? as u64,
+            signature: row.get(5)?,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
 }
 
 fn get_listing(db: &Connection, name: &str) -> Option<Listing> {

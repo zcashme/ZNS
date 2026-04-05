@@ -8,12 +8,13 @@ pub fn open_db(path: &str) -> rusqlite::Result<Connection> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS registrations (
             name      TEXT PRIMARY KEY,
-            ua        TEXT NOT NULL UNIQUE,
+            ua        TEXT NOT NULL,
             txid      TEXT NOT NULL,
             height    INTEGER NOT NULL,
             nonce     INTEGER NOT NULL DEFAULT 0,
             signature TEXT
         );
+        CREATE INDEX IF NOT EXISTS idx_registrations_ua ON registrations(ua);
         CREATE TABLE IF NOT EXISTS listings (
             name      TEXT PRIMARY KEY REFERENCES registrations(name),
             price     INTEGER NOT NULL,
@@ -47,10 +48,10 @@ pub fn open_db(path: &str) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-pub fn is_registered(db: &Connection, name: &str, ua: &str) -> bool {
+pub fn is_registered(db: &Connection, name: &str) -> bool {
     db.query_row(
-        "SELECT 1 FROM registrations WHERE name = ?1 OR ua = ?2",
-        rusqlite::params![name, ua],
+        "SELECT 1 FROM registrations WHERE name = ?1",
+        [name],
         |_| Ok(()),
     )
     .is_ok()

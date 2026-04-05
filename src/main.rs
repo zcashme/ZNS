@@ -129,7 +129,7 @@ fn handle_action(db: &Connection, action: MemoAction, note_value: u64, txid: &st
             }
         }
         ActionKind::Claim { ua } => {
-            if registry::is_registered(db, &name, &ua) {
+            if registry::is_registered(db, &name) {
                 return;
             }
             let Some(cost) = registry::lookup_claim_cost(db, name.len()) else {
