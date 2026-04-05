@@ -1,11 +1,14 @@
-// ZNS JSON-RPC server — read-only API over raw TCP.
+// ZNS JSON-RPC server — jsonrpsee-based API.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use jsonrpsee::core::RpcResult;
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::server::Server;
+use jsonrpsee::types::ErrorObjectOwned;
+use serde::Serialize;
+use serde_json::{self, Value};
 use zcash_address::ZcashAddress;
 
 use crate::registry::Registry;
@@ -17,207 +20,222 @@ pub struct RpcState {
     pub uivk: String,
 }
 
-pub async fn serve(addr: String, state: Arc<RpcState>) -> std::io::Result<()> {
-    let listener = TcpListener::bind(&addr).await?;
-    println!("RPC server listening on {addr}");
+// ── Response types ──────────────────────────────────────────────────────────
 
-    loop {
-        let (mut stream, _) = listener.accept().await?;
-        let state = state.clone();
-
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 65536];
-            let n = match stream.read(&mut buf).await {
-                Ok(n) if n > 0 => n,
-                _ => return,
-            };
-
-            let request = String::from_utf8_lossy(&buf[..n]);
-            let body = match request.find("\r\n\r\n") {
-                Some(i) => &request[i + 4..],
-                None => return,
-            };
-
-            let response = handle_request(body, &state);
-            let json = response.to_string();
-            let http = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                json.len(),
-                json
-            );
-            let _ = stream.write_all(http.as_bytes()).await;
-        });
-    }
+#[derive(Clone, Serialize)]
+pub(crate) struct RegistrationEntry {
+    name: String,
+    address: String,
+    txid: String,
+    height: u64,
+    nonce: u64,
+    signature: Option<String>,
+    listing: Option<ListingEntry>,
 }
 
-fn handle_request(body: &str, state: &RpcState) -> Value {
-    let req: Value = match serde_json::from_str(body) {
-        Ok(v) => v,
-        Err(_) => return jsonrpc_error(Value::Null, -32700, "Parse error"),
-    };
-
-    let id = req.get("id").cloned().unwrap_or(Value::Null);
-    let method = match req.get("method").and_then(|m| m.as_str()) {
-        Some(m) => m,
-        None => return jsonrpc_error(id, -32600, "Invalid request"),
-    };
-    let params = req.get("params").cloned().unwrap_or(Value::Null);
-
-    let reg = match Registry::open(&state.db_path) {
-        Ok(r) => r,
-        Err(_) => return jsonrpc_error(id, -32603, "Internal error"),
-    };
-
-    match method {
-        "resolve" => handle_resolve(&reg, id, &params),
-        "list_for_sale" => handle_list_for_sale(&reg, id),
-        "status" => handle_status(&reg, id, state),
-        "events" => handle_events(&reg, id, &params),
-        _ => jsonrpc_error(id, -32601, "Method not found"),
-    }
+#[derive(Clone, Serialize)]
+pub(crate) struct ListingEntry {
+    name: String,
+    price: u64,
+    txid: String,
+    height: u64,
+    signature: String,
 }
 
-// ── Method handlers ──────────────────────────────────────────────────────────
+#[derive(Clone, Serialize)]
+pub(crate) struct ListForSaleResult {
+    listings: Vec<ListingEntry>,
+}
 
-fn handle_resolve(reg: &Registry, id: Value, params: &Value) -> Value {
-    let query = match params.get("query").and_then(|q| q.as_str()) {
-        Some(q) => q,
-        None => return jsonrpc_error(id, -32602, "Invalid params: missing 'query'"),
-    };
+#[derive(Clone, Serialize)]
+pub(crate) struct StatusResult {
+    synced_height: u64,
+    admin_pubkey: String,
+    uivk: String,
+    registered: u64,
+    listed: u64,
+    pricing: Option<PricingEntry>,
+}
 
-    if query.parse::<ZcashAddress>().is_ok() {
-        let regs = reg.resolve_by_address(query);
-        let results: Vec<Value> = regs
-            .iter()
-            .map(|r| {
-                let listing = reg.get_listing(&r.name);
-                json!({
-                    "name": r.name,
-                    "address": r.address,
-                    "txid": r.txid,
-                    "height": r.height,
-                    "nonce": r.nonce,
-                    "signature": r.signature,
-                    "listing": listing.map(|l| json!({
-                        "name": l.name,
-                        "price": l.price,
-                        "txid": l.txid,
-                        "height": l.height,
-                        "signature": l.signature,
-                    })),
+#[derive(Clone, Serialize)]
+pub(crate) struct PricingEntry {
+    nonce: u64,
+    height: u64,
+    tiers: Vec<u64>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct EventEntry {
+    id: u64,
+    name: String,
+    action: String,
+    txid: String,
+    height: u64,
+    ua: Option<String>,
+    price: Option<u64>,
+    nonce: Option<u64>,
+    signature: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct EventsResult {
+    events: Vec<EventEntry>,
+    total: u64,
+}
+
+// ── RPC trait ───────────────────────────────────────────────────────────────
+
+#[rpc(server)]
+pub trait ZnsApi {
+    #[method(name = "resolve", blocking)]
+    fn resolve(&self, query: String) -> RpcResult<Value>;
+
+    #[method(name = "list_for_sale", blocking)]
+    fn list_for_sale(&self) -> RpcResult<ListForSaleResult>;
+
+    #[method(name = "status", blocking)]
+    fn status(&self) -> RpcResult<StatusResult>;
+
+    #[method(name = "events", blocking)]
+    fn events(
+        &self,
+        name: Option<String>,
+        action: Option<String>,
+        since_height: Option<u64>,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> RpcResult<EventsResult>;
+}
+
+// ── Implementation ──────────────────────────────────────────────────────────
+
+impl ZnsApiServer for RpcState {
+    fn resolve(&self, query: String) -> RpcResult<Value> {
+        let reg = open_registry(&self.db_path)?;
+
+        if query.parse::<ZcashAddress>().is_ok() {
+            let entries: Vec<RegistrationEntry> = reg
+                .resolve_by_address(&query)
+                .into_iter()
+                .map(|r| {
+                    let listing = reg.get_listing(&r.name).map(listing_entry);
+                    registration_entry(r, listing)
                 })
+                .collect();
+            Ok(serde_json::to_value(entries).unwrap())
+        } else {
+            let entry = reg.resolve_by_name(&query).map(|r| {
+                let listing = reg.get_listing(&r.name).map(listing_entry);
+                registration_entry(r, listing)
+            });
+            Ok(serde_json::to_value(entry).unwrap())
+        }
+    }
+
+    fn list_for_sale(&self) -> RpcResult<ListForSaleResult> {
+        let reg = open_registry(&self.db_path)?;
+        let listings = reg.list_for_sale().into_iter().map(listing_entry).collect();
+        Ok(ListForSaleResult { listings })
+    }
+
+    fn status(&self) -> RpcResult<StatusResult> {
+        let reg = open_registry(&self.db_path)?;
+        let pricing = reg.get_pricing().map(|p| PricingEntry {
+            nonce: p.nonce,
+            height: p.height,
+            tiers: p.tiers,
+        });
+        Ok(StatusResult {
+            synced_height: self.synced_height.load(Ordering::Relaxed),
+            admin_pubkey: self.admin_pubkey.clone(),
+            uivk: self.uivk.clone(),
+            registered: reg.count_registrations(),
+            listed: reg.count_listings(),
+            pricing,
+        })
+    }
+
+    fn events(
+        &self,
+        name: Option<String>,
+        action: Option<String>,
+        since_height: Option<u64>,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> RpcResult<EventsResult> {
+        let reg = open_registry(&self.db_path)?;
+        let limit = limit.unwrap_or(50).min(500);
+        let offset = offset.unwrap_or(0);
+        let actions: Vec<&str> = action.as_deref().into_iter().collect();
+
+        let page = reg.query_events(name.as_deref(), &actions, since_height, limit, offset);
+
+        let events = page
+            .events
+            .into_iter()
+            .map(|e| EventEntry {
+                id: e.id,
+                name: e.name,
+                action: e.action,
+                txid: e.txid,
+                height: e.height,
+                ua: e.ua,
+                price: e.price,
+                nonce: e.nonce,
+                signature: e.signature,
             })
             .collect();
-        jsonrpc_ok(id, json!(results))
-    } else {
-        let result = match reg.resolve_by_name(query) {
-            Some(r) => {
-                let listing = reg.get_listing(&r.name);
-                json!({
-                    "name": r.name,
-                    "address": r.address,
-                    "txid": r.txid,
-                    "height": r.height,
-                    "nonce": r.nonce,
-                    "signature": r.signature,
-                    "listing": listing.map(|l| json!({
-                        "name": l.name,
-                        "price": l.price,
-                        "txid": l.txid,
-                        "height": l.height,
-                        "signature": l.signature,
-                    })),
-                })
-            }
-            None => Value::Null,
-        };
-        jsonrpc_ok(id, result)
+
+        Ok(EventsResult {
+            events,
+            total: page.total,
+        })
     }
 }
 
-fn handle_list_for_sale(reg: &Registry, id: Value) -> Value {
-    let listings: Vec<Value> = reg
-        .list_for_sale()
-        .into_iter()
-        .map(|l| {
-            json!({
-                "name": l.name,
-                "price": l.price,
-                "txid": l.txid,
-                "height": l.height,
-                "signature": l.signature,
-            })
-        })
-        .collect();
-    jsonrpc_ok(id, json!({ "listings": listings }))
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+fn open_registry(db_path: &str) -> RpcResult<Registry> {
+    Registry::open(db_path)
+        .map_err(|_| ErrorObjectOwned::owned(-32603, "Internal error", None::<()>))
 }
 
-fn handle_status(reg: &Registry, id: Value, state: &RpcState) -> Value {
-    let pricing = reg.get_pricing().map(|p| {
-        json!({
-            "nonce": p.nonce,
-            "height": p.height,
-            "tiers": p.tiers,
-        })
-    });
-
-    jsonrpc_ok(
-        id,
-        json!({
-            "synced_height": state.synced_height.load(Ordering::Relaxed),
-            "admin_pubkey": state.admin_pubkey,
-            "uivk": state.uivk,
-            "registered": reg.count_registrations(),
-            "listed": reg.count_listings(),
-            "pricing": pricing,
-        }),
-    )
+fn registration_entry(
+    r: crate::registry::Registration,
+    listing: Option<ListingEntry>,
+) -> RegistrationEntry {
+    RegistrationEntry {
+        name: r.name,
+        address: r.address,
+        txid: r.txid,
+        height: r.height,
+        nonce: r.nonce,
+        signature: r.signature,
+        listing,
+    }
 }
 
-fn handle_events(reg: &Registry, id: Value, params: &Value) -> Value {
-    let name = params.get("name").and_then(|v| v.as_str());
-    let actions: Vec<&str> = match params.get("action") {
-        Some(Value::String(s)) => vec![s.as_str()],
-        Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
-        _ => vec![],
+fn listing_entry(l: crate::registry::Listing) -> ListingEntry {
+    ListingEntry {
+        name: l.name,
+        price: l.price,
+        txid: l.txid,
+        height: l.height,
+        signature: l.signature,
+    }
+}
+
+// ── Server ──────────────────────────────────────────────────────────────────
+
+pub async fn serve(addr: String, state: RpcState) {
+    let server = match Server::builder().build(&addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("RPC server failed to bind {addr}: {e}");
+            return;
+        }
     };
-    let since_height = params.get("since_height").and_then(|v| v.as_u64());
-    let limit = params
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(50)
-        .min(500);
-    let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
-
-    let page = reg.query_events(name, &actions, since_height, limit, offset);
-
-    let events: Vec<Value> = page
-        .events
-        .into_iter()
-        .map(|e| {
-            json!({
-                "id": e.id,
-                "name": e.name,
-                "action": e.action,
-                "txid": e.txid,
-                "height": e.height,
-                "ua": e.ua,
-                "price": e.price,
-                "nonce": e.nonce,
-                "signature": e.signature,
-            })
-        })
-        .collect();
-
-    jsonrpc_ok(id, json!({ "events": events, "total": page.total }))
-}
-
-// ── JSON-RPC envelope ────────────────────────────────────────────────────────
-
-fn jsonrpc_ok(id: Value, result: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": result })
-}
-
-fn jsonrpc_error(id: Value, code: i32, message: &str) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+    let handle = server.start(state.into_rpc());
+    println!("RPC server listening on {addr}");
+    handle.stopped().await;
 }

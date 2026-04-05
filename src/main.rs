@@ -44,12 +44,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let synced_height = Arc::new(AtomicU64::new(0));
     let rpc_addr = format!("0.0.0.0:{}", config::RPC_PORT);
-    let rpc_state = Arc::new(rpc::RpcState {
+    let rpc_state = rpc::RpcState {
         db_path: config::DB_PATH.to_string(),
         synced_height: synced_height.clone(),
         admin_pubkey: base64::engine::general_purpose::STANDARD.encode(admin_pubkey),
         uivk: uivk_str,
-    });
+    };
     tokio::spawn(rpc::serve(rpc_addr, rpc_state));
 
     println!("Connecting to {}...", config::LWD_URL);
@@ -76,7 +76,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(action) = memo::parse_memo(&note.memo, &admin_pubkey) else {
                 continue;
             };
-            handle_action(&reg, action, note.value, &note.txid.to_string(), note.height);
+            handle_action(
+                &reg,
+                action,
+                note.value,
+                &note.txid.to_string(),
+                note.height,
+            );
         }
         last_scanned = scanned_to;
         synced_height.store(last_scanned, Ordering::Relaxed);

@@ -415,8 +415,7 @@ impl Registry {
             conditions.join(" AND ")
         };
 
-        let bind_refs: Vec<&dyn rusqlite::types::ToSql> =
-            bind.iter().map(|b| b.as_ref()).collect();
+        let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
         let total: u64 = self
             .db
             .query_row(
@@ -434,12 +433,16 @@ impl Registry {
         );
         bind.push(Box::new(limit as i64));
         bind.push(Box::new(offset as i64));
-        let bind_refs: Vec<&dyn rusqlite::types::ToSql> =
-            bind.iter().map(|b| b.as_ref()).collect();
+        let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
 
         let mut stmt = match self.db.prepare(&query_sql) {
             Ok(s) => s,
-            Err(_) => return EventPage { events: vec![], total },
+            Err(_) => {
+                return EventPage {
+                    events: vec![],
+                    total,
+                };
+            }
         };
         let events = match stmt.query_map(&*bind_refs, |row| {
             Ok(Event {
