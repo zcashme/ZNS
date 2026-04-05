@@ -18,7 +18,7 @@
     {
       "name": "resolve",
       "summary": "Look up a name or address registration",
-      "description": "Resolves a ZNS registration by name or by Zcash unified address. If the query parses as a valid Zcash address, it looks up the name registered to that address. Otherwise it treats the query as a name. Returns null if no registration is found.",
+      "description": "Resolves a ZNS registration by name or by Zcash unified address. If the query is a valid Zcash address, returns an array of all registrations bound to that address (one address may own multiple names). If the query is a name, returns a single registration object or null if not found.",
       "params": [
         {
           "name": "query",
@@ -31,10 +31,14 @@
       ],
       "result": {
         "name": "registration",
-        "description": "The registration record, or null if not found",
+        "description": "For name queries: a single ResolveResult or null. For address queries: an array of ResolveResult.",
         "schema": {
           "oneOf": [
             { "$ref": "#/components/schemas/ResolveResult" },
+            {
+              "type": "array",
+              "items": { "$ref": "#/components/schemas/ResolveResult" }
+            },
             { "type": "null" }
           ]
         }
@@ -83,6 +87,35 @@
                 "signature": "CQID..."
               }
             }
+          }
+        },
+        {
+          "name": "Resolve by address",
+          "params": [
+            { "name": "query", "value": "utest1qqq...fff" }
+          ],
+          "result": {
+            "name": "address registrations",
+            "value": [
+              {
+                "name": "alice",
+                "address": "utest1qqq...fff",
+                "txid": "abc123def456...",
+                "height": 3901200,
+                "nonce": 2,
+                "signature": "AQID...",
+                "listing": null
+              },
+              {
+                "name": "myname",
+                "address": "utest1qqq...fff",
+                "txid": "ccc999...",
+                "height": 3901400,
+                "nonce": 0,
+                "signature": "EQID...",
+                "listing": null
+              }
+            ]
           }
         },
         {
@@ -196,14 +229,9 @@
           "name": "action",
           "required": false,
           "schema": {
-            "oneOf": [
-              { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "RELEASE", "UPDATE", "BUY", "SETPRICE"] },
-              {
-                "type": "array",
-                "items": { "type": "string", "enum": ["CLAIM", "LIST", "DELIST", "RELEASE", "UPDATE", "BUY", "SETPRICE"] }
-              }
-            ],
-            "description": "Filter by action type(s). A single string or an array of strings."
+            "type": "string",
+            "enum": ["CLAIM", "LIST", "DELIST", "RELEASE", "UPDATE", "BUY", "SETPRICE"],
+            "description": "Filter by a single action type"
           }
         },
         {
@@ -303,7 +331,7 @@
         {
           "name": "Recent sales",
           "params": [
-            { "name": "action", "value": ["BUY"] },
+            { "name": "action", "value": "BUY" },
             { "name": "since_height", "value": 3901000 }
           ],
           "result": {
