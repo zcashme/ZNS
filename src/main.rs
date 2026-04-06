@@ -153,7 +153,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 return;
             }
             let owner_ua = reg.get_owner_ua(&action.name);
-            match reg.create_listing(&action.name, *price, &action.signature, txid, height) {
+            match reg.create_listing(&action.name, *price, nonce, &action.signature, txid, height) {
                 Ok(()) => {
                     let _ = reg.insert_event(
                         &action,

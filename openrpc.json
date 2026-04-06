@@ -61,6 +61,7 @@
               "height": 3901200,
               "nonce": 2,
               "signature": "AQID...",
+              "last_action": "UPDATE",
               "listing": null
             }
           }
@@ -79,9 +80,11 @@
               "height": 3901180,
               "nonce": 1,
               "signature": "BQUF...",
+              "last_action": "UPDATE",
               "listing": {
                 "name": "bob",
                 "price": 100000,
+                "nonce": 3,
                 "txid": "fed321...",
                 "height": 3901250,
                 "signature": "CQID..."
@@ -104,6 +107,7 @@
                 "height": 3901200,
                 "nonce": 2,
                 "signature": "AQID...",
+                "last_action": "UPDATE",
                 "listing": null
               },
               {
@@ -113,6 +117,7 @@
                 "height": 3901400,
                 "nonce": 0,
                 "signature": "EQID...",
+                "last_action": "CLAIM",
                 "listing": null
               }
             ]
@@ -152,6 +157,7 @@
                 {
                   "name": "bob",
                   "price": 100000,
+                  "nonce": 3,
                   "txid": "fed321...",
                   "height": 3901250,
                   "signature": "CQID..."
@@ -159,6 +165,7 @@
                 {
                   "name": "carol",
                   "price": 500000,
+                  "nonce": 1,
                   "txid": "aaa111...",
                   "height": 3901200,
                   "signature": "DQID..."
@@ -350,7 +357,7 @@
       "Registration": {
         "type": "object",
         "description": "A ZNS name registration",
-        "required": ["name", "address", "txid", "height", "nonce"],
+        "required": ["name", "address", "txid", "height", "nonce", "last_action"],
         "properties": {
           "name": {
             "type": "string",
@@ -370,18 +377,23 @@
           },
           "nonce": {
             "type": "integer",
-            "description": "Replay-protection counter, incremented on each update/list/delist"
+            "description": "Replay-protection counter, incremented on each update/delist. Reset to 0 on BUY."
           },
           "signature": {
             "type": ["string", "null"],
-            "description": "Ed25519 admin signature over the registration (null for legacy entries)"
+            "description": "Ed25519 admin signature over the most recent action that wrote this row. The pre-image depends on last_action — see that field for the format."
+          },
+          "last_action": {
+            "type": "string",
+            "enum": ["CLAIM", "UPDATE", "DELIST", "BUY"],
+            "description": "The action that produced the current signature. Determines the pre-image used for verification: CLAIM → \"CLAIM:{name}:{address}\"; UPDATE → \"UPDATE:{name}:{address}:{nonce}\"; DELIST → \"DELIST:{name}:{nonce}\"; BUY → \"BUY:{name}:{address}\"."
           }
         }
       },
       "Listing": {
         "type": "object",
         "description": "A marketplace listing for a registered name",
-        "required": ["name", "price", "txid", "height", "signature"],
+        "required": ["name", "price", "nonce", "txid", "height", "signature"],
         "properties": {
           "name": {
             "type": "string",
@@ -390,6 +402,10 @@
           "price": {
             "type": "integer",
             "description": "Asking price in zatoshis (1 ZEC = 100,000,000 zatoshis)"
+          },
+          "nonce": {
+            "type": "integer",
+            "description": "Replay-protection nonce used in the LIST signature pre-image. Required to reconstruct \"LIST:{name}:{price}:{nonce}\" for verification."
           },
           "txid": {
             "type": "string",
@@ -401,7 +417,7 @@
           },
           "signature": {
             "type": "string",
-            "description": "Ed25519 admin signature over the listing"
+            "description": "Ed25519 admin signature over \"LIST:{name}:{price}:{nonce}\""
           }
         }
       },

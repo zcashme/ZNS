@@ -30,6 +30,7 @@ pub(crate) struct RegistrationEntry {
     height: u64,
     nonce: u64,
     signature: Option<String>,
+    last_action: String,
     listing: Option<ListingEntry>,
 }
 
@@ -37,6 +38,7 @@ pub(crate) struct RegistrationEntry {
 pub(crate) struct ListingEntry {
     name: String,
     price: u64,
+    nonce: u64,
     txid: String,
     height: u64,
     signature: String,
@@ -211,6 +213,7 @@ fn registration_entry(
         height: r.height,
         nonce: r.nonce,
         signature: r.signature,
+        last_action: r.last_action,
         listing,
     }
 }
@@ -219,6 +222,7 @@ fn listing_entry(l: crate::registry::Listing) -> ListingEntry {
     ListingEntry {
         name: l.name,
         price: l.price,
+        nonce: l.nonce,
         txid: l.txid,
         height: l.height,
         signature: l.signature,

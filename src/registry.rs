@@ -14,17 +14,19 @@ impl Registry {
         let db = Connection::open(path)?;
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS registrations (
-                name      TEXT PRIMARY KEY,
-                ua        TEXT NOT NULL,
-                txid      TEXT NOT NULL,
-                height    INTEGER NOT NULL,
-                nonce     INTEGER NOT NULL DEFAULT 0,
-                signature TEXT
+                name        TEXT PRIMARY KEY,
+                ua          TEXT NOT NULL,
+                txid        TEXT NOT NULL,
+                height      INTEGER NOT NULL,
+                nonce       INTEGER NOT NULL DEFAULT 0,
+                signature   TEXT,
+                last_action TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_registrations_ua ON registrations(ua);
             CREATE TABLE IF NOT EXISTS listings (
                 name      TEXT PRIMARY KEY REFERENCES registrations(name),
                 price     INTEGER NOT NULL,
+                nonce     INTEGER NOT NULL,
                 txid      TEXT NOT NULL,
                 height    INTEGER NOT NULL,
                 signature TEXT NOT NULL
@@ -99,7 +101,7 @@ impl Registry {
         height: u64,
     ) -> rusqlite::Result<bool> {
         self.db.execute(
-            "INSERT OR IGNORE INTO registrations (name, ua, signature, txid, height) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR IGNORE INTO registrations (name, ua, signature, txid, height, last_action) VALUES (?1, ?2, ?3, ?4, ?5, 'CLAIM')",
             rusqlite::params![name, ua, signature, txid, height as i64],
         )?;
         Ok(self.db.changes() > 0)
@@ -109,13 +111,14 @@ impl Registry {
         &self,
         name: &str,
         price: u64,
+        nonce: u64,
         signature: &str,
         txid: &str,
         height: u64,
     ) -> rusqlite::Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO listings (name, price, signature, txid, height) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![name, price as i64, signature, txid, height as i64],
+            "INSERT OR REPLACE INTO listings (name, price, nonce, signature, txid, height) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![name, price as i64, nonce as i64, signature, txid, height as i64],
         )?;
         Ok(())
     }
@@ -140,7 +143,7 @@ impl Registry {
     ) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute(
-            "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, nonce = 0, signature = ?4 WHERE name = ?5",
+            "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, nonce = 0, signature = ?4, last_action = 'BUY' WHERE name = ?5",
             rusqlite::params![new_ua, txid, height as i64, signature, name],
         )?;
         tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
@@ -149,7 +152,7 @@ impl Registry {
 
     pub fn delete_listing(&self, name: &str, signature: &str) -> rusqlite::Result<()> {
         self.db.execute(
-            "UPDATE registrations SET signature = ?1 WHERE name = ?2",
+            "UPDATE registrations SET signature = ?1, last_action = 'DELIST' WHERE name = ?2",
             rusqlite::params![signature, name],
         )?;
         self.db
@@ -173,7 +176,7 @@ impl Registry {
         height: u64,
     ) -> rusqlite::Result<()> {
         self.db.execute(
-            "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, signature = ?4 WHERE name = ?5",
+            "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, signature = ?4, last_action = 'UPDATE' WHERE name = ?5",
             rusqlite::params![new_ua, txid, height as i64, signature, name],
         )?;
         Ok(())
@@ -261,7 +264,7 @@ impl Registry {
     pub fn resolve_by_name(&self, name: &str) -> Option<Registration> {
         self.db
             .query_row(
-                "SELECT name, ua, txid, height, nonce, signature FROM registrations WHERE name = ?1",
+                "SELECT name, ua, txid, height, nonce, signature, last_action FROM registrations WHERE name = ?1",
                 [name],
                 |row| {
                     Ok(Registration {
@@ -271,6 +274,7 @@ impl Registry {
                         height: row.get::<_, i64>(3)? as u64,
                         nonce: row.get::<_, i64>(4)? as u64,
                         signature: row.get(5)?,
+                        last_action: row.get(6)?,
                     })
                 },
             )
@@ -279,7 +283,7 @@ impl Registry {
 
     pub fn resolve_by_address(&self, address: &str) -> Vec<Registration> {
         let mut stmt = match self.db.prepare(
-            "SELECT name, ua, txid, height, nonce, signature FROM registrations WHERE ua = ?1",
+            "SELECT name, ua, txid, height, nonce, signature, last_action FROM registrations WHERE ua = ?1",
         ) {
             Ok(s) => s,
             Err(_) => return vec![],
@@ -292,6 +296,7 @@ impl Registry {
                 height: row.get::<_, i64>(3)? as u64,
                 nonce: row.get::<_, i64>(4)? as u64,
                 signature: row.get(5)?,
+                last_action: row.get(6)?,
             })
         })
         .unwrap_or_else(|_| panic!("query failed"))
@@ -302,15 +307,16 @@ impl Registry {
     pub fn get_listing(&self, name: &str) -> Option<Listing> {
         self.db
             .query_row(
-                "SELECT name, price, txid, height, signature FROM listings WHERE name = ?1",
+                "SELECT name, price, nonce, txid, height, signature FROM listings WHERE name = ?1",
                 [name],
                 |row| {
                     Ok(Listing {
                         name: row.get(0)?,
                         price: row.get::<_, i64>(1)? as u64,
-                        txid: row.get(2)?,
-                        height: row.get::<_, i64>(3)? as u64,
-                        signature: row.get(4)?,
+                        nonce: row.get::<_, i64>(2)? as u64,
+                        txid: row.get(3)?,
+                        height: row.get::<_, i64>(4)? as u64,
+                        signature: row.get(5)?,
                     })
                 },
             )
@@ -319,7 +325,7 @@ impl Registry {
 
     pub fn list_for_sale(&self) -> Vec<Listing> {
         let mut stmt = match self.db.prepare(
-            "SELECT l.name, l.price, l.txid, l.height, l.signature
+            "SELECT l.name, l.price, l.nonce, l.txid, l.height, l.signature
              FROM listings l
              ORDER BY l.height DESC",
         ) {
@@ -330,9 +336,10 @@ impl Registry {
             Ok(Listing {
                 name: row.get(0)?,
                 price: row.get::<_, i64>(1)? as u64,
-                txid: row.get(2)?,
-                height: row.get::<_, i64>(3)? as u64,
-                signature: row.get(4)?,
+                nonce: row.get::<_, i64>(2)? as u64,
+                txid: row.get(3)?,
+                height: row.get::<_, i64>(4)? as u64,
+                signature: row.get(5)?,
             })
         })
         .unwrap_or_else(|_| panic!("query failed"))
@@ -474,11 +481,13 @@ pub struct Registration {
     pub height: u64,
     pub nonce: u64,
     pub signature: Option<String>,
+    pub last_action: String,
 }
 
 pub struct Listing {
     pub name: String,
     pub price: u64,
+    pub nonce: u64,
     pub txid: String,
     pub height: u64,
     pub signature: String,
