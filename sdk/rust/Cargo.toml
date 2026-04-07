@@ -1,0 +1,45 @@
+[package]
+name = "zns-client"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Rust client for the ZNS (Zcash Name System) indexer"
+
+# Declare this Cargo.toml as its own workspace root so `cargo` commands run
+# from inside sdk/rust/ do not walk up to ZNS/Cargo.toml (which is the
+# standalone zns-indexer crate, not a workspace).
+[workspace]
+
+[features]
+default = ["reqwest-transport"]
+reqwest-transport = ["dep:reqwest"]
+
+[dependencies]
+# Schema types and JSON-RPC envelope serialization.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Opaque error type. Callers propagate with `?`; the type-safety guarantee
+# on verification lives on the success side via the VerifiedRegistration
+# newtype, not on the error side as distinct variants.
+anyhow = "1"
+
+# Typed endpoint URL. Callers pass a Url directly; no serde feature needed.
+url = "2"
+
+# Ed25519 signature verification. Version pinned to match ZNS/Cargo.toml
+# so client and indexer agree on the implementation.
+ed25519-dalek = "2"
+
+# Base64 decoding for signatures and the admin pubkey. Matches ZNS/Cargo.toml.
+base64 = "0.22"
+
+# Default HTTP transport. Disabled default features to avoid native-tls /
+# openssl; rustls-tls-webpki-roots bundles CA certificates and matches the
+# indexer's portability posture (no system dependency on ca-certificates).
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
+
+[dev-dependencies]
+# Only needed by async tests and examples. Not a runtime dependency of the
+# crate itself — callers bring their own runtime.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
