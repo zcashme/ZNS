@@ -2,6 +2,8 @@
 
 ZNS maps human-readable names to Zcash shielded addresses. Names are registered on-chain via Orchard memos and indexed into a queryable API. This SDK talks to that API.
 
+> **The TypeScript SDK is the only one ready for production.** The Dart, Go, Kotlin, Python, React Native, Rust, and Swift SDKs in sibling directories are work-in-progress.
+
 Testnet: `zcashna.me`
 
 ```ts
@@ -189,16 +191,16 @@ const memo = buildUpdateMemo("alice", "utest1newaddr...", nonce, signature);
 
 ## Name rules
 
-Names must be 1-62 characters. Lowercase letters, digits, and hyphens only. No leading/trailing hyphens, no double hyphens.
+Names must be 1-62 characters of lowercase ASCII letters and digits only. No hyphens, no underscores, no dots, no unicode.
 
 ```ts
 import { isValidName } from "zns-sdk";
 
-isValidName("alice");     // true
-isValidName("my-name");   // true
-isValidName("Alice");     // false -- uppercase
-isValidName("my--name");  // false -- double hyphen
-isValidName("-name");     // false -- leading hyphen
+isValidName("alice");    // true
+isValidName("alice42");  // true
+isValidName("Alice");    // false -- uppercase
+isValidName("my-name");  // false -- hyphens not allowed
+isValidName("my.name");  // false -- dots not allowed
 ```
 
 ## Run your own indexer
