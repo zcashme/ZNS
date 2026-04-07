@@ -9,11 +9,6 @@ describe("isValidName", () => {
     expect(isValidName("0")).toBe(true);
   });
 
-  it("accepts hyphens in the middle", () => {
-    expect(isValidName("my-name")).toBe(true);
-    expect(isValidName("a-b-c")).toBe(true);
-  });
-
   it("accepts max length (62 chars)", () => {
     expect(isValidName("a".repeat(62))).toBe(true);
   });
@@ -31,22 +26,19 @@ describe("isValidName", () => {
     expect(isValidName("BOB")).toBe(false);
   });
 
+  it("rejects hyphens entirely", () => {
+    expect(isValidName("my-name")).toBe(false);
+    expect(isValidName("a-b-c")).toBe(false);
+    expect(isValidName("-alice")).toBe(false);
+    expect(isValidName("alice-")).toBe(false);
+    expect(isValidName("al--ice")).toBe(false);
+  });
+
   it("rejects special characters", () => {
     expect(isValidName("alice!")).toBe(false);
     expect(isValidName("bob@123")).toBe(false);
     expect(isValidName("my_name")).toBe(false);
     expect(isValidName("my.name")).toBe(false);
-  });
-
-  it("rejects leading hyphen", () => {
-    expect(isValidName("-alice")).toBe(false);
-  });
-
-  it("rejects trailing hyphen", () => {
-    expect(isValidName("alice-")).toBe(false);
-  });
-
-  it("rejects consecutive hyphens", () => {
-    expect(isValidName("al--ice")).toBe(false);
+    expect(isValidName("has space")).toBe(false);
   });
 });
