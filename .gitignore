@@ -1,3 +1,22 @@
 /target
 zns_signing_key.txt
 instances.txt
+
+*.md
+*.yml
+*.yaml
+*.db
+*.bin
+
+.claude/
+.playwright-mcp/
+wallets/
+zingolib-testnet/
+
+# Re-include SDK metadata files
+!sdk/**/*.md
+!sdk/**/*.yml
+!sdk/**/*.yaml
+
+# Rust SDK build artifacts (root /target only catches the workspace target)
+sdk/rust/target/
