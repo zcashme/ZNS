@@ -2,7 +2,7 @@
   "openrpc": "1.3.2",
   "info": {
     "title": "ZNS Indexer API",
-    "description": "Read-only JSON-RPC API for the Zcash Name System (ZNS). Provides name resolution, marketplace listings, and indexer status for names registered on Zcash (mainnet or testnet) via Orchard shielded memos.",
+    "description": "Read-only JSON-RPC API for the Zcash Name System (ZNS). Provides name resolution, marketplace listings, and indexer status for names registered on Zcash (mainnet or testnet) via Orchard shielded memos.\n\n## Signature Verification\n\nEvery signed assertion returned by this API — registrations, listings, and events — carries an Ed25519 signature produced by the admin key (returned as `status.admin_pubkey`). Clients can verify these signatures using only the data returned in responses.\n\n### Encoding\n\n- **Algorithm:** Ed25519 per RFC 8032.\n- **Public key (`admin_pubkey`):** 32 raw bytes, standard base64 with padding (44 characters).\n- **Signature fields:** 64 raw bytes, standard base64 with padding (88 characters).\n- **Pre-image:** the UTF-8 bytes of a literal ASCII string. All fields used in pre-image construction (`name`, `address`, `nonce`, `price`, pricing tiers) are ASCII-restricted, so UTF-8 encoding is byte-identical to the ASCII representation. No normalization, case folding, or whitespace handling is applied — reproduce each field byte-for-byte as returned in the response.\n- **Numeric fields (`nonce`, `price`, pricing tiers):** decimal ASCII with no leading zeros, no padding, and no sign (the output of a standard unsigned-integer-to-decimal conversion).\n- **Address fields:** the exact bech32m unified-address string as returned in the `address` or `ua` field, verbatim.\n- **Delimiter:** the single ASCII colon `:` (0x3A). All field values are constrained to exclude this byte.\n\n### Pre-image templates\n\nEach signed action has a fixed pre-image template. The signed bytes do NOT include the on-chain `ZNS:` memo prefix.\n\n- `CLAIM` — `CLAIM:{name}:{address}`\n- `UPDATE` — `UPDATE:{name}:{address}:{nonce}`\n- `BUY` — `BUY:{name}:{address}`\n- `DELIST` — `DELIST:{name}:{nonce}`\n- `LIST` — `LIST:{name}:{price}:{nonce}`\n- `RELEASE` — `RELEASE:{name}:{nonce}`\n- `SETPRICE` — `SETPRICE:{count}:{tier_1}:...:{tier_count}:{nonce}` where `count` is the number of tiers and each `tier_i` is a zatoshi amount in decimal ASCII.\n\n### Verifying a registration\n\nGiven a `Registration` with `name`, `address`, `nonce`, `last_action`, and `signature`:\n\n1. Select the pre-image template for `last_action` (one of `CLAIM`, `UPDATE`, `BUY`, `DELIST`).\n2. Build the pre-image string by substituting `name`, `address`, and `nonce` verbatim from the response. For `CLAIM` and `BUY`, `nonce` is not used.\n3. Encode the pre-image string as UTF-8 bytes.\n4. Base64-decode `signature` to 64 raw bytes.\n5. Base64-decode `status.admin_pubkey` to 32 raw bytes.\n6. Run Ed25519 verify. Accept the registration only on success.\n\n### Verifying a listing\n\nA `Listing` carries an independent `LIST` signature over `LIST:{name}:{price}:{nonce}`. To trust the assertion that a given name is listed at a given price, a client must verify the listing's `signature` in addition to verifying the enclosing `Registration`. The two signatures cover different facts and must be checked independently.\n\n### Verifying events\n\nEvents returned by the `events` method carry signatures for all action types, including `RELEASE` and `SETPRICE`. Use the pre-image template for the event's `action`, substituting fields from the event object (`name`, `ua` as the address, `nonce`, `price`). Full verification of `SETPRICE` events requires the pricing tier list, which is not individually exposed on the `Event` object; clients must obtain the tier list from the on-chain memo by scanning Orchard outputs with `status.uivk`. `status.pricing` reports the current tiers but is itself unsigned (see 'Verifying pricing' below), so it is not a trust-minimized source for SETPRICE verification.\n\n### Verifying pricing\n\nThe `status.pricing` object is NOT accompanied by a signature in this endpoint, so it cannot be verified directly against `admin_pubkey`. The admin does sign every SETPRICE action on-chain with pre-image `SETPRICE:{count}:{tier_1}:...:{tier_count}:{nonce}`, but this indexer only surfaces that signature via the `events` method for historical SETPRICE events. To obtain a trust-minimized view of current pricing, clients must scan Orchard outputs using `status.uivk` and re-parse the latest SETPRICE memo from the chain. Clients that accept `status.pricing` as-returned are trusting the indexer for pricing data even if they verify every other assertion cryptographically.\n\n### Worked construction example\n\nGiven a registration with `name = alice`, `address = u1example` (shortened for illustration), `nonce = 2`, and `last_action = UPDATE`, the pre-image string is `UPDATE:alice:u1example:2` and its UTF-8 bytes (24 bytes, hex) are `55 50 44 41 54 45 3a 61 6c 69 63 65 3a 75 31 65 78 61 6d 70 6c 65 3a 32`. Pass these bytes, the base64-decoded signature, and the base64-decoded `admin_pubkey` to any standards-compliant Ed25519 verifier. The reference implementation lives in `src/memo.rs` (`verify_signature`).",
     "version": "0.1.0",
     "license": {
       "name": "MIT"
@@ -361,11 +361,14 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "The registered name (1-62 chars, lowercase alphanumeric and hyphens)"
+            "minLength": 1,
+            "maxLength": 62,
+            "pattern": "^[a-z0-9]{1,62}$",
+            "description": "The registered name. Must be 1-62 characters of lowercase ASCII letters and digits only. No hyphens, no underscores, no unicode. Used verbatim in signature pre-images."
           },
           "address": {
             "type": "string",
-            "description": "Zcash unified address bound to this name"
+            "description": "Zcash unified address bound to this name. Used verbatim (byte-for-byte) in signature pre-images."
           },
           "txid": {
             "type": "string",
@@ -377,16 +380,16 @@
           },
           "nonce": {
             "type": "integer",
-            "description": "Replay-protection counter, incremented on each update/delist. Reset to 0 on BUY."
+            "description": "Replay-protection counter, incremented on each UPDATE/DELIST. Reset to 0 on BUY. Used verbatim (decimal ASCII) in signature pre-images for UPDATE and DELIST."
           },
           "signature": {
             "type": ["string", "null"],
-            "description": "Ed25519 admin signature over the most recent action that wrote this row. The pre-image depends on last_action — see that field for the format."
+            "description": "Ed25519 admin signature over the most recent action that wrote this row, encoded as standard base64 with padding (88 characters). The pre-image template is determined by `last_action`. See the 'Signature Verification' section in the API description for encoding rules, all templates, and the full verification procedure."
           },
           "last_action": {
             "type": "string",
             "enum": ["CLAIM", "UPDATE", "DELIST", "BUY"],
-            "description": "The action that produced the current signature. Determines the pre-image used for verification: CLAIM → \"CLAIM:{name}:{address}\"; UPDATE → \"UPDATE:{name}:{address}:{nonce}\"; DELIST → \"DELIST:{name}:{nonce}\"; BUY → \"BUY:{name}:{address}\"."
+            "description": "The action that produced the current `signature`. Selects the pre-image template used for signature verification. See the 'Signature Verification' section in the API description for all templates and the full verification procedure."
           }
         }
       },
@@ -397,15 +400,18 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "The listed name"
+            "minLength": 1,
+            "maxLength": 62,
+            "pattern": "^[a-z0-9]{1,62}$",
+            "description": "The listed name. Same constraints as `Registration.name`. Used verbatim in the LIST signature pre-image."
           },
           "price": {
             "type": "integer",
-            "description": "Asking price in zatoshis (1 ZEC = 100,000,000 zatoshis)"
+            "description": "Asking price in zatoshis (1 ZEC = 100,000,000 zatoshis). Used verbatim (decimal ASCII, no padding) in the LIST signature pre-image."
           },
           "nonce": {
             "type": "integer",
-            "description": "Replay-protection nonce used in the LIST signature pre-image. Required to reconstruct \"LIST:{name}:{price}:{nonce}\" for verification."
+            "description": "Replay-protection nonce used in the LIST signature pre-image. Used verbatim (decimal ASCII) to reconstruct `LIST:{name}:{price}:{nonce}`."
           },
           "txid": {
             "type": "string",
@@ -417,7 +423,7 @@
           },
           "signature": {
             "type": "string",
-            "description": "Ed25519 admin signature over \"LIST:{name}:{price}:{nonce}\""
+            "description": "Ed25519 admin signature over the pre-image `LIST:{name}:{price}:{nonce}`, encoded as standard base64 with padding (88 characters). See the 'Signature Verification' section in the API description for encoding rules and the verification procedure. This signature must be verified independently of any enclosing `Registration.signature`."
           }
         }
       },
@@ -462,12 +468,12 @@
           },
           "name": {
             "type": "string",
-            "description": "The name this event relates to"
+            "description": "The name this event relates to. Follows the same pattern as `Registration.name` for name-scoped actions (CLAIM, UPDATE, BUY, LIST, DELIST, RELEASE). Empty string for SETPRICE events, which are not scoped to a specific name."
           },
           "action": {
             "type": "string",
             "enum": ["CLAIM", "LIST", "DELIST", "RELEASE", "UPDATE", "BUY", "SETPRICE"],
-            "description": "The type of action that occurred"
+            "description": "The type of action that occurred. Selects the pre-image template for verifying `signature`. See the 'Signature Verification' section in the API description for all templates."
           },
           "txid": {
             "type": "string",
@@ -479,19 +485,19 @@
           },
           "ua": {
             "type": ["string", "null"],
-            "description": "Relevant address: claimer (CLAIM), owner (LIST), new address (UPDATE), buyer (BUY). Null for DELIST."
+            "description": "Relevant address: claimer (CLAIM), owner (LIST), new address (UPDATE), buyer (BUY). Null for DELIST, RELEASE, and SETPRICE. Used verbatim in the signature pre-image as the `{address}` field for CLAIM/UPDATE/BUY."
           },
           "price": {
             "type": ["integer", "null"],
-            "description": "Price in zatoshis. Present for LIST and BUY, null otherwise."
+            "description": "Price in zatoshis. Present for LIST and BUY; null otherwise. Used verbatim (decimal ASCII) in the LIST signature pre-image."
           },
           "nonce": {
             "type": ["integer", "null"],
-            "description": "Replay-protection nonce used in the signed payload. Present for LIST, DELIST, UPDATE."
+            "description": "Replay-protection nonce used in the signed payload. Present for LIST, DELIST, RELEASE, UPDATE, and SETPRICE. Used verbatim (decimal ASCII) in the signature pre-image."
           },
           "signature": {
             "type": ["string", "null"],
-            "description": "Ed25519 admin signature. Present for all action types."
+            "description": "Ed25519 admin signature over the event's pre-image, encoded as standard base64 with padding (88 characters). The pre-image template is determined by `action`. Present for all action types. See the 'Signature Verification' section in the API description for all templates and the verification procedure."
           }
         }
       },
@@ -520,7 +526,7 @@
           },
           "admin_pubkey": {
             "type": "string",
-            "description": "Base64-encoded Ed25519 public key used to verify signatures"
+            "description": "Ed25519 public key (32 raw bytes) used to verify all signed assertions in this API, encoded as standard base64 with padding (44 characters). See the 'Signature Verification' section in the API description for the full verification procedure."
           },
           "uivk": {
             "type": "string",
@@ -536,7 +542,7 @@
           },
           "pricing": {
             "type": "object",
-            "description": "Current pricing configuration, or null if not yet set",
+            "description": "Current pricing configuration, or null if SETPRICE has never been issued. NOTE: this object carries no signature and cannot be cryptographically verified via this endpoint. See the 'Verifying pricing' subsection in the API description for details on how clients can obtain a trust-minimized view of pricing.",
             "oneOf": [
               {
                 "type": "object",
