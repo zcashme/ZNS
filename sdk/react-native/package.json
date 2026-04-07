@@ -1,0 +1,30 @@
+{
+  "name": "zcashname-sdk-react-native",
+  "version": "0.4.0",
+  "description": "React Native hooks and provider for the Zcash Name System (ZNS)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-native": ">=0.72.0",
+    "zcashname-sdk": "^0.4.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "react": "^18.0.0",
+    "typescript": "^5.4.0",
+    "zcashname-sdk": "^0.4.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zcashme/ZNS.git",
+    "directory": "sdk/react-native"
+  }
+}
