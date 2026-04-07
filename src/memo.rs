@@ -30,12 +30,9 @@ fn validate_ua(ua: &str) -> bool {
 pub fn validate_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 62
-        && !name.starts_with('-')
-        && !name.ends_with('-')
-        && !name.contains("--")
         && name
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
 // ── Parsing ──────────────────────────────────────────────────────────────────
