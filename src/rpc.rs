@@ -1,7 +1,6 @@
 // ZNS JSON-RPC server — jsonrpsee-based API.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::watch;
 
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
@@ -15,7 +14,7 @@ use crate::registry::Registry;
 
 pub struct RpcState {
     pub db_path: String,
-    pub synced_height: Arc<AtomicU64>,
+    pub synced_height: watch::Receiver<u64>,
     pub admin_pubkey: String,
     pub uivk: String,
 }
@@ -148,7 +147,7 @@ impl ZnsApiServer for RpcState {
             tiers: p.tiers,
         });
         Ok(StatusResult {
-            synced_height: self.synced_height.load(Ordering::Relaxed),
+            synced_height: *self.synced_height.borrow(),
             admin_pubkey: self.admin_pubkey.clone(),
             uivk: self.uivk.clone(),
             registered: reg.count_registrations(),

@@ -12,21 +12,92 @@
 //   BUY       — purchase a listed name (admin-signed; buyer may append pubkey)
 //   RELEASE   — release a name back to the pool
 
-mod config; // env-var configuration
-mod decrypter; // block streaming and trial decryption
-mod memo; // memo protocol: parsing and validation
-mod registry; // SQLite storage for registrations and listings
-mod rpc; // JSON-RPC read-only API
-
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+mod config;
+mod decrypter;
+mod memo;
+mod registry;
+mod rpc;
 
 use base64::Engine;
 use orchard::keys::PreparedIncomingViewingKey;
+use tokio::sync::watch;
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 
 use crate::memo::{ActionKind, MemoAction};
 use crate::registry::Registry;
+
+// ── Indexer ──────────────────────────────────────────────────────────────────
+
+struct Indexer {
+    last_scanned: u64,
+    client: decrypter::Client,
+    pivk: PreparedIncomingViewingKey,
+    admin_pubkey: [u8; 32],
+    reg: Registry,
+}
+
+impl Indexer {
+    async fn new(
+        admin_pubkey: [u8; 32],
+        pivk: PreparedIncomingViewingKey,
+        reg: Registry,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        println!("Connecting to {}...", config::LWD_URL);
+        let client = decrypter::Client::connect(config::LWD_URL.to_string()).await?;
+        Ok(Self {
+            last_scanned: config::BIRTHDAY - 100,
+            client,
+            pivk,
+            admin_pubkey,
+            reg,
+        })
+    }
+
+    async fn run(&mut self, height_tx: watch::Sender<u64>) {
+        loop {
+            let Some(tip) = decrypter::get_chain_tip(&mut self.client).await else {
+                tokio::time::sleep(config::POLL_INTERVAL).await;
+                continue;
+            };
+            if self.last_scanned >= tip {
+                tokio::time::sleep(config::POLL_INTERVAL).await;
+                continue;
+            }
+
+            let start = self.last_scanned + 1;
+            println!("Scanning {start}..={tip}");
+
+            let (notes, scanned_to) = decrypter::scan_range(
+                &mut self.client,
+                &self.pivk,
+                &config::NETWORK,
+                start,
+                tip,
+            )
+            .await;
+
+            for note in notes {
+                let Some(action) = memo::parse_memo(&note.memo) else {
+                    continue;
+                };
+                if !verify_and_authorize(&self.reg, &action, &self.admin_pubkey) {
+                    continue;
+                }
+                handle_action(
+                    &self.reg,
+                    action,
+                    note.value,
+                    &note.txid.to_string(),
+                    note.height,
+                );
+            }
+
+            self.last_scanned = scanned_to;
+            height_tx.send(self.last_scanned).ok();
+            println!("Synced to {}.", self.last_scanned);
+        }
+    }
+}
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -43,58 +114,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
     let reg = Registry::open(config::DB_PATH)?;
 
-    let synced_height = Arc::new(AtomicU64::new(0));
-    let rpc_addr = format!("0.0.0.0:{}", config::RPC_PORT);
+    let (height_tx, height_rx) = watch::channel(0u64);
+
     let rpc_state = rpc::RpcState {
         db_path: config::DB_PATH.to_string(),
-        synced_height: synced_height.clone(),
+        synced_height: height_rx,
         admin_pubkey: base64::engine::general_purpose::STANDARD.encode(admin_pubkey),
         uivk: uivk_str,
     };
-    tokio::spawn(rpc::serve(rpc_addr, rpc_state));
+    tokio::spawn(rpc::serve(format!("0.0.0.0:{}", config::RPC_PORT), rpc_state));
 
-    println!("Connecting to {}...", config::LWD_URL);
-    let mut client = decrypter::Client::connect(config::LWD_URL.to_string()).await?;
+    Indexer::new(admin_pubkey, pivk, reg).await?.run(height_tx).await;
 
-    let mut last_scanned = config::BIRTHDAY - 100;
-
-    loop {
-        let Some(tip) = decrypter::get_chain_tip(&mut client).await else {
-            tokio::time::sleep(config::POLL_INTERVAL).await;
-            continue;
-        };
-        if last_scanned >= tip {
-            tokio::time::sleep(config::POLL_INTERVAL).await;
-            continue;
-        }
-
-        let start = last_scanned + 1;
-        println!("Scanning {start}..={tip}");
-
-        let (notes, scanned_to) =
-            decrypter::scan_range(&mut client, &pivk, &config::NETWORK, start, tip).await;
-        for note in notes {
-            let Some(action) = memo::parse_memo(&note.memo) else {
-                continue;
-            };
-
-            if !verify_and_authorize(&reg, &action, &admin_pubkey) {
-                continue;
-            }
-
-            handle_action(
-                &reg,
-                action,
-                note.value,
-                &note.txid.to_string(),
-                note.height,
-            );
-        }
-        last_scanned = scanned_to;
-        synced_height.store(last_scanned, Ordering::Relaxed);
-
-        println!("Synced to {last_scanned}.");
-    }
+    Ok(())
 }
 
 // ── Signature verification and sovereignty enforcement ───────────────────────
@@ -131,19 +163,17 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
         if !matches!(
             action.kind,
             ActionKind::SetPrice { .. } | ActionKind::Claim { .. } | ActionKind::Buy { .. }
-        ) {
-            if let Some((stored_sig, stored_ua, stored_action)) =
-                reg.get_claim_sig_for_ownership(&action.name)
-            {
-                let payload = match stored_action.as_str() {
-                    "CLAIM" => format!("CLAIM:{}:{stored_ua}", action.name),
-                    "BUY" => format!("BUY:{}:{stored_ua}", action.name),
-                    _ => return false,
-                };
-                if !memo::verify_signature(&payload, &stored_sig, admin_pubkey) {
-                    eprintln!("Admin rejected: '{}' is sovereign", action.name);
-                    return false;
-                }
+        ) && let Some((stored_sig, stored_ua, stored_action)) =
+            reg.get_claim_sig_for_ownership(&action.name)
+        {
+            let payload = match stored_action.as_str() {
+                "CLAIM" => format!("CLAIM:{}:{stored_ua}", action.name),
+                "BUY" => format!("BUY:{}:{stored_ua}", action.name),
+                _ => return false,
+            };
+            if !memo::verify_signature(&payload, &stored_sig, admin_pubkey) {
+                eprintln!("Admin rejected: '{}' is sovereign", action.name);
+                return false;
             }
         }
         if !memo::verify_action(action, admin_pubkey) {
