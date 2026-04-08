@@ -182,6 +182,26 @@ impl Registry {
         Ok(())
     }
 
+    /// Returns `(sig, ua, action)` from the most recent CLAIM or BUY event for
+    /// a name, used to prove sovereign ownership via stored signature.
+    pub fn get_claim_sig_for_ownership(&self, name: &str) -> Option<(String, String, String)> {
+        self.db
+            .query_row(
+                "SELECT signature, ua, action FROM events \
+                 WHERE name = ?1 AND action IN ('CLAIM', 'BUY') \
+                 ORDER BY height DESC, id DESC LIMIT 1",
+                [name],
+                |row| {
+                    let sig: Option<String> = row.get(0)?;
+                    let ua: Option<String> = row.get(1)?;
+                    let action: String = row.get(2)?;
+                    Ok((sig, ua, action))
+                },
+            )
+            .ok()
+            .and_then(|(sig, ua, action)| Some((sig?, ua?, action)))
+    }
+
     pub fn get_owner_ua(&self, name: &str) -> Option<String> {
         self.db
             .query_row(

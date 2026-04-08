@@ -5,15 +5,16 @@
 // registrations and marketplace listings.
 //
 // Supported actions:
-//   CLAIM     — claim a name (admin-signed, first-come-first-served)
-//   LIST      — put a name up for sale at a price (admin-signed)
-//   DELIST    — remove a listing (admin-signed)
-//   UPDATE    — change the address behind a name (admin-signed)
-//   BUY       — purchase a listed name (admin-signed)
+//   CLAIM     — claim a name (admin-signed; user may append pubkey for sovereignty)
+//   LIST      — put a name up for sale at a price
+//   DELIST    — remove a listing
+//   UPDATE    — change the address behind a name
+//   BUY       — purchase a listed name (admin-signed; buyer may append pubkey)
+//   RELEASE   — release a name back to the pool
 
 mod config; // env-var configuration
 mod decrypter; // block streaming and trial decryption
-mod memo; // memo protocol: parsing, validation, signature verification
+mod memo; // memo protocol: parsing and validation
 mod registry; // SQLite storage for registrations and listings
 mod rpc; // JSON-RPC read-only API
 
@@ -73,9 +74,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (notes, scanned_to) =
             decrypter::scan_range(&mut client, &pivk, &config::NETWORK, start, tip).await;
         for note in notes {
-            let Some(action) = memo::parse_memo(&note.memo, &admin_pubkey) else {
+            let Some(action) = memo::parse_memo(&note.memo) else {
                 continue;
             };
+
+            if !verify_and_authorize(&reg, &action, &admin_pubkey) {
+                continue;
+            }
+
             handle_action(
                 &reg,
                 action,
@@ -88,6 +94,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         synced_height.store(last_scanned, Ordering::Relaxed);
 
         println!("Synced to {last_scanned}.");
+    }
+}
+
+// ── Signature verification and sovereignty enforcement ───────────────────────
+
+fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8; 32]) -> bool {
+    if let Some(user_pk) = action.user_pubkey {
+        // Sovereign path: user signed this action, verify against their pubkey.
+        if !memo::verify_action(action, &user_pk) {
+            eprintln!("Invalid user sig for '{}'", action.name);
+            return false;
+        }
+        // For non-establishing actions, prove ownership: stored CLAIM/BUY sig
+        // must verify against this user key (it was signed by them, not admin).
+        if !matches!(action.kind, ActionKind::Claim { .. } | ActionKind::Buy { .. }) {
+            let Some((stored_sig, stored_ua, stored_action)) =
+                reg.get_claim_sig_for_ownership(&action.name)
+            else {
+                eprintln!("No claim record for sovereign action on '{}'", action.name);
+                return false;
+            };
+            let payload = match stored_action.as_str() {
+                "CLAIM" => format!("CLAIM:{}:{stored_ua}", action.name),
+                "BUY" => format!("BUY:{}:{stored_ua}", action.name),
+                _ => return false,
+            };
+            if !memo::verify_signature(&payload, &stored_sig, &user_pk) {
+                eprintln!("Ownership proof failed for '{}'", action.name);
+                return false;
+            }
+        }
+        true
+    } else {
+        // Admin path: first check sovereignty, then verify sig.
+        if !matches!(
+            action.kind,
+            ActionKind::SetPrice { .. } | ActionKind::Claim { .. } | ActionKind::Buy { .. }
+        ) {
+            if let Some((stored_sig, stored_ua, stored_action)) =
+                reg.get_claim_sig_for_ownership(&action.name)
+            {
+                let payload = match stored_action.as_str() {
+                    "CLAIM" => format!("CLAIM:{}:{stored_ua}", action.name),
+                    "BUY" => format!("BUY:{}:{stored_ua}", action.name),
+                    _ => return false,
+                };
+                if !memo::verify_signature(&payload, &stored_sig, admin_pubkey) {
+                    eprintln!("Admin rejected: '{}' is sovereign", action.name);
+                    return false;
+                }
+            }
+        }
+        if !memo::verify_action(action, admin_pubkey) {
+            eprintln!("Invalid admin sig for '{}'", action.name);
+            return false;
+        }
+        true
     }
 }
 
