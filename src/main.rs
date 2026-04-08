@@ -26,79 +26,6 @@ use zcash_keys::keys::UnifiedIncomingViewingKey;
 use crate::memo::{ActionKind, MemoAction};
 use crate::registry::Registry;
 
-// ── Indexer ──────────────────────────────────────────────────────────────────
-
-struct Indexer {
-    last_scanned: u64,
-    client: decrypter::Client,
-    pivk: PreparedIncomingViewingKey,
-    admin_pubkey: [u8; 32],
-    reg: Registry,
-}
-
-impl Indexer {
-    async fn new(
-        admin_pubkey: [u8; 32],
-        pivk: PreparedIncomingViewingKey,
-        reg: Registry,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        println!("Connecting to {}...", config::LWD_URL);
-        let client = decrypter::Client::connect(config::LWD_URL.to_string()).await?;
-        Ok(Self {
-            last_scanned: config::BIRTHDAY - 100,
-            client,
-            pivk,
-            admin_pubkey,
-            reg,
-        })
-    }
-
-    async fn run(&mut self, height_tx: watch::Sender<u64>) {
-        loop {
-            let Some(tip) = decrypter::get_chain_tip(&mut self.client).await else {
-                tokio::time::sleep(config::POLL_INTERVAL).await;
-                continue;
-            };
-            if self.last_scanned >= tip {
-                tokio::time::sleep(config::POLL_INTERVAL).await;
-                continue;
-            }
-
-            let start = self.last_scanned + 1;
-            println!("Scanning {start}..={tip}");
-
-            let (notes, scanned_to) = decrypter::scan_range(
-                &mut self.client,
-                &self.pivk,
-                &config::NETWORK,
-                start,
-                tip,
-            )
-            .await;
-
-            for note in notes {
-                let Some(action) = memo::parse_memo(&note.memo) else {
-                    continue;
-                };
-                if !verify_and_authorize(&self.reg, &action, &self.admin_pubkey) {
-                    continue;
-                }
-                handle_action(
-                    &self.reg,
-                    action,
-                    note.value,
-                    &note.txid.to_string(),
-                    note.height,
-                );
-            }
-
-            self.last_scanned = scanned_to;
-            height_tx.send(self.last_scanned).ok();
-            println!("Synced to {}.", self.last_scanned);
-        }
-    }
-}
-
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -124,9 +51,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     tokio::spawn(rpc::serve(format!("0.0.0.0:{}", config::RPC_PORT), rpc_state));
 
-    Indexer::new(admin_pubkey, pivk, reg).await?.run(height_tx).await;
+    println!("Connecting to {}...", config::LWD_URL);
+    let mut client = decrypter::Client::connect(config::LWD_URL.to_string()).await?;
+    let mut last_scanned = config::BIRTHDAY - 100;
 
-    Ok(())
+    loop {
+        let Some(tip) = decrypter::get_chain_tip(&mut client).await else {
+            tokio::time::sleep(config::POLL_INTERVAL).await;
+            continue;
+        };
+        if last_scanned >= tip {
+            tokio::time::sleep(config::POLL_INTERVAL).await;
+            continue;
+        }
+
+        let start = last_scanned + 1;
+        println!("Scanning {start}..={tip}");
+
+        let (notes, scanned_to) = decrypter::scan_range(
+            &mut client,
+            &pivk,
+            &config::NETWORK,
+            start,
+            tip,
+        )
+        .await;
+
+        for note in notes {
+            let Some(action) = memo::parse_memo(&note.memo) else {
+                continue;
+            };
+            if !verify_and_authorize(&reg, &action, &admin_pubkey) {
+                continue;
+            }
+            handle_action(
+                &reg,
+                action,
+                note.value,
+                &note.txid.to_string(),
+                note.height,
+            );
+        }
+
+        last_scanned = scanned_to;
+        height_tx.send(last_scanned).ok();
+        println!("Synced to {}.", last_scanned);
+    }
 }
 
 // ── Signature verification and sovereignty enforcement ───────────────────────
