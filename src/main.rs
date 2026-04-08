@@ -157,12 +157,10 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
 // ── Action dispatch ──────────────────────────────────────────────────────────
 
 fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str, height: u64) {
-    let nonce = action.nonce.unwrap_or(0);
-
     match &action.kind {
-        ActionKind::SetPrice { prices } => {
+        ActionKind::SetPrice { prices, nonce } => {
             if let Some(current) = reg.get_pricing_nonce()
-                && nonce <= current
+                && nonce <= &current
             {
                 eprintln!("SETPRICE: nonce {nonce} <= current {current}");
                 return;
@@ -172,9 +170,9 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 .map(|p| p.to_string())
                 .collect::<Vec<_>>()
                 .join(":");
-            match reg.store_pricing(nonce, height, &tiers_str, txid, &action.signature) {
+            match reg.store_pricing(*nonce, height, &tiers_str, txid, &action.signature) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, "SETPRICE", txid, height, None, None);
+                    let _ = reg.insert_event(&action, "SETPRICE", txid, height, None, None, Some(*nonce));
                     println!(
                         "Pricing set: {} tiers, nonce {nonce} (height {height})",
                         prices.len()
@@ -200,7 +198,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
             match reg.create_registration(&action.name, ua, &action.signature, txid, height) {
                 Ok(true) => {
-                    let _ = reg.insert_event(&action, "CLAIM", txid, height, Some(ua), None);
+                    let _ = reg.insert_event(&action, "CLAIM", txid, height, Some(ua), None, None);
                     println!(
                         "Claimed: {} → {ua} for {note_value} zats (height {height})",
                         action.name
@@ -210,13 +208,13 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 Err(e) => eprintln!("DB error (claim): {e}"),
             }
         }
-        ActionKind::List { price } => {
-            if let Err(e) = reg.validate_and_increment_nonce(&action.name, nonce) {
+        ActionKind::List { price, nonce } => {
+            if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
                 eprintln!("LIST: {e}");
                 return;
             }
             let owner_ua = reg.get_owner_ua(&action.name);
-            match reg.create_listing(&action.name, *price, nonce, &action.signature, txid, height) {
+            match reg.create_listing(&action.name, *price, *nonce, &action.signature, txid, height) {
                 Ok(()) => {
                     let _ = reg.insert_event(
                         &action,
@@ -225,54 +223,55 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                         height,
                         owner_ua.as_deref(),
                         Some(*price),
+                        Some(*nonce),
                     );
                     println!("Listed: {} for {price} zats (height {height})", action.name)
                 }
                 Err(e) => eprintln!("DB error (list): {e}"),
             }
         }
-        ActionKind::Delist => {
+        ActionKind::Delist { nonce } => {
             if reg.get_listing_price(&action.name).is_none() {
                 eprintln!("DELIST for unlisted name {}", action.name);
                 return;
             }
-            if let Err(e) = reg.validate_and_increment_nonce(&action.name, nonce) {
+            if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
                 eprintln!("DELIST: {e}");
                 return;
             }
             match reg.delete_listing(&action.name, &action.signature) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, "DELIST", txid, height, None, None);
+                    let _ = reg.insert_event(&action, "DELIST", txid, height, None, None, Some(*nonce));
                     println!("Delisted: {} (height {height})", action.name)
                 }
                 Err(e) => eprintln!("DB error (delist): {e}"),
             }
         }
-        ActionKind::Release => {
+        ActionKind::Release { nonce } => {
             if reg.get_owner_ua(&action.name).is_none() {
                 eprintln!("RELEASE for unregistered name {}", action.name);
                 return;
             }
-            if let Err(e) = reg.validate_and_increment_nonce(&action.name, nonce) {
+            if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
                 eprintln!("RELEASE: {e}");
                 return;
             }
             match reg.delete_registration(&action.name) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, "RELEASE", txid, height, None, None);
+                    let _ = reg.insert_event(&action, "RELEASE", txid, height, None, None, Some(*nonce));
                     println!("Released: {} (height {height})", action.name)
                 }
                 Err(e) => eprintln!("DB error (release): {e}"),
             }
         }
-        ActionKind::Update { new_ua } => {
-            if let Err(e) = reg.validate_and_increment_nonce(&action.name, nonce) {
+        ActionKind::Update { new_ua, nonce } => {
+            if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
                 eprintln!("UPDATE: {e}");
                 return;
             }
             match reg.update_address(&action.name, new_ua, &action.signature, txid, height) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, "UPDATE", txid, height, Some(new_ua), None);
+                    let _ = reg.insert_event(&action, "UPDATE", txid, height, Some(new_ua), None, Some(*nonce));
                     println!("Updated: {} → {new_ua} (height {height})", action.name)
                 }
                 Err(e) => eprintln!("DB error (update): {e}"),
@@ -293,7 +292,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             match reg.process_buy(&action.name, buyer_ua, &action.signature, txid, height) {
                 Ok(()) => {
                     let _ =
-                        reg.insert_event(&action, "BUY", txid, height, Some(buyer_ua), Some(price));
+                        reg.insert_event(&action, "BUY", txid, height, Some(buyer_ua), Some(price), None);
                     println!(
                         "Sold: {} → {buyer_ua} for {price} zats (height {height})",
                         action.name

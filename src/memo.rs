@@ -7,19 +7,18 @@ use zcash_address::ZcashAddress;
 pub struct MemoAction {
     pub name: String,
     pub signature: String,
-    pub nonce: Option<u64>,
     pub user_pubkey: Option<[u8; 32]>,
     pub kind: ActionKind,
 }
 
 pub enum ActionKind {
     Claim { ua: String },
-    List { price: u64 },
-    Delist,
-    Release,
-    Update { new_ua: String },
+    List { price: u64, nonce: u64 },
+    Delist { nonce: u64 },
+    Release { nonce: u64 },
+    Update { new_ua: String, nonce: u64 },
     Buy { buyer_ua: String },
-    SetPrice { prices: Vec<u64> },
+    SetPrice { prices: Vec<u64>, nonce: u64 },
 }
 
 // ── Validation ───────────────────────────────────────────────────────────────
@@ -54,23 +53,19 @@ pub fn verify_signature(payload: &str, sig_b64: &str, pubkey: &[u8; 32]) -> bool
 pub fn verify_action(action: &MemoAction, pubkey: &[u8; 32]) -> bool {
     let payload = match &action.kind {
         ActionKind::Claim { ua } => format!("CLAIM:{}:{ua}", action.name),
-        ActionKind::List { price } => {
-            format!("LIST:{}:{price}:{}", action.name, action.nonce.unwrap_or(0))
-        }
-        ActionKind::Delist => format!("DELIST:{}:{}", action.name, action.nonce.unwrap_or(0)),
-        ActionKind::Release => format!("RELEASE:{}:{}", action.name, action.nonce.unwrap_or(0)),
-        ActionKind::Update { new_ua } => {
-            format!("UPDATE:{}:{new_ua}:{}", action.name, action.nonce.unwrap_or(0))
-        }
+        ActionKind::List { price, nonce } => format!("LIST:{}:{price}:{nonce}", action.name),
+        ActionKind::Delist { nonce } => format!("DELIST:{}:{nonce}", action.name),
+        ActionKind::Release { nonce } => format!("RELEASE:{}:{nonce}", action.name),
+        ActionKind::Update { new_ua, nonce } => format!("UPDATE:{}:{new_ua}:{nonce}", action.name),
         ActionKind::Buy { buyer_ua } => format!("BUY:{}:{buyer_ua}", action.name),
-        ActionKind::SetPrice { prices } => {
+        ActionKind::SetPrice { prices, nonce } => {
             let count = prices.len();
             let prices_str: String = prices
                 .iter()
                 .map(|p| p.to_string())
                 .collect::<Vec<_>>()
                 .join(":");
-            format!("SETPRICE:{count}:{prices_str}:{}", action.nonce.unwrap_or(0))
+            format!("SETPRICE:{count}:{prices_str}:{nonce}")
         }
     };
     verify_signature(&payload, &action.signature, pubkey)
@@ -106,9 +101,8 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
         return Some(MemoAction {
             name: String::new(),
             signature: sig_b64.into(),
-            nonce: Some(nonce),
             user_pubkey: None,
-            kind: ActionKind::SetPrice { prices },
+            kind: ActionKind::SetPrice { prices, nonce },
         });
     }
 
@@ -126,7 +120,6 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            nonce: None,
             user_pubkey,
             kind: ActionKind::Claim { ua: ua.into() },
         });
@@ -148,9 +141,8 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            nonce: Some(nonce),
             user_pubkey,
-            kind: ActionKind::List { price },
+            kind: ActionKind::List { price, nonce },
         });
     }
 
@@ -169,9 +161,8 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            nonce: Some(nonce),
             user_pubkey,
-            kind: ActionKind::Delist,
+            kind: ActionKind::Delist { nonce },
         });
     }
 
@@ -190,9 +181,8 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            nonce: Some(nonce),
             user_pubkey,
-            kind: ActionKind::Release,
+            kind: ActionKind::Release { nonce },
         });
     }
 
@@ -211,10 +201,10 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            nonce: Some(nonce),
             user_pubkey,
             kind: ActionKind::Update {
                 new_ua: new_ua.into(),
+                nonce,
             },
         });
     }
@@ -233,7 +223,6 @@ pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
         return Some(MemoAction {
             name: name.into(),
             signature: sig_b64.into(),
-            nonce: None,
             user_pubkey,
             kind: ActionKind::Buy {
                 buyer_ua: buyer_ua.into(),
