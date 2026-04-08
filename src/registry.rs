@@ -261,6 +261,7 @@ impl Registry {
         height: u64,
         ua: Option<&str>,
         price: Option<u64>,
+        nonce: Option<u64>,
     ) -> rusqlite::Result<()> {
         self.db.execute(
             "INSERT OR IGNORE INTO events (name, action, txid, height, ua, price, nonce, signature)
@@ -272,7 +273,7 @@ impl Registry {
                 height as i64,
                 ua,
                 price.map(|p| p as i64),
-                memo.nonce.map(|n| n as i64),
+                nonce.map(|n| n as i64),
                 memo.signature,
             ],
         )?;
