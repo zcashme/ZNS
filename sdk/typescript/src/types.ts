@@ -5,11 +5,14 @@ export interface Registration {
   height: number;
   nonce: number;
   signature: string | null;
+  last_action: string;
+  pubkey: string | null;
 }
 
 export interface Listing {
   name: string;
   price: number;
+  nonce: number;
   txid: string;
   height: number;
   signature: string;
@@ -36,6 +39,7 @@ export interface StatusResult {
   synced_height: number;
   admin_pubkey: string;
   uivk: string;
+  address: string;
   registered: number;
   listed: number;
   pricing: Pricing | null;
@@ -51,6 +55,7 @@ export interface Event {
   price: number | null;
   nonce: number | null;
   signature: string | null;
+  pubkey: string | null;
 }
 
 export interface EventsFilter {

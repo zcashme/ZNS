@@ -48,14 +48,16 @@ State is a pure function of `(chain, viewing key, admin pubkey)`, so two indexer
 
 ZNS lives in the 512-byte Orchard memo field as a colon-delimited UTF-8 string. The `:` byte is the only delimiter and is forbidden inside fields.
 
-| Action  | Memo                                       | Accepted if                            |
-|---------|--------------------------------------------|----------------------------------------|
-| Claim   | `ZNS:CLAIM:<name>:<ua>:<sig>`              | name free, payment ≥ tier cost         |
-| List    | `ZNS:LIST:<name>:<price>:<nonce>:<sig>`    | name owned, nonce strictly increasing  |
-| Delist  | `ZNS:DELIST:<name>:<nonce>:<sig>`          | name listed, nonce strictly increasing |
-| Release | `ZNS:RELEASE:<name>:<nonce>:<sig>`         | name owned, nonce strictly increasing  |
-| Update  | `ZNS:UPDATE:<name>:<new_ua>:<nonce>:<sig>` | name owned, nonce strictly increasing  |
-| Buy     | `ZNS:BUY:<name>:<buyer_ua>:<sig>`          | name listed, payment ≥ listing price   |
+| Action  | Memo                                                        | Accepted if                            |
+|---------|-------------------------------------------------------------|----------------------------------------|
+| Claim   | `ZNS:CLAIM:<name>:<ua>:<sig>[:<user_pubkey>]`               | name free, payment ≥ tier cost         |
+| List    | `ZNS:LIST:<name>:<price>:<nonce>:<sig>[:<user_pubkey>]`     | name owned, nonce strictly increasing  |
+| Delist  | `ZNS:DELIST:<name>:<nonce>:<sig>[:<user_pubkey>]`           | name listed, nonce strictly increasing |
+| Release | `ZNS:RELEASE:<name>:<nonce>:<sig>[:<user_pubkey>]`          | name owned, nonce strictly increasing  |
+| Update  | `ZNS:UPDATE:<name>:<new_ua>:<nonce>:<sig>[:<user_pubkey>]`  | name owned, nonce strictly increasing  |
+| Buy     | `ZNS:BUY:<name>:<buyer_ua>:<sig>[:<user_pubkey>]`           | name listed, payment ≥ listing price   |
+
+`[:<user_pubkey>]` is optional. When present, `<sig>` must be signed by that key instead of the admin key, and all future actions on the name must be signed by the same key. This is **sovereign ownership** - the name is controlled by the user's key, not the registry operator's.
 
 `<sig>` is base64 Ed25519 over everything between `ZNS:` and `:<sig>`:
 
@@ -187,18 +189,50 @@ curl -s https://light.zcash.me/zns-mainnet-test \
 
 ## Claim a name
 
-Names need an admin signature. Ask in [Discord](https://discord.gg/z2H23QgAGf), then build and submit the memo with the [TypeScript SDK](./sdk/typescript).
+To claim a name on the public ZcashMe instance, sign with your own Ed25519 key - no admin involvement required. The key can be derived deterministically from your Zcash seed phrase using SLIP-0010, so no separate key management is needed.
+
+```ts
+import { claimPayload, buildClaimMemo } from "zns-sdk";
+
+const payload = claimPayload("alice", "u1...");
+const signature = sign(payload);       // Ed25519 sign with your key
+const userPubkey = getPublicKey();     // base64-encoded Ed25519 public key
+
+const memo = buildClaimMemo("alice", "u1...", signature, userPubkey);
+```
+
+Once claimed, all subsequent actions on the name must be signed by the same key. The ZcashMe admin key is used only for protocol-level operations (pricing tiers, etc.) - it cannot authorize actions on names you own.
 
 ## Self-hosting
 
 The indexer is deterministic. Two instances given the same UIVK and admin pubkey converge on the same database.
+
+### 1. Generate an admin keypair
+
+The admin key authorizes SETPRICE and any admin-signed actions. Generate a fresh Ed25519 keypair - any standard tool works. The indexer needs the hex-encoded 32-byte public key.
+
+```sh
+# example using openssl
+openssl genpkey -algorithm ed25519 -out admin.pem
+openssl pkey -in admin.pem -pubout -out admin_pub.pem
+```
+
+### 2. Get a UIVK
+
+The indexer needs a Unified Incoming Viewing Key to decrypt incoming Orchard notes. Create a Zcash wallet, export the UFVK, then extract the UIVK:
+
+```sh
+cargo run --manifest-path tools/ufvk-to-uivk/Cargo.toml -- mainnet <your-ufvk>
+```
+
+### 3. Run the indexer
 
 ```sh
 docker build --build-arg FEATURES=mainnet -t zns-indexer .
 
 docker run -d \
   -e ZNS_UIVK=uivk1... \
-  -e ZNS_ADMIN_PUBKEY=ce86eb1b2030a4cde6b42d15a3850e9346dcf58820d20743783f1d09000e5c8e \
+  -e ZNS_ADMIN_PUBKEY=<your-hex-pubkey> \
   -p 3000:3000 \
   zns-indexer
 ```

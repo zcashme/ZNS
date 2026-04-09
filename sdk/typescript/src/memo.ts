@@ -28,14 +28,16 @@ export function setPricePayload(prices: number[], nonce: number): string {
 
 // ── Memo builders ───────────────────────────────────────────────────────────
 
-export function buildClaimMemo(name: string, ua: string, signature: string): string {
+export function buildClaimMemo(name: string, ua: string, signature: string, userPubkey?: string): string {
   if (!isValidName(name)) throw new Error(`Invalid name: ${name}`);
-  return `ZNS:CLAIM:${name}:${ua}:${signature}`;
+  const base = `ZNS:CLAIM:${name}:${ua}:${signature}`;
+  return userPubkey ? `${base}:${userPubkey}` : base;
 }
 
-export function buildBuyMemo(name: string, buyerUa: string, signature: string): string {
+export function buildBuyMemo(name: string, buyerUa: string, signature: string, userPubkey?: string): string {
   if (!isValidName(name)) throw new Error(`Invalid name: ${name}`);
-  return `ZNS:BUY:${name}:${buyerUa}:${signature}`;
+  const base = `ZNS:BUY:${name}:${buyerUa}:${signature}`;
+  return userPubkey ? `${base}:${userPubkey}` : base;
 }
 
 export function buildListMemo(
@@ -43,14 +45,17 @@ export function buildListMemo(
   price: number,
   nonce: number,
   signature: string,
+  userPubkey?: string,
 ): string {
   if (!isValidName(name)) throw new Error(`Invalid name: ${name}`);
-  return `ZNS:LIST:${name}:${price}:${nonce}:${signature}`;
+  const base = `ZNS:LIST:${name}:${price}:${nonce}:${signature}`;
+  return userPubkey ? `${base}:${userPubkey}` : base;
 }
 
-export function buildDelistMemo(name: string, nonce: number, signature: string): string {
+export function buildDelistMemo(name: string, nonce: number, signature: string, userPubkey?: string): string {
   if (!isValidName(name)) throw new Error(`Invalid name: ${name}`);
-  return `ZNS:DELIST:${name}:${nonce}:${signature}`;
+  const base = `ZNS:DELIST:${name}:${nonce}:${signature}`;
+  return userPubkey ? `${base}:${userPubkey}` : base;
 }
 
 export function buildUpdateMemo(
@@ -58,9 +63,11 @@ export function buildUpdateMemo(
   newUa: string,
   nonce: number,
   signature: string,
+  userPubkey?: string,
 ): string {
   if (!isValidName(name)) throw new Error(`Invalid name: ${name}`);
-  return `ZNS:UPDATE:${name}:${newUa}:${nonce}:${signature}`;
+  const base = `ZNS:UPDATE:${name}:${newUa}:${nonce}:${signature}`;
+  return userPubkey ? `${base}:${userPubkey}` : base;
 }
 
 export function buildSetPriceMemo(
