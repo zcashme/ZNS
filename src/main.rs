@@ -21,7 +21,7 @@ mod rpc;
 use base64::Engine;
 use orchard::keys::PreparedIncomingViewingKey;
 use tokio::sync::watch;
-use zcash_keys::keys::UnifiedIncomingViewingKey;
+use zcash_keys::keys::{UnifiedAddressRequest, UnifiedIncomingViewingKey};
 
 use crate::memo::{ActionKind, MemoAction};
 use crate::registry::Registry;
@@ -39,6 +39,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
     let orchard_ivk = uivk.orchard().as_ref().expect("UIVK has no Orchard key");
     let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
+    let (ua, _) = uivk
+        .default_address(UnifiedAddressRequest::AllAvailableKeys)
+        .map_err(|e| format!("Failed to derive address from UIVK: {e}"))?;
+    let ua_str = ua.encode(&config::NETWORK);
     let reg = Registry::open(config::DB_PATH)?;
 
     let (height_tx, height_rx) = watch::channel(0u64);
@@ -48,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         synced_height: height_rx,
         admin_pubkey: base64::engine::general_purpose::STANDARD.encode(admin_pubkey),
         uivk: uivk_str,
+        address: ua_str,
     };
     tokio::spawn(rpc::serve(format!("0.0.0.0:{}", config::RPC_PORT), rpc_state));
 

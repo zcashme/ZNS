@@ -17,6 +17,7 @@ pub struct RpcState {
     pub synced_height: watch::Receiver<u64>,
     pub admin_pubkey: String,
     pub uivk: String,
+    pub address: String,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ pub(crate) struct StatusResult {
     synced_height: u64,
     admin_pubkey: String,
     uivk: String,
+    address: String,
     registered: u64,
     listed: u64,
     pricing: Option<PricingEntry>,
@@ -150,6 +152,7 @@ impl ZnsApiServer for RpcState {
             synced_height: *self.synced_height.borrow(),
             admin_pubkey: self.admin_pubkey.clone(),
             uivk: self.uivk.clone(),
+            address: self.address.clone(),
             registered: reg.count_registrations(),
             listed: reg.count_listings(),
             pricing,
