@@ -1,8 +1,6 @@
 // ZNS block decrypter — streams compact blocks and trial-decrypts Orchard notes.
 //
 //
-use std::collections::HashSet;
-
 use orchard::keys::PreparedIncomingViewingKey;
 use orchard::note_encryption::{CompactAction, OrchardDomain};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
@@ -81,10 +79,11 @@ async fn scan_block(
         .vtx
         .iter()
         .flat_map(|tx| {
-            tx.actions.iter().filter_map(|a| {
+            let idx = tx.index as u32;
+            tx.actions.iter().filter_map(move |a| {
                 CompactAction::try_from(a)
                     .ok()
-                    .map(|ca| (ca, tx.hash.clone()))
+                    .map(|ca| (ca, tx.hash.clone(), idx))
             })
         })
         .collect();
@@ -94,21 +93,22 @@ async fn scan_block(
 
     let pairs: Vec<_> = candidates
         .iter()
-        .map(|(ca, _)| (OrchardDomain::for_compact_action(ca), ca.clone()))
+        .map(|(ca, _, _)| (OrchardDomain::for_compact_action(ca), ca.clone()))
         .collect();
     let results = zcash_note_encryption::batch::try_compact_note_decryption(
         std::slice::from_ref(pivk),
         &pairs,
     );
-    let matched: HashSet<_> = results
+    // BTreeMap keyed by tx.index: deduplicates multi-action txs and preserves block order.
+    let matched: std::collections::BTreeMap<u32, Vec<u8>> = results
         .iter()
         .zip(&candidates)
-        .filter_map(|(r, (_, txid))| r.as_ref().map(|_| txid.clone()))
+        .filter_map(|(r, (_, txid, idx))| r.as_ref().map(|_| (*idx, txid.clone())))
         .collect();
 
-    // Fetch full transactions and decrypt memos
+    // Fetch full transactions and decrypt memos (in block order).
     let branch = BranchId::for_height(network, BlockHeight::from_u32(height as u32));
-    for txid in &matched {
+    for (_, txid) in &matched {
         let Ok(data) = client
             .get_transaction(TxFilter {
                 block: None,
