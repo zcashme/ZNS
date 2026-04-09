@@ -31,6 +31,7 @@ pub(crate) struct RegistrationEntry {
     nonce: u64,
     signature: Option<String>,
     last_action: String,
+    pubkey: Option<String>,
     listing: Option<ListingEntry>,
 }
 
@@ -78,6 +79,7 @@ pub(crate) struct EventEntry {
     price: Option<u64>,
     nonce: Option<u64>,
     signature: Option<String>,
+    pubkey: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -187,6 +189,7 @@ impl ZnsApiServer for RpcState {
                 price: e.price,
                 nonce: e.nonce,
                 signature: e.signature,
+                pubkey: e.pubkey,
             })
             .collect();
 
@@ -216,6 +219,7 @@ fn registration_entry(
         nonce: r.nonce,
         signature: r.signature,
         last_action: r.last_action,
+        pubkey: r.pubkey,
         listing,
     }
 }
