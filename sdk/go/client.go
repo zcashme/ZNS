@@ -199,15 +199,17 @@ func (c *Client) ResolveAddress(addr string) ([]ResolveResult, error) {
 
 // Listings returns all names currently listed for sale.
 func (c *Client) Listings() ([]Listing, error) {
-	raw, err := c.call("listings", nil)
+	raw, err := c.call("list_for_sale", nil)
 	if err != nil {
 		return nil, err
 	}
-	var results []Listing
-	if err := json.Unmarshal(raw, &results); err != nil {
+	var result struct {
+		Listings []Listing `json:"listings"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal listings: %w", err)
 	}
-	return results, nil
+	return result.Listings, nil
 }
 
 // Events queries the event log with optional filters.

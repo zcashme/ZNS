@@ -14,6 +14,8 @@ data class Registration(
     val height: Int,
     val nonce: Int,
     val signature: String? = null,
+    @SerialName("last_action") val lastAction: String,
+    val pubkey: String? = null,
 )
 
 /**
@@ -23,6 +25,7 @@ data class Registration(
 data class Listing(
     val name: String,
     val price: Long,
+    val nonce: Int,
     val txid: String,
     val height: Int,
     val signature: String,
@@ -39,6 +42,8 @@ data class ResolveResult(
     val height: Int,
     val nonce: Int,
     val signature: String? = null,
+    @SerialName("last_action") val lastAction: String,
+    val pubkey: String? = null,
     val listing: Listing? = null,
 )
 
@@ -63,6 +68,7 @@ data class StatusResult(
     @SerialName("synced_height") val syncedHeight: Int,
     @SerialName("admin_pubkey") val adminPubkey: String,
     val uivk: String,
+    val address: String,
     val registered: Int,
     val listed: Int,
     val pricing: Pricing? = null,
@@ -82,6 +88,7 @@ data class ZnsEvent(
     val price: Long? = null,
     val nonce: Int? = null,
     val signature: String? = null,
+    val pubkey: String? = null,
 )
 
 /**

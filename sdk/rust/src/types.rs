@@ -17,6 +17,7 @@ pub struct Registration {
     pub nonce: u64,
     pub signature: Option<String>,
     pub last_action: LastAction,
+    pub pubkey: Option<String>,
     #[serde(default)]
     pub listing: Option<Listing>,
 }
@@ -54,6 +55,7 @@ pub struct Status {
     pub synced_height: u64,
     pub admin_pubkey: String,
     pub uivk: String,
+    pub address: String,
     pub registered: u64,
     pub listed: u64,
     pub pricing: Option<Pricing>,
@@ -83,6 +85,7 @@ pub struct Event {
     pub price: Option<u64>,
     pub nonce: Option<u64>,
     pub signature: Option<String>,
+    pub pubkey: Option<String>,
 }
 
 /// Every action type the indexer tracks.

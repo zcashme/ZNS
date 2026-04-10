@@ -17,12 +17,15 @@ class Registration:
     height: int
     nonce: int
     signature: str | None
+    last_action: str
+    pubkey: str | None
 
 
 @dataclass
 class Listing:
     name: str
     price: int
+    nonce: int
     txid: str
     height: int
     signature: str
@@ -45,6 +48,7 @@ class StatusResult:
     synced_height: int
     admin_pubkey: str
     uivk: str
+    address: str
     registered: int
     listed: int
     pricing: Pricing | None
@@ -61,6 +65,7 @@ class Event:
     price: int | None
     nonce: int | None
     signature: str | None
+    pubkey: str | None
 
 
 @dataclass

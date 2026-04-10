@@ -43,18 +43,21 @@ func (e *ZNSError) Error() string {
 
 // Registration represents a registered ZNS name.
 type Registration struct {
-	Name      string  `json:"name"`
-	Address   string  `json:"address"`
-	Txid      string  `json:"txid"`
-	Height    int     `json:"height"`
-	Nonce     int     `json:"nonce"`
-	Signature *string `json:"signature"`
+	Name       string  `json:"name"`
+	Address    string  `json:"address"`
+	Txid       string  `json:"txid"`
+	Height     int     `json:"height"`
+	Nonce      int     `json:"nonce"`
+	Signature  *string `json:"signature"`
+	LastAction string  `json:"last_action"`
+	Pubkey     *string `json:"pubkey"`
 }
 
 // Listing represents a name listed for sale.
 type Listing struct {
 	Name      string `json:"name"`
 	Price     int    `json:"price"`
+	Nonce     int    `json:"nonce"`
 	Txid      string `json:"txid"`
 	Height    int    `json:"height"`
 	Signature string `json:"signature"`
@@ -78,6 +81,7 @@ type StatusResult struct {
 	SyncedHeight int      `json:"synced_height"`
 	AdminPubkey  string   `json:"admin_pubkey"`
 	UIVK         string   `json:"uivk"`
+	Address      string   `json:"address"`
 	Registered   int      `json:"registered"`
 	Listed       int      `json:"listed"`
 	Pricing      *Pricing `json:"pricing"`
@@ -94,6 +98,7 @@ type Event struct {
 	Price     *int    `json:"price"`
 	Nonce     *int    `json:"nonce"`
 	Signature *string `json:"signature"`
+	Pubkey    *string `json:"pubkey"`
 }
 
 // EventsFilter specifies optional filters for querying events.

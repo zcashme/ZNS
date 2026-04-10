@@ -20,6 +20,7 @@ def _parse_listing(data: dict[str, Any]) -> Listing:
     return Listing(
         name=data["name"],
         price=data["price"],
+        nonce=data["nonce"],
         txid=data["txid"],
         height=data["height"],
         signature=data["signature"],
@@ -41,6 +42,7 @@ def _parse_status(data: dict[str, Any]) -> StatusResult:
         synced_height=data["synced_height"],
         admin_pubkey=data["admin_pubkey"],
         uivk=data["uivk"],
+        address=data["address"],
         registered=data["registered"],
         listed=data["listed"],
         pricing=_parse_pricing(data.get("pricing")),
@@ -56,6 +58,8 @@ def _parse_resolve(data: dict[str, Any]) -> ResolveResult:
         height=data["height"],
         nonce=data["nonce"],
         signature=data.get("signature"),
+        last_action=data["last_action"],
+        pubkey=data.get("pubkey"),
         listing=_parse_listing(listing_data) if listing_data else None,
     )
 
@@ -71,6 +75,7 @@ def _parse_event(data: dict[str, Any]) -> Event:
         price=data.get("price"),
         nonce=data.get("nonce"),
         signature=data.get("signature"),
+        pubkey=data.get("pubkey"),
     )
 
 

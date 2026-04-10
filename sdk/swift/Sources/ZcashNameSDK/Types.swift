@@ -9,14 +9,23 @@ public struct Registration: Codable, Sendable {
     public let height: Int
     public let nonce: Int
     public let signature: String?
+    public let lastAction: String
+    public let pubkey: String?
 
-    public init(name: String, address: String, txid: String, height: Int, nonce: Int, signature: String?) {
+    public init(name: String, address: String, txid: String, height: Int, nonce: Int, signature: String?, lastAction: String, pubkey: String?) {
         self.name = name
         self.address = address
         self.txid = txid
         self.height = height
         self.nonce = nonce
         self.signature = signature
+        self.lastAction = lastAction
+        self.pubkey = pubkey
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, address, txid, height, nonce, signature, pubkey
+        case lastAction = "last_action"
     }
 }
 
@@ -25,13 +34,15 @@ public struct Registration: Codable, Sendable {
 public struct Listing: Codable, Sendable {
     public let name: String
     public let price: Int
+    public let nonce: Int
     public let txid: String
     public let height: Int
     public let signature: String
 
-    public init(name: String, price: Int, txid: String, height: Int, signature: String) {
+    public init(name: String, price: Int, nonce: Int, txid: String, height: Int, signature: String) {
         self.name = name
         self.price = price
+        self.nonce = nonce
         self.txid = txid
         self.height = height
         self.signature = signature
@@ -47,16 +58,25 @@ public struct ResolveResult: Codable, Sendable {
     public let height: Int
     public let nonce: Int
     public let signature: String?
+    public let lastAction: String
+    public let pubkey: String?
     public let listing: Listing?
 
-    public init(name: String, address: String, txid: String, height: Int, nonce: Int, signature: String?, listing: Listing?) {
+    public init(name: String, address: String, txid: String, height: Int, nonce: Int, signature: String?, lastAction: String, pubkey: String?, listing: Listing?) {
         self.name = name
         self.address = address
         self.txid = txid
         self.height = height
         self.nonce = nonce
         self.signature = signature
+        self.lastAction = lastAction
+        self.pubkey = pubkey
         self.listing = listing
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, address, txid, height, nonce, signature, pubkey, listing
+        case lastAction = "last_action"
     }
 }
 
@@ -80,14 +100,16 @@ public struct StatusResult: Codable, Sendable {
     public let syncedHeight: Int
     public let adminPubkey: String
     public let uivk: String
+    public let address: String
     public let registered: Int
     public let listed: Int
     public let pricing: Pricing?
 
-    public init(syncedHeight: Int, adminPubkey: String, uivk: String, registered: Int, listed: Int, pricing: Pricing?) {
+    public init(syncedHeight: Int, adminPubkey: String, uivk: String, address: String, registered: Int, listed: Int, pricing: Pricing?) {
         self.syncedHeight = syncedHeight
         self.adminPubkey = adminPubkey
         self.uivk = uivk
+        self.address = address
         self.registered = registered
         self.listed = listed
         self.pricing = pricing
@@ -96,7 +118,7 @@ public struct StatusResult: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case syncedHeight = "synced_height"
         case adminPubkey = "admin_pubkey"
-        case uivk, registered, listed, pricing
+        case uivk, address, registered, listed, pricing
     }
 }
 
@@ -112,8 +134,9 @@ public struct ZNSEvent: Codable, Sendable {
     public let price: Int?
     public let nonce: Int?
     public let signature: String?
+    public let pubkey: String?
 
-    public init(id: Int, name: String, action: String, txid: String, height: Int, ua: String?, price: Int?, nonce: Int?, signature: String?) {
+    public init(id: Int, name: String, action: String, txid: String, height: Int, ua: String?, price: Int?, nonce: Int?, signature: String?, pubkey: String?) {
         self.id = id
         self.name = name
         self.action = action
@@ -123,6 +146,7 @@ public struct ZNSEvent: Codable, Sendable {
         self.price = price
         self.nonce = nonce
         self.signature = signature
+        self.pubkey = pubkey
     }
 }
 

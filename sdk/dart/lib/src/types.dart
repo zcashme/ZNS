@@ -6,6 +6,8 @@ class Registration {
   final int height;
   final int nonce;
   final String? signature;
+  final String lastAction;
+  final String? pubkey;
 
   Registration({
     required this.name,
@@ -14,6 +16,8 @@ class Registration {
     required this.height,
     required this.nonce,
     this.signature,
+    required this.lastAction,
+    this.pubkey,
   });
 
   factory Registration.fromJson(Map<String, dynamic> json) {
@@ -24,6 +28,8 @@ class Registration {
       height: json['height'] as int,
       nonce: json['nonce'] as int,
       signature: json['signature'] as String?,
+      lastAction: json['last_action'] as String,
+      pubkey: json['pubkey'] as String?,
     );
   }
 
@@ -34,6 +40,8 @@ class Registration {
         'height': height,
         'nonce': nonce,
         if (signature != null) 'signature': signature,
+        'last_action': lastAction,
+        if (pubkey != null) 'pubkey': pubkey,
       };
 }
 
@@ -43,6 +51,7 @@ class Listing {
 
   /// Price in zatoshis.
   final int price;
+  final int nonce;
   final String txid;
   final int height;
   final String signature;
@@ -50,6 +59,7 @@ class Listing {
   Listing({
     required this.name,
     required this.price,
+    required this.nonce,
     required this.txid,
     required this.height,
     required this.signature,
@@ -59,6 +69,7 @@ class Listing {
     return Listing(
       name: json['name'] as String,
       price: json['price'] as int,
+      nonce: json['nonce'] as int,
       txid: json['txid'] as String,
       height: json['height'] as int,
       signature: json['signature'] as String,
@@ -68,6 +79,7 @@ class Listing {
   Map<String, dynamic> toJson() => {
         'name': name,
         'price': price,
+        'nonce': nonce,
         'txid': txid,
         'height': height,
         'signature': signature,
@@ -82,6 +94,8 @@ class ResolveResult {
   final int height;
   final int nonce;
   final String? signature;
+  final String lastAction;
+  final String? pubkey;
   final Listing? listing;
 
   ResolveResult({
@@ -91,6 +105,8 @@ class ResolveResult {
     required this.height,
     required this.nonce,
     this.signature,
+    required this.lastAction,
+    this.pubkey,
     this.listing,
   });
 
@@ -103,6 +119,8 @@ class ResolveResult {
       height: json['height'] as int,
       nonce: json['nonce'] as int,
       signature: json['signature'] as String?,
+      lastAction: json['last_action'] as String,
+      pubkey: json['pubkey'] as String?,
       listing: listingData != null
           ? Listing.fromJson(listingData as Map<String, dynamic>)
           : null,
@@ -116,6 +134,8 @@ class ResolveResult {
         'height': height,
         'nonce': nonce,
         if (signature != null) 'signature': signature,
+        'last_action': lastAction,
+        if (pubkey != null) 'pubkey': pubkey,
         'listing': listing?.toJson(),
       };
 }
@@ -152,6 +172,7 @@ class StatusResult {
   final int syncedHeight;
   final String adminPubkey;
   final String uivk;
+  final String address;
   final int registered;
   final int listed;
   final Pricing? pricing;
@@ -160,6 +181,7 @@ class StatusResult {
     required this.syncedHeight,
     required this.adminPubkey,
     required this.uivk,
+    required this.address,
     required this.registered,
     required this.listed,
     this.pricing,
@@ -171,6 +193,7 @@ class StatusResult {
       syncedHeight: json['synced_height'] as int,
       adminPubkey: json['admin_pubkey'] as String,
       uivk: json['uivk'] as String,
+      address: json['address'] as String,
       registered: json['registered'] as int,
       listed: json['listed'] as int,
       pricing: pricingData != null
@@ -183,6 +206,7 @@ class StatusResult {
         'synced_height': syncedHeight,
         'admin_pubkey': adminPubkey,
         'uivk': uivk,
+        'address': address,
         'registered': registered,
         'listed': listed,
         if (pricing != null) 'pricing': pricing!.toJson(),
@@ -202,6 +226,7 @@ class ZnsEvent {
   final int? price;
   final int? nonce;
   final String? signature;
+  final String? pubkey;
 
   ZnsEvent({
     required this.id,
@@ -213,6 +238,7 @@ class ZnsEvent {
     this.price,
     this.nonce,
     this.signature,
+    this.pubkey,
   });
 
   factory ZnsEvent.fromJson(Map<String, dynamic> json) {
@@ -226,6 +252,7 @@ class ZnsEvent {
       price: json['price'] as int?,
       nonce: json['nonce'] as int?,
       signature: json['signature'] as String?,
+      pubkey: json['pubkey'] as String?,
     );
   }
 
@@ -239,6 +266,7 @@ class ZnsEvent {
         if (price != null) 'price': price,
         if (nonce != null) 'nonce': nonce,
         if (signature != null) 'signature': signature,
+        if (pubkey != null) 'pubkey': pubkey,
       };
 }
 
