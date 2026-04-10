@@ -504,6 +504,7 @@ impl Registry {
 
 // ── Data types ──────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
 pub struct Registration {
     pub name: String,
     pub address: String,
@@ -515,6 +516,7 @@ pub struct Registration {
     pub pubkey: Option<String>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Listing {
     pub name: String,
     pub price: u64,
@@ -524,12 +526,14 @@ pub struct Listing {
     pub signature: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct Pricing {
     pub nonce: u64,
     pub height: u64,
     pub tiers: Vec<u64>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Event {
     pub id: u64,
     pub name: String,
@@ -543,6 +547,7 @@ pub struct Event {
     pub pubkey: Option<String>,
 }
 
+#[derive(Debug, Clone)]
 pub struct EventPage {
     pub events: Vec<Event>,
     pub total: u64,

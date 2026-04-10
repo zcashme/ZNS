@@ -14,6 +14,7 @@ use zcash_protocol::consensus::{BlockHeight, Network};
 pub type Client = CompactTxStreamerClient<tonic::transport::Channel>;
 
 /// A single decrypted Orchard note with its chain context.
+#[derive(Debug, Clone)]
 pub struct DecryptedNote {
     pub memo: [u8; 512],
     pub value: u64,

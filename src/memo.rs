@@ -4,6 +4,7 @@ use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use zcash_address::ZcashAddress;
 
+#[derive(Debug, Clone)]
 pub struct MemoAction {
     pub name: String,
     pub signature: String,
@@ -11,6 +12,7 @@ pub struct MemoAction {
     pub kind: ActionKind,
 }
 
+#[derive(Debug, Clone)]
 pub enum ActionKind {
     Claim { ua: String },
     List { price: u64, nonce: u64 },

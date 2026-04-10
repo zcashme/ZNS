@@ -6,7 +6,7 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::server::Server;
 use jsonrpsee::types::ErrorObjectOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{self, Value};
 use zcash_address::ZcashAddress;
 
@@ -22,7 +22,7 @@ pub struct RpcState {
 
 // ── Response types ──────────────────────────────────────────────────────────
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RegistrationEntry {
     name: String,
     address: String,
@@ -35,7 +35,7 @@ pub(crate) struct RegistrationEntry {
     listing: Option<ListingEntry>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ListingEntry {
     name: String,
     price: u64,
@@ -45,12 +45,12 @@ pub(crate) struct ListingEntry {
     signature: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ListForSaleResult {
     listings: Vec<ListingEntry>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StatusResult {
     synced_height: u64,
     admin_pubkey: String,
@@ -61,14 +61,14 @@ pub(crate) struct StatusResult {
     pricing: Option<PricingEntry>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PricingEntry {
     nonce: u64,
     height: u64,
     tiers: Vec<u64>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventEntry {
     id: u64,
     name: String,
@@ -82,7 +82,7 @@ pub(crate) struct EventEntry {
     pubkey: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventsResult {
     events: Vec<EventEntry>,
     total: u64,
