@@ -70,7 +70,7 @@ DELIST:<name>:<nonce>
 RELEASE:<name>:<nonce>
 ```
 
-To verify, reconstruct one of these byte-for-byte from the API response and Ed25519-verify against `status.admin_pubkey`.
+To verify, reconstruct one of these byte-for-byte from the API response. If the response includes a non-null `pubkey` field, Ed25519-verify against that key; otherwise verify against `status.admin_pubkey`.
 
 Field encoding:
 
@@ -112,11 +112,13 @@ curl -s https://light.zcash.me/zns-mainnet-test \
   "nonce": 2,
   "last_action": "UPDATE",
   "signature": "AQID...",
+  "pubkey": null,
   "listing": null
 }
 ```
 
 - If `alice` were for sale, `listing` would be a `{price, nonce, signature, ...}` object instead of `null`
+- `pubkey` is `null` for admin-signed names; for sovereign names it is the base64 Ed25519 public key of the owner who controls the name
 - Query by address (not name) to get an array of every name resolving to it
 
 ### list_for_sale
