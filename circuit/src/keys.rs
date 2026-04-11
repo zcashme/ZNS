@@ -9,12 +9,11 @@
 use anyhow::{bail, Context, Result};
 use bip0039::Mnemonic;
 use group::{Group, GroupEncoding};
-use orchard::keys::{Diversifier, IncomingViewingKey};
+use orchard::keys::IncomingViewingKey;
 use pasta_curves::arithmetic::CurveExt;
 use pasta_curves::pallas;
 use zcash_address::unified::{self, Container, Encoding, Receiver};
 use zcash_address::ZcashAddress;
-use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_protocol::consensus::NetworkType;
 
 /// Orchard diversifier personalization for hash-to-curve
@@ -195,81 +194,71 @@ pub fn derive_unified_address(
 /// Verify that a unified address belongs to a given IVK
 ///
 /// This checks that pk_d = [ivk] * g_d for the extracted address components.
+///
+/// The key insight: we don't need to scan diversifier indices. Given an address,
+/// we extract d and pk_d. Then compute g_d = DiversifyHash(d), and verify
+/// that pk_d = g_d * ivk. The IVK is a scalar, so this is just point multiplication.
 pub fn verify_address_ownership(
     address: &ZcashAddress,
     ivk: &IncomingViewingKey,
 ) -> Result<(pallas::Point, pallas::Point, [u8; 11])> {
     let (g_d, pk_d, diversifier) = extract_address_components(address)?;
 
-    // Derive the expected address at this diversifier
-    // Try to find which diversifier index produces this diversifier
-    let mut found = false;
-    let mut expected_pk_d = pallas::Point::generator(); // Use generator as placeholder
+    // Convert IVK to scalar for point multiplication
+    // IncomingViewingKey.to_bytes() returns 64 bytes (serialized ivk)
+    // We need to derive the scalar that when multiplied by g_d gives pk_d
+    //
+    // The relationship is: pk_d = g_d * ivk_scalar
+    // where ivk_scalar is the underlying scalar of the IncomingViewingKey
+    //
+    // Orchard's IncomingViewingKey internally contains a scalar, but it's not
+    // directly exposed. We can derive it by using the fact that:
+    // ivk_scalar = hash_to_scalar(ivk_bytes) mod r
+    let ivk_scalar = ivk_to_scalar(ivk)?;
 
-    // Scan through common diversifier indices
-    for i in 0u32..100 {
-        let di = zip32::DiversifierIndex::try_from(i).unwrap_or_default();
-        let expected_addr = ivk.address_at(di);
-        let expected_d = expected_addr.diversifier();
-
-        if expected_d.as_array() == &diversifier {
-            // Found matching diversifier, extract pk_d
-            let expected_bytes = expected_addr.to_raw_address_bytes();
-            let expected_pk_d_bytes: &[u8; 32] = expected_bytes[11..43]
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid pk_d length"))?;
-            let expected_pk_d_affine = pallas::Affine::from_bytes(expected_pk_d_bytes)
-                .into_option()
-                .context("invalid expected pk_d encoding")?;
-            expected_pk_d = pallas::Point::from(expected_pk_d_affine);
-            found = true;
-            break;
-        }
-    }
-
-    if !found {
-        // Try to find it using diversifier_index method if available
-        // Parse the address to get an orchard::Address
-        let addr_str = address.to_string();
-        let (_net, addr_bytes) =
-            unified::Address::decode(&addr_str).map_err(|e| anyhow::anyhow!("{:?}", e))?;
-
-        if let Some(unified::Receiver::Orchard(orchard_bytes)) = addr_bytes.items().first() {
-            if let Some(orchard_addr) =
-                orchard::Address::from_raw_address_bytes(orchard_bytes).into_option()
-            {
-                if let Some(di) = ivk.diversifier_index(&orchard_addr) {
-                    let expected_addr = ivk.address_at(di);
-                    let expected_bytes = expected_addr.to_raw_address_bytes();
-                    let expected_pk_d_bytes: &[u8; 32] = expected_bytes[11..43]
-                        .try_into()
-                        .map_err(|_| anyhow::anyhow!("invalid pk_d length"))?;
-                    let expected_pk_d_affine = pallas::Affine::from_bytes(expected_pk_d_bytes)
-                        .into_option()
-                        .context("invalid expected pk_d encoding")?;
-                    expected_pk_d = pallas::Point::from(expected_pk_d_affine);
-                    found = true;
-                }
-            }
-        }
-    }
-
-    if !found {
-        bail!(
-            "Could not verify address: diversifier not found for this IVK.\n\
-             You cannot sign for an address you don't own."
-        );
-    }
+    // Compute expected pk_d = g_d * ivk_scalar
+    let expected_pk_d = g_d * ivk_scalar;
 
     // Verify pk_d matches
     if pk_d != expected_pk_d {
         bail!(
             "Address verification failed: the provided unified address does not belong to the given IVK.\n\
-             You cannot sign for an address you don't own."
+             Expected pk_d = {}, got pk_d = {}",
+            hex::encode(expected_pk_d.to_bytes()),
+            hex::encode(pk_d.to_bytes())
         );
     }
 
     Ok((g_d, pk_d, diversifier))
+}
+
+/// Convert an Orchard IncomingViewingKey to a pallas::Scalar
+///
+/// The IncomingViewingKey contains:
+/// - dk: DiversifierKey (32 bytes, bytes 0-31)
+/// - ivk: KeyAgreementPrivateKey wrapping a NonZeroPallasScalar (32 bytes, bytes 32-63)
+///
+/// Per Zcash Protocol Spec § 5.6.4.3, the raw encoding is:
+/// [dk (32 bytes) || ivk_scalar_repr (32 bytes)]
+///
+/// We extract the ivk scalar from bytes 32-63.
+pub fn ivk_to_scalar(ivk: &IncomingViewingKey) -> Result<pallas::Scalar> {
+    use ff::PrimeField;
+
+    let ivk_bytes = ivk.to_bytes();
+
+    // The scalar is in bytes 32-63 (the ivk component)
+    let scalar_bytes: &[u8; 32] = ivk_bytes[32..64]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("failed to extract scalar bytes"))?;
+
+    // Convert bytes to scalar using PrimeField::from_repr
+    // This interprets as little-endian and checks it's a valid scalar
+    let scalar = pallas::Scalar::from_repr(*scalar_bytes)
+        .into_option()
+        .context("invalid IVK scalar encoding - value may be >= modulus")?;
+
+    Ok(scalar)
 }
 
 /// Parse IVK from 64-character hex string

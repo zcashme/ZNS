@@ -4,15 +4,11 @@
 //! proving knowledge of the Orchard incoming viewing key (ivk).
 
 use anyhow::{bail, Context, Result};
-use ff::FromUniformBytes;
 use inquire::{Select, Text};
 use zcash_address::ZcashAddress;
 
 use zns_schnorr::keys::{self};
 use zns_schnorr::{sign, verify, Signature};
-
-// Re-export orchard types
-use orchard::keys::IncomingViewingKey;
 
 fn main() {
     if let Err(e) = run() {
@@ -86,10 +82,8 @@ fn sign_interactive() -> Result<()> {
     let address_str = address.to_string();
 
     // Convert IVK to scalar for signing
-    // Orchard IVK is not directly a scalar, but we derive a signing scalar from it
-    // The proper approach: derive the scalar from the raw IVK bytes
-    let ivk_bytes = ivk.to_bytes();
-    let ivk_scalar = Fr::from_uniform_bytes(&ivk_bytes);
+    // Extract the actual ivk scalar from the IncomingViewingKey (bytes 32-63)
+    let ivk_scalar = keys::ivk_to_scalar(&ivk)?;
 
     let signature = sign(&mut rng, &ivk_scalar, &g_d, &pk_d, &name, &address_str);
 
@@ -159,6 +153,3 @@ fn validate_name(name: &str) -> Result<()> {
     }
     Ok(())
 }
-
-// Need to import Fr for the signing
-use zns_schnorr::Fr;
