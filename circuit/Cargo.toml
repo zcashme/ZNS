@@ -1,61 +1,34 @@
 [package]
-name = "zns-circuit"
+name = "zns-schnorr"
 version = "0.1.0"
 edition = "2021"
+description = "Pallas curve Schnorr signatures for ZNS name binding authorization"
 
 [dependencies]
-# Arkworks — proving system
-ark-groth16 = "0.4"
-ark-snark = "0.4"
-
-# Arkworks — curves
-ark-bls12-381 = "0.4"
-
-# Arkworks — field/group traits
-ark-ff = "0.4"
-ark-ec = "0.4"
-
-# Arkworks — R1CS
-ark-relations = "0.4"
-ark-r1cs-std = "0.4"
-
-# Arkworks — serialization & utilities
-ark-serialize = "0.4"
-ark-std = "0.4"
-
-# Blake2b for out-of-circuit computation
-blake2b_simd = "1"
-
-# --- Prover-only deps (not needed for verification) ---
-
-# Orchard key derivation (out-of-circuit)
-orchard = { version = "0.10", optional = true }
-
-# Zcash address parsing
-zcash_address = { version = "0.7", optional = true }
-zcash_protocol = { version = "0.4", optional = true }
-
-# Pallas curve (needed for Schnorr sign/verify + out-of-circuit computation)
+# Pallas curve arithmetic
 pasta_curves = { version = "0.5", features = ["alloc"] }
 group = "0.13"
 ff = "0.13"
 
-# Encoding
-hex = { version = "0.4", optional = true }
-base64 = { version = "0.22", optional = true }
-rand = { version = "0.8", optional = true }
+# Hashing (for challenge generation)
+blake2b_simd = "1"
 
-# Sinsemilla primitives (for testing)
-sinsemilla = { version = "0.1", optional = true }
+# Random number generation
+rand = "0.8"
 
-[features]
-default = ["prover"]
-prover = [
-    "dep:orchard",
-    "dep:zcash_address",
-    "dep:zcash_protocol",
-    "dep:hex",
-    "dep:base64",
-    "dep:rand",
-    "dep:sinsemilla",
-]
+# Serialization
+hex = "0.4"
+
+# CLI and errors
+inquire = "0.7"
+anyhow = "1.0"
+
+# Zcash address parsing and key derivation
+zcash_address = "0.10.1"
+orchard = "0.10"
+
+# For seed phrase parsing
+bip0039 = "0.12"
+
+[dev-dependencies]
+rand_core = "0.6"
