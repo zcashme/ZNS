@@ -25,7 +25,6 @@ anyhow = "1.0"
 
 # Zcash address parsing and key derivation
 zcash_address = "0.10.1"
-zcash_keys = { version = "0.12", default-features = false, features = ["orchard"] }
 zcash_protocol = "0.7"
 orchard = "0.10"
 
@@ -34,12 +33,6 @@ zip32 = "0.1"
 
 # For seed phrase parsing
 bip0039 = "0.12"
-
-# For unified full/incoming viewing key handling
-nonempty = "0.7"
-
-# For CtOption and conditional selection
-subtle = "2.4"
 
 [dev-dependencies]
 rand_core = "0.6"
