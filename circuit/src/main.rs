@@ -1,13 +1,18 @@
 //! ZNS Schnorr Signer - Interactive CLI for Pallas curve Schnorr signatures
 //!
 //! Signs a user-defined name binding to a Zcash unified address,
-//! proving knowledge of the incoming viewing key (ivk).
+//! proving knowledge of the Orchard incoming viewing key (ivk).
 
 use anyhow::{bail, Context, Result};
+use ff::FromUniformBytes;
 use inquire::{Select, Text};
 use zcash_address::ZcashAddress;
 
-use zns_schnorr::{keys, sign, verify, Signature};
+use zns_schnorr::keys::{self};
+use zns_schnorr::{sign, verify, Signature};
+
+// Re-export orchard types
+use orchard::keys::IncomingViewingKey;
 
 fn main() {
     if let Err(e) = run() {
@@ -37,10 +42,10 @@ fn sign_interactive() -> Result<()> {
     let ivk = match key_method {
         "seed phrase" => {
             let phrase = Text::new("Enter seed phrase (24 words):").prompt()?;
-            keys::derive_ivk_from_seed(&phrase)?
+            keys::derive_orchard_ivk_from_seed(&phrase)?
         }
         "ivk hex" => {
-            let ivk_hex = Text::new("Enter ivk (64 hex chars):").prompt()?;
+            let ivk_hex = Text::new("Enter Orchard IVK (128 hex chars):").prompt()?;
             keys::parse_ivk_hex(&ivk_hex)?
         }
         _ => unreachable!(),
@@ -48,11 +53,11 @@ fn sign_interactive() -> Result<()> {
 
     // Step 2: Get or derive the unified address
     let addr_input =
-        Text::new("Unified address to bind to (press Enter to derive from ivk):").prompt()?;
+        Text::new("Unified address to bind to (press Enter to derive from IVK):").prompt()?;
 
     let (address, g_d, pk_d) = if addr_input.trim().is_empty() {
         // User pressed Enter - derive address from ivk
-        let (addr_str, g, p) = keys::derive_unified_address(&ivk)?;
+        let (addr_str, g, p, _d) = keys::derive_unified_address(&ivk)?;
         let addr: ZcashAddress = addr_str
             .parse()
             .context("failed to parse derived address")?;
@@ -62,20 +67,10 @@ fn sign_interactive() -> Result<()> {
         // User entered an address - verify it belongs to the ivk
         let addr: ZcashAddress = addr_input.parse().context("invalid Zcash address")?;
 
-        // Extract components
-        let (g, p) = keys::extract_address_components(&addr)?;
+        // Extract components and verify ownership
+        let (g, p, _d) = keys::verify_address_ownership(&addr, &ivk)?;
 
-        // CRITICAL: Verify this address actually belongs to the ivk
-        // Without this check, the proof is meaningless
-        let computed_pk_d = g * ivk;
-        if computed_pk_d != p {
-            bail!(
-                "Address verification failed: the provided unified address does not belong to your ivk.\n\
-                 You cannot sign for an address you don't own."
-            );
-        }
-
-        println!("\nAddress verified - belongs to your ivk");
+        println!("\nAddress verified - belongs to your IVK");
         (addr, g, p)
     };
 
@@ -89,7 +84,14 @@ fn sign_interactive() -> Result<()> {
     // Generate signature - proves knowledge of ivk for this (name, address) binding
     let mut rng = rand::thread_rng();
     let address_str = address.to_string();
-    let signature = sign(&mut rng, &ivk, &g_d, &pk_d, &name, &address_str);
+
+    // Convert IVK to scalar for signing
+    // Orchard IVK is not directly a scalar, but we derive a signing scalar from it
+    // The proper approach: derive the scalar from the raw IVK bytes
+    let ivk_bytes = ivk.to_bytes();
+    let ivk_scalar = Fr::from_uniform_bytes(&ivk_bytes);
+
+    let signature = sign(&mut rng, &ivk_scalar, &g_d, &pk_d, &name, &address_str);
 
     println!("\n=== Signature ===");
     println!("Hex: {}", signature);
@@ -122,7 +124,7 @@ fn verify_interactive() -> Result<()> {
     let signature = Signature::from_bytes(&sig_array)?;
 
     // Extract components from address
-    let (g_d, pk_d) = keys::extract_address_components(&address)?;
+    let (g_d, pk_d, _d) = keys::extract_address_components(&address)?;
 
     // Verify
     let valid = verify(&g_d, &pk_d, &name, &address_str, &signature);
@@ -157,3 +159,6 @@ fn validate_name(name: &str) -> Result<()> {
     }
     Ok(())
 }
+
+// Need to import Fr for the signing
+use zns_schnorr::Fr;

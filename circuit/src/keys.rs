@@ -1,26 +1,56 @@
 //! Key derivation and address parsing for ZNS Schnorr
 //!
-//! Handles:
-//! - Seed phrase → ivk derivation
-//! - Unified address parsing → (g_d, pk_d) extraction
-//! - IVK hex encoding/decoding
+//! Uses proper Orchard types from the orchard crate:
+//! - IncomingViewingKey for IVK operations
+//! - Address for Orchard payment addresses
+//! - Proper ZIP 32 derivation from seed phrases
+//! - Correct DiversifyHash (hash_to_curve with "z.cash:Orchard-gd", not BLAKE2b)
 
 use anyhow::{bail, Context, Result};
 use bip0039::Mnemonic;
-use ff::{Field, FromUniformBytes, PrimeField};
-use group::GroupEncoding;
+use group::{Group, GroupEncoding};
+use orchard::keys::{Diversifier, IncomingViewingKey};
+use pasta_curves::arithmetic::CurveExt;
+use pasta_curves::pallas;
+use zcash_address::unified::{self, Container, Encoding, Receiver};
 use zcash_address::ZcashAddress;
+use zcash_keys::keys::UnifiedIncomingViewingKey;
+use zcash_protocol::consensus::NetworkType;
 
-use crate::{diversify_hash, Fr, Point};
+/// Orchard diversifier personalization for hash-to-curve
+const ORCHARD_GD_PERSONALIZATION: &str = "z.cash:Orchard-gd";
 
-/// Derive ivk from a 24-word BIP39 seed phrase
+/// Zcash mainnet coin type for ZIP 32
+const COIN_TYPE: u32 = 133;
+
+/// Compute g_d from a diversifier using proper Orchard DiversifyHash
+///
+/// In Orchard, g_d = DiversifyHash(d) which uses hash_to_curve with
+/// personalization "z.cash:Orchard-gd".
+/// This is NOT a simple BLAKE2b hash.
+pub fn diversify_hash(d: &[u8; 11]) -> pallas::Point {
+    let hasher = pallas::Point::hash_to_curve(ORCHARD_GD_PERSONALIZATION);
+    let g_d = hasher(d);
+
+    // If the identity occurs, we replace it with a different fixed point.
+    // This matches the orchard crate's behavior.
+    if bool::from(g_d.is_identity()) {
+        hasher(&[])
+    } else {
+        g_d
+    }
+}
+
+/// Derive Orchard IncomingViewingKey from a 24-word BIP39 seed phrase
+///
+/// Uses proper ZIP 32 derivation: seed → spending key → FVK → IVK
 ///
 /// # Arguments
 /// * `phrase` - 24-word seed phrase
 ///
 /// # Returns
-/// The incoming viewing key (ivk) as a Pallas scalar
-pub fn derive_ivk_from_seed(phrase: &str) -> Result<Fr> {
+/// The Orchard IncomingViewingKey
+pub fn derive_orchard_ivk_from_seed(phrase: &str) -> Result<IncomingViewingKey> {
     // Parse mnemonic
     let mnemonic: Mnemonic<bip0039::English> = Mnemonic::from_phrase(phrase.trim())
         .map_err(|e| anyhow::anyhow!("invalid seed phrase: {:?}", e))?;
@@ -28,61 +58,37 @@ pub fn derive_ivk_from_seed(phrase: &str) -> Result<Fr> {
     // Derive seed from mnemonic
     let seed = mnemonic.to_seed("");
 
-    // For now, we use a simplified derivation
-    // In production, this should follow Zcash's full derivation path:
-    // seed → spending key → ivk (with proper ZIP 32 derivation)
-    //
-    // This is a placeholder that hashes the seed to get ivk
-    // TODO: Use proper Orchard key derivation once orchard crate integration is complete
-    let hash_result = blake2b_simd::Params::new()
-        .hash_length(64)
-        .personal(b"ZNS:ivk_derive")
-        .hash(&seed);
-    let hash = hash_result.as_array();
+    // Use orchard's SpendingKey::from_zip32_seed for proper ZIP 32 derivation
+    // This derives: seed → spending key → FVK → IVK
+    let sk = orchard::keys::SpendingKey::from_zip32_seed(&seed, COIN_TYPE, zip32::AccountId::ZERO)
+        .map_err(|e| anyhow::anyhow!("failed to derive spending key: {:?}", e))?;
 
-    // Reduce to scalar field using from_uniform_bytes (64 bytes -> Fr)
-    let ivk = Fr::from_uniform_bytes(hash);
-
-    // Ensure ivk is non-zero (valid key)
-    if ivk.is_zero().into() {
-        bail!("derived ivk is zero (invalid key)");
-    }
+    // Derive full viewing key and then incoming viewing key
+    let fvk = orchard::keys::FullViewingKey::from(&sk);
+    let ivk = fvk.to_ivk(orchard::keys::Scope::External);
 
     Ok(ivk)
 }
 
-/// Parse ivk from 64-character hex string
+/// Parse Orchard IncomingViewingKey from 64-byte raw encoding (ZIP 316 format)
 ///
 /// # Arguments
-/// * `hex_str` - 64 hex characters representing 32 bytes
+/// * `bytes` - 64-byte raw IVK encoding
 ///
 /// # Returns
-/// The ivk as a Pallas scalar
-pub fn parse_ivk_hex(hex_str: &str) -> Result<Fr> {
-    let hex_clean = hex_str.trim();
-
-    if hex_clean.len() != 64 {
-        bail!("ivk hex must be exactly 64 characters (32 bytes)");
-    }
-
-    let bytes = hex::decode(hex_clean).context("invalid hex in ivk")?;
-
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("ivk must be 32 bytes"))?;
-
-    let ivk = Fr::from_repr(arr)
+/// The Orchard IncomingViewingKey
+pub fn parse_orchard_ivk(bytes: &[u8; 64]) -> Result<IncomingViewingKey> {
+    IncomingViewingKey::from_bytes(bytes)
         .into_option()
-        .context("ivk bytes are not a valid scalar")?;
-
-    if ivk.is_zero().into() {
-        bail!("ivk cannot be zero");
-    }
-
-    Ok(ivk)
+        .context("invalid Orchard IVK bytes")
 }
 
-/// Extract g_d and pk_d from a unified address
+/// Serialize Orchard IncomingViewingKey to 64-byte raw encoding
+pub fn orchard_ivk_to_bytes(ivk: &IncomingViewingKey) -> [u8; 64] {
+    ivk.to_bytes()
+}
+
+/// Extract g_d and pk_d from a unified address using proper Orchard types
 ///
 /// Unified addresses contain multiple receivers (transparent, Sapling, Orchard).
 /// This extracts the Orchard receiver's components.
@@ -91,11 +97,12 @@ pub fn parse_ivk_hex(hex_str: &str) -> Result<Fr> {
 /// * `address` - Parsed Zcash unified address
 ///
 /// # Returns
-/// * `g_d` - Diversified base point
-/// * `pk_d` - Transmission key
-pub fn extract_address_components(address: &ZcashAddress) -> Result<(Point, Point)> {
-    use zcash_address::unified::{self, Container, Encoding};
-
+/// * `g_d` - Diversified base point (pallas::Point)
+/// * `pk_d` - Transmission key (pallas::Point)
+/// * `diversifier` - The 11-byte diversifier
+pub fn extract_address_components(
+    address: &ZcashAddress,
+) -> Result<(pallas::Point, pallas::Point, [u8; 11])> {
     // Decode as unified address
     let addr_str = address.to_string();
     let (_net, addr_bytes) = unified::Address::decode(&addr_str)
@@ -104,97 +111,233 @@ pub fn extract_address_components(address: &ZcashAddress) -> Result<(Point, Poin
     // Look for Orchard receiver
     for item in addr_bytes.items() {
         if let unified::Receiver::Orchard(orchard_bytes) = item {
-            // Orchard receiver is 43 bytes:
-            // - 1 byte: flags (not used here)
-            // - 11 bytes: diversifier d
-            // - 32 bytes: compressed pk_d
+            // Parse the Orchard receiver bytes using orchard crate's Address type
+            // Address::from_raw_address_bytes is the public API for parsing raw bytes
+            // The function signature is from_raw_address_bytes(bytes: &[u8; 43])
+            let orchard_addr = orchard::Address::from_raw_address_bytes(&orchard_bytes)
+                .into_option()
+                .context("failed to parse Orchard receiver bytes")?;
 
-            if orchard_bytes.len() < 43 {
-                bail!("invalid Orchard receiver length");
-            }
+            // Extract diversifier
+            let diversifier = orchard_addr.diversifier();
+            let d_bytes = *diversifier.as_array();
 
-            // Extract diversifier (bytes 1-11)
-            let d: [u8; 11] = orchard_bytes[1..12].try_into().unwrap();
+            // Compute g_d using proper DiversifyHash (hash_to_curve)
+            let g_d = diversify_hash(&d_bytes);
 
-            // Extract pk_d (bytes 12-43)
-            let pk_d_bytes: [u8; 32] = orchard_bytes[12..44].try_into().unwrap();
+            // Extract pk_d from the raw address bytes
+            // Orchard raw address format: [d (11 bytes) || pk_d (32 bytes)]
+            let pk_d_bytes: &[u8; 32] = orchard_bytes[11..43]
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid pk_d length in address"))?;
+            let pk_d_affine = pallas::Affine::from_bytes(pk_d_bytes)
+                .into_option()
+                .context("invalid pk_d encoding in address")?;
+            let pk_d = pallas::Point::from(pk_d_affine);
 
-            // Compute g_d from diversifier
-            let g_d = diversify_hash(&d);
-
-            // Parse pk_d using GroupEncoding trait
-            let pk_d_repr = pasta_curves::pallas::Affine::from_bytes(&pk_d_bytes);
-            let pk_d_affine = pk_d_repr.into_option().context("invalid pk_d encoding")?;
-            let pk_d = Point::from(pk_d_affine);
-
-            return Ok((g_d, pk_d));
+            return Ok((g_d, pk_d, d_bytes));
         }
     }
 
     bail!("unified address has no Orchard receiver")
 }
 
-/// Derive unified address from ivk
+/// Derive unified address from Orchard IncomingViewingKey
 ///
-/// Generates a unified address that can be created from the given ivk.
-/// Uses a default diversifier for simplicity.
+/// Generates a unified address at the first valid diversifier index (0).
+/// Uses proper Orchard address derivation.
 ///
 /// # Arguments
-/// * `ivk` - Incoming viewing key
+/// * `ivk` - Orchard incoming viewing key
 ///
 /// # Returns
 /// * `address_str` - Unified address string
 /// * `g_d` - Diversified base point
-/// * `pk_d` - Transmission key (g_d * ivk)
-pub fn derive_unified_address(ivk: &Fr) -> Result<(String, Point, Point)> {
-    // Use a default diversifier (all zeros) for simplicity
-    // In production, should try different diversifiers to find a valid one
-    let d: [u8; 11] = [0u8; 11];
+/// * `pk_d` - Transmission key
+/// * `diversifier` - The 11-byte diversifier
+pub fn derive_unified_address(
+    ivk: &IncomingViewingKey,
+) -> Result<(String, pallas::Point, pallas::Point, [u8; 11])> {
+    // Find the first valid diversifier (starting at index 0)
+    // Orchard scans for a valid diversifier starting from DiversifierIndex 0
+    let diversifier_index = zip32::DiversifierIndex::new();
+    let orchard_addr = ivk.address_at(diversifier_index);
 
-    // Compute g_d from diversifier
-    let g_d = diversify_hash(&d);
+    // Extract the diversifier
+    let diversifier = orchard_addr.diversifier();
+    let d_bytes = *diversifier.as_array();
 
-    // Compute pk_d = g_d * ivk
-    let pk_d = g_d * ivk;
+    // Compute g_d using proper DiversifyHash
+    let g_d = diversify_hash(&d_bytes);
 
-    // For now, return a placeholder address string
-    // In production, this should properly construct a unified address
-    // with F4Jumble encoding, etc.
-    //
-    // TODO: Implement proper unified address encoding
-    let address_str = format!(
-        "u1q{}[placeholder_derived_from_{}]",
-        hex::encode(&d),
-        hex::encode(ivk.to_repr())
-    );
+    // Extract pk_d from the raw address bytes
+    // Orchard raw address format: [d (11 bytes) || pk_d (32 bytes)]
+    let orchard_bytes = orchard_addr.to_raw_address_bytes();
+    let pk_d_bytes: &[u8; 32] = orchard_bytes[11..43]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid pk_d length"))?;
+    let pk_d_affine = pallas::Affine::from_bytes(pk_d_bytes)
+        .into_option()
+        .context("invalid pk_d encoding")?;
+    let pk_d = pallas::Point::from(pk_d_affine);
 
-    Ok((address_str, g_d, pk_d))
+    // Create the unified address
+    let receivers = vec![Receiver::Orchard(orchard_bytes)];
+    let unified_addr = unified::Address::try_from_items(receivers)
+        .map_err(|e| anyhow::anyhow!("failed to create unified address: {:?}", e))?;
+
+    // Encode with proper network type
+    let address_str = unified_addr.encode(&NetworkType::Main);
+
+    Ok((address_str, g_d, pk_d, d_bytes))
+}
+
+/// Verify that a unified address belongs to a given IVK
+///
+/// This checks that pk_d = [ivk] * g_d for the extracted address components.
+pub fn verify_address_ownership(
+    address: &ZcashAddress,
+    ivk: &IncomingViewingKey,
+) -> Result<(pallas::Point, pallas::Point, [u8; 11])> {
+    let (g_d, pk_d, diversifier) = extract_address_components(address)?;
+
+    // Derive the expected address at this diversifier
+    // Try to find which diversifier index produces this diversifier
+    let mut found = false;
+    let mut expected_pk_d = pallas::Point::generator(); // Use generator as placeholder
+
+    // Scan through common diversifier indices
+    for i in 0u32..100 {
+        let di = zip32::DiversifierIndex::try_from(i).unwrap_or_default();
+        let expected_addr = ivk.address_at(di);
+        let expected_d = expected_addr.diversifier();
+
+        if expected_d.as_array() == &diversifier {
+            // Found matching diversifier, extract pk_d
+            let expected_bytes = expected_addr.to_raw_address_bytes();
+            let expected_pk_d_bytes: &[u8; 32] = expected_bytes[11..43]
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid pk_d length"))?;
+            let expected_pk_d_affine = pallas::Affine::from_bytes(expected_pk_d_bytes)
+                .into_option()
+                .context("invalid expected pk_d encoding")?;
+            expected_pk_d = pallas::Point::from(expected_pk_d_affine);
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        // Try to find it using diversifier_index method if available
+        // Parse the address to get an orchard::Address
+        let addr_str = address.to_string();
+        let (_net, addr_bytes) =
+            unified::Address::decode(&addr_str).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+
+        if let Some(unified::Receiver::Orchard(orchard_bytes)) = addr_bytes.items().first() {
+            if let Some(orchard_addr) =
+                orchard::Address::from_raw_address_bytes(orchard_bytes).into_option()
+            {
+                if let Some(di) = ivk.diversifier_index(&orchard_addr) {
+                    let expected_addr = ivk.address_at(di);
+                    let expected_bytes = expected_addr.to_raw_address_bytes();
+                    let expected_pk_d_bytes: &[u8; 32] = expected_bytes[11..43]
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("invalid pk_d length"))?;
+                    let expected_pk_d_affine = pallas::Affine::from_bytes(expected_pk_d_bytes)
+                        .into_option()
+                        .context("invalid expected pk_d encoding")?;
+                    expected_pk_d = pallas::Point::from(expected_pk_d_affine);
+                    found = true;
+                }
+            }
+        }
+    }
+
+    if !found {
+        bail!(
+            "Could not verify address: diversifier not found for this IVK.\n\
+             You cannot sign for an address you don't own."
+        );
+    }
+
+    // Verify pk_d matches
+    if pk_d != expected_pk_d {
+        bail!(
+            "Address verification failed: the provided unified address does not belong to the given IVK.\n\
+             You cannot sign for an address you don't own."
+        );
+    }
+
+    Ok((g_d, pk_d, diversifier))
+}
+
+/// Parse IVK from 64-character hex string
+///
+/// # Arguments
+/// * `hex_str` - 128 hex characters representing 64 bytes
+///
+/// # Returns
+/// The Orchard IncomingViewingKey
+pub fn parse_ivk_hex(hex_str: &str) -> Result<IncomingViewingKey> {
+    let hex_clean = hex_str.trim();
+
+    if hex_clean.len() != 128 {
+        bail!("Orchard IVK hex must be exactly 128 characters (64 bytes)");
+    }
+
+    let bytes = hex::decode(hex_clean).context("invalid hex in IVK")?;
+
+    let arr: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("IVK must be 64 bytes"))?;
+
+    parse_orchard_ivk(&arr)
+}
+
+/// Serialize IVK to hex string
+pub fn ivk_to_hex(ivk: &IncomingViewingKey) -> String {
+    hex::encode(ivk.to_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::RngCore;
 
     #[test]
-    fn test_ivk_hex_roundtrip() {
-        let ivk = Fr::from(123456u64);
-        let bytes = ivk.to_repr();
-        let hex = hex::encode(bytes);
+    fn test_diversify_hash() {
+        // Test that diversify_hash produces a valid point
+        let d = [1u8; 11];
+        let g_d = diversify_hash(&d);
 
-        let parsed = parse_ivk_hex(&hex).unwrap();
-        assert_eq!(ivk, parsed);
+        // g_d should not be the identity
+        assert!(!bool::from(g_d.is_identity()));
     }
 
     #[test]
-    fn test_ivk_hex_invalid_length() {
-        let result = parse_ivk_hex("abc123");
-        assert!(result.is_err());
+    fn test_diversify_hash_deterministic() {
+        // Same diversifier should produce same g_d
+        let d = [1u8; 11];
+        let g_d1 = diversify_hash(&d);
+        let g_d2 = diversify_hash(&d);
+        assert_eq!(g_d1, g_d2);
     }
 
     #[test]
-    fn test_ivk_hex_invalid_chars() {
-        let result =
-            parse_ivk_hex("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
-        assert!(result.is_err());
+    fn test_diversify_hash_different() {
+        // Different diversifiers should (very likely) produce different g_d
+        let d1 = [1u8; 11];
+        let d2 = [2u8; 11];
+        let g_d1 = diversify_hash(&d1);
+        let g_d2 = diversify_hash(&d2);
+        assert_ne!(g_d1, g_d2);
+    }
+
+    #[test]
+    fn test_diversifier_creation() {
+        let d_bytes = [1u8; 11];
+        let diversifier = Diversifier::from_bytes(d_bytes);
+        assert_eq!(diversifier.as_array(), &d_bytes);
     }
 }

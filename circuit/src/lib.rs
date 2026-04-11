@@ -3,6 +3,8 @@
 //! This crate implements Schnorr signatures on the Pallas curve (Zcash Orchard).
 //! The signature binds a user-defined name to a Zcash unified address,
 //! proving knowledge of the incoming viewing key (ivk).
+//!
+//! Uses proper Orchard types for correct DiversifyHash and key derivation.
 
 use anyhow::Context;
 use blake2b_simd::Params;
@@ -14,15 +16,18 @@ use std::fmt;
 
 /// Pallas base field (Fp) - for point coordinates
 pub type Fq = pallas::Base;
-/// Pallas scalar field (Fq) - for ivk, r, s, c
+/// Pallas scalar field (Fq) - for ivk scalar
 pub type Fr = pallas::Scalar;
 /// Pallas point
 pub type Point = pallas::Point;
 /// Pallas affine point
 pub type Affine = pallas::Affine;
 
-/// Key derivation utilities
+/// Key derivation utilities using proper Orchard types
 pub mod keys;
+
+// Re-export orchard types for convenience
+pub use orchard::keys::IncomingViewingKey;
 
 /// A Schnorr signature: (R, s)
 #[derive(Clone, Debug, PartialEq)]
