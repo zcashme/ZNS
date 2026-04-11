@@ -134,6 +134,43 @@ pub fn extract_address_components(address: &ZcashAddress) -> Result<(Point, Poin
     bail!("unified address has no Orchard receiver")
 }
 
+/// Derive unified address from ivk
+///
+/// Generates a unified address that can be created from the given ivk.
+/// Uses a default diversifier for simplicity.
+///
+/// # Arguments
+/// * `ivk` - Incoming viewing key
+///
+/// # Returns
+/// * `address_str` - Unified address string
+/// * `g_d` - Diversified base point
+/// * `pk_d` - Transmission key (g_d * ivk)
+pub fn derive_unified_address(ivk: &Fr) -> Result<(String, Point, Point)> {
+    // Use a default diversifier (all zeros) for simplicity
+    // In production, should try different diversifiers to find a valid one
+    let d: [u8; 11] = [0u8; 11];
+
+    // Compute g_d from diversifier
+    let g_d = diversify_hash(&d);
+
+    // Compute pk_d = g_d * ivk
+    let pk_d = g_d * ivk;
+
+    // For now, return a placeholder address string
+    // In production, this should properly construct a unified address
+    // with F4Jumble encoding, etc.
+    //
+    // TODO: Implement proper unified address encoding
+    let address_str = format!(
+        "u1q{}[placeholder_derived_from_{}]",
+        hex::encode(&d),
+        hex::encode(ivk.to_repr())
+    );
+
+    Ok((address_str, g_d, pk_d))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -31,19 +31,7 @@ fn run() -> Result<()> {
 fn sign_interactive() -> Result<()> {
     println!("\n=== Sign Name Binding ===\n");
 
-    // Get name
-    let name = Text::new("Name to bind:")
-        .with_help_message("1-62 chars, lowercase letters and digits only")
-        .prompt()?;
-
-    validate_name(&name)?;
-
-    // Get unified address
-    let address_str = Text::new("Unified address to bind to:").prompt()?;
-
-    let address: ZcashAddress = address_str.parse().context("invalid Zcash address")?;
-
-    // Get key input method
+    // Step 1: Get the private witness (ivk) - this is what we're proving knowledge of
     let key_method = Select::new("Key input method:", vec!["seed phrase", "ivk hex"]).prompt()?;
 
     let ivk = match key_method {
@@ -58,19 +46,55 @@ fn sign_interactive() -> Result<()> {
         _ => unreachable!(),
     };
 
-    // Extract g_d and pk_d from unified address
-    // For now, we use placeholder derivation
-    // In production, this should properly parse Orchard receiver
-    let (g_d, pk_d) = keys::extract_address_components(&address)?;
+    // Step 2: Get or derive the unified address
+    let addr_input =
+        Text::new("Unified address to bind to (press Enter to derive from ivk):").prompt()?;
 
-    // Generate signature
+    let (address, g_d, pk_d) = if addr_input.trim().is_empty() {
+        // User pressed Enter - derive address from ivk
+        let (addr_str, g, p) = keys::derive_unified_address(&ivk)?;
+        let addr: ZcashAddress = addr_str
+            .parse()
+            .context("failed to parse derived address")?;
+        println!("\nDerived unified address: {}", addr);
+        (addr, g, p)
+    } else {
+        // User entered an address - verify it belongs to the ivk
+        let addr: ZcashAddress = addr_input.parse().context("invalid Zcash address")?;
+
+        // Extract components
+        let (g, p) = keys::extract_address_components(&addr)?;
+
+        // CRITICAL: Verify this address actually belongs to the ivk
+        // Without this check, the proof is meaningless
+        let computed_pk_d = g * ivk;
+        if computed_pk_d != p {
+            bail!(
+                "Address verification failed: the provided unified address does not belong to your ivk.\n\
+                 You cannot sign for an address you don't own."
+            );
+        }
+
+        println!("\nAddress verified - belongs to your ivk");
+        (addr, g, p)
+    };
+
+    // Step 3: Get the name to bind
+    let name = Text::new("Name to bind:")
+        .with_help_message("1-62 chars, lowercase letters and digits only")
+        .prompt()?;
+
+    validate_name(&name)?;
+
+    // Generate signature - proves knowledge of ivk for this (name, address) binding
     let mut rng = rand::thread_rng();
+    let address_str = address.to_string();
     let signature = sign(&mut rng, &ivk, &g_d, &pk_d, &name, &address_str);
 
     println!("\n=== Signature ===");
     println!("Hex: {}", signature);
     println!("\nInclude this in your Zcash memo field:");
-    println!("ZNS:SIGN:{}:{}", name, signature);
+    println!("ZNS:SIGN:{}:{}:{}", name, address_str, signature);
 
     Ok(())
 }
