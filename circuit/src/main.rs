@@ -1,14 +1,11 @@
 //! ZNS Schnorr Signer - Interactive CLI for Pallas curve Schnorr signatures
-//!
-//! Signs a user-defined name binding to a Zcash unified address,
-//! proving knowledge of the Orchard incoming viewing key (ivk).
 
 use anyhow::{bail, Context, Result};
 use inquire::{Select, Text};
 use zcash_address::ZcashAddress;
 
-use zns_schnorr::keys::{self};
-use zns_schnorr::{sign, verify, Signature};
+use zns_schnorr::keys;
+use zns_schnorr::{sign_with_ivk, verify_with_address, Signature};
 
 fn main() {
     if let Err(e) = run() {
@@ -32,7 +29,6 @@ fn run() -> Result<()> {
 fn sign_interactive() -> Result<()> {
     println!("\n=== Sign Name Binding ===\n");
 
-    // Step 1: Get the private witness (ivk) - this is what we're proving knowledge of
     let key_method = Select::new("Key input method:", vec!["seed phrase", "ivk hex"]).prompt()?;
 
     let ivk = match key_method {
@@ -47,50 +43,42 @@ fn sign_interactive() -> Result<()> {
         _ => unreachable!(),
     };
 
-    // Step 2: Get or derive the unified address
     let addr_input =
         Text::new("Unified address to bind to (press Enter to derive from IVK):").prompt()?;
 
-    let (address, g_d, pk_d) = if addr_input.trim().is_empty() {
-        // User pressed Enter - derive address from ivk
-        let (addr_str, g, p, _d) = keys::derive_unified_address(&ivk)?;
+    let (_address, address_str) = if addr_input.trim().is_empty() {
+        let (addr_str, _, _, _) = keys::derive_unified_address(&ivk)?;
         let addr: ZcashAddress = addr_str
             .parse()
             .context("failed to parse derived address")?;
         println!("\nDerived unified address: {}", addr);
-        (addr, g, p)
+        (addr, addr_str)
     } else {
-        // User entered an address - verify it belongs to the ivk
         let addr: ZcashAddress = addr_input.parse().context("invalid Zcash address")?;
-
-        // Extract components and verify ownership
-        let (g, p, _d) = keys::verify_address_ownership(&addr, &ivk)?;
-
+        keys::verify_address_ownership(&addr, &ivk)?;
         println!("\nAddress verified - belongs to your IVK");
-        (addr, g, p)
+        (addr, addr_input.trim().to_string())
     };
 
-    // Step 3: Get the name to bind
     let name = Text::new("Name to bind:")
         .with_help_message("1-62 chars, lowercase letters and digits only")
         .prompt()?;
 
     validate_name(&name)?;
 
-    // Generate signature - proves knowledge of ivk for this (name, address) binding
-    let mut rng = rand::thread_rng();
-    let address_str = address.to_string();
+    let signature = sign_with_ivk(
+        &mut rand::thread_rng(),
+        &ivk,
+        zip32::DiversifierIndex::new(),
+        &name,
+        &address_str,
+    )?;
 
-    // Convert IVK to scalar for signing
-    // Extract the actual ivk scalar from the IncomingViewingKey (bytes 32-63)
-    let ivk_scalar = keys::ivk_to_scalar(&ivk)?;
-
-    let signature = sign(&mut rng, &ivk_scalar, &g_d, &pk_d, &name, &address_str);
-
+    let sig_hex = hex::encode(signature.to_bytes());
     println!("\n=== Signature ===");
-    println!("Hex: {}", signature);
+    println!("Hex: {}", sig_hex);
     println!("\nInclude this in your Zcash memo field:");
-    println!("ZNS:SIGN:{}:{}:{}", name, address_str, signature);
+    println!("ZNS:SIGN:{}:{}:{}", name, address_str, sig_hex);
 
     Ok(())
 }
@@ -98,32 +86,18 @@ fn sign_interactive() -> Result<()> {
 fn verify_interactive() -> Result<()> {
     println!("\n=== Verify Name Binding ===\n");
 
-    // Get name
     let name = Text::new("Name:").prompt()?;
-
-    // Get address
     let address_str = Text::new("Unified address:").prompt()?;
-
     let address: ZcashAddress = address_str.parse().context("invalid Zcash address")?;
 
-    // Get signature
     let sig_hex = Text::new("Signature (hex):").prompt()?;
-
     let sig_bytes = hex::decode(&sig_hex).context("invalid hex in signature")?;
-
     let sig_array: [u8; 64] = sig_bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
-
     let signature = Signature::from_bytes(&sig_array)?;
 
-    // Extract components from address
-    let (g_d, pk_d, _d) = keys::extract_address_components(&address)?;
-
-    // Verify
-    let valid = verify(&g_d, &pk_d, &name, &address_str, &signature);
-
-    if valid {
+    if verify_with_address(&address, &name, &signature)? {
         println!("\n✓ Signature is VALID");
         println!(
             "  The owner of {} authorized binding '{}'",
@@ -131,7 +105,6 @@ fn verify_interactive() -> Result<()> {
         );
     } else {
         println!("\n✗ Signature is INVALID");
-        println!("  Either the signature is wrong, or it was for a different name/address");
         bail!("verification failed");
     }
 
