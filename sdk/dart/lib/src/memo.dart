@@ -17,6 +17,9 @@ String listPayload(String name, int price, int nonce) =>
 /// Build the signing payload for a DELIST action.
 String delistPayload(String name, int nonce) => 'DELIST:$name:$nonce';
 
+/// Build the signing payload for a RELEASE action.
+String releasePayload(String name, int nonce) => 'RELEASE:$name:$nonce';
+
 /// Build the signing payload for an UPDATE action.
 String updatePayload(String name, String newUa, int nonce) =>
     'UPDATE:$name:$newUa:$nonce';
@@ -38,34 +41,51 @@ void _requireValid(String name) {
 }
 
 /// Build the memo for a CLAIM transaction.
-String buildClaimMemo(String name, String ua, String signature) {
+String buildClaimMemo(String name, String ua, String signature,
+    {String? userPubkey}) {
   _requireValid(name);
-  return 'ZNS:CLAIM:$name:$ua:$signature';
+  final base = 'ZNS:CLAIM:$name:$ua:$signature';
+  return userPubkey != null ? '$base:$userPubkey' : base;
 }
 
 /// Build the memo for a BUY transaction.
-String buildBuyMemo(String name, String buyerUa, String signature) {
+String buildBuyMemo(String name, String buyerUa, String signature,
+    {String? userPubkey}) {
   _requireValid(name);
-  return 'ZNS:BUY:$name:$buyerUa:$signature';
+  final base = 'ZNS:BUY:$name:$buyerUa:$signature';
+  return userPubkey != null ? '$base:$userPubkey' : base;
 }
 
 /// Build the memo for a LIST transaction.
-String buildListMemo(String name, int price, int nonce, String signature) {
+String buildListMemo(String name, int price, int nonce, String signature,
+    {String? userPubkey}) {
   _requireValid(name);
-  return 'ZNS:LIST:$name:$price:$nonce:$signature';
+  final base = 'ZNS:LIST:$name:$price:$nonce:$signature';
+  return userPubkey != null ? '$base:$userPubkey' : base;
 }
 
 /// Build the memo for a DELIST transaction.
-String buildDelistMemo(String name, int nonce, String signature) {
+String buildDelistMemo(String name, int nonce, String signature,
+    {String? userPubkey}) {
   _requireValid(name);
-  return 'ZNS:DELIST:$name:$nonce:$signature';
+  final base = 'ZNS:DELIST:$name:$nonce:$signature';
+  return userPubkey != null ? '$base:$userPubkey' : base;
+}
+
+/// Build the memo for a RELEASE transaction.
+String buildReleaseMemo(String name, int nonce, String signature,
+    {String? userPubkey}) {
+  _requireValid(name);
+  final base = 'ZNS:RELEASE:$name:$nonce:$signature';
+  return userPubkey != null ? '$base:$userPubkey' : base;
 }
 
 /// Build the memo for an UPDATE transaction.
-String buildUpdateMemo(
-    String name, String newUa, int nonce, String signature) {
+String buildUpdateMemo(String name, String newUa, int nonce, String signature,
+    {String? userPubkey}) {
   _requireValid(name);
-  return 'ZNS:UPDATE:$name:$newUa:$nonce:$signature';
+  final base = 'ZNS:UPDATE:$name:$newUa:$nonce:$signature';
+  return userPubkey != null ? '$base:$userPubkey' : base;
 }
 
 /// Build the memo for a SETPRICE transaction.

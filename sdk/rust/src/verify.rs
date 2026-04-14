@@ -1,9 +1,9 @@
 //! Ed25519 signature verification for ZNS responses.
 //!
-//! Implements client-side verification of the admin-signed records
-//! served by the indexer. Mirrors `ZNS/src/memo.rs::verify_signature`
-//! exactly — if the two ever diverge the client will reject records
-//! the indexer accepts (or vice versa).
+//! Implements client-side verification of ZNS records, supporting both
+//! admin-signed and sovereign (user-key-signed) registrations. Mirrors
+//! `ZNS/src/memo.rs::verify_signature` exactly — if the two ever diverge
+//! the client will reject records the indexer accepts (or vice versa).
 //!
 //! ## The trust boundary
 //!
@@ -12,6 +12,13 @@
 //! by [`verify_registration`], so the type system enforces the
 //! invariant "this binding was cryptographically proved" at compile
 //! time — no runtime check, no forgetting.
+//!
+//! ## Sovereign vs admin verification
+//!
+//! A registration with a `pubkey` field was signed by a sovereign user
+//! key; verification is performed against that key. A registration
+//! without `pubkey` was signed by the admin key; verification is
+//! performed against [`AdminPubkey`].
 //!
 //! ## Typical flow
 //!
@@ -46,10 +53,7 @@ impl AdminPubkey {
             .decode(s)
             .map_err(|e| anyhow::anyhow!("admin pubkey base64 decode failed: {e}"))?;
         let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-            anyhow::anyhow!(
-                "admin pubkey must be exactly 32 bytes, got {}",
-                bytes.len()
-            )
+            anyhow::anyhow!("admin pubkey must be exactly 32 bytes, got {}", bytes.len())
         })?;
         Ok(Self(arr))
     }
@@ -95,11 +99,12 @@ impl Deref for VerifiedListing {
     }
 }
 
-/// Verify a registration's signature against the admin pubkey.
+/// Verify a registration's signature.
 ///
-/// Reconstructs the signing pre-image from the registration's
-/// `last_action` field and the remaining fields, then checks it with
-/// Ed25519. Returns [`VerifiedRegistration`] on success, an error on
+/// If `reg.pubkey` is present, verifies against the sovereign user key.
+/// Otherwise, verifies against the admin pubkey. Reconstructs the signing
+/// pre-image from `last_action` and the remaining fields, then checks it
+/// with Ed25519. Returns [`VerifiedRegistration`] on success, an error on
 /// bad signatures, missing signatures, or key/sig parse failures.
 pub fn verify_registration(
     reg: &Registration,
@@ -112,18 +117,32 @@ pub fn verify_registration(
         )
     })?;
 
-    // Pre-image format from ZNS/openrpc.json Registration.last_action docs
-    // and ZNS/src/memo.rs. Keep these branches in lockstep with that file.
     let payload = match reg.last_action {
         LastAction::Claim => format!("CLAIM:{}:{}", reg.name, reg.address),
         LastAction::Update => format!("UPDATE:{}:{}:{}", reg.name, reg.address, reg.nonce),
         LastAction::Delist => format!("DELIST:{}:{}", reg.name, reg.nonce),
         LastAction::Buy => format!("BUY:{}:{}", reg.name, reg.address),
+        LastAction::Release => format!("RELEASE:{}:{}", reg.name, reg.nonce),
     };
 
-    verify_bytes(payload.as_bytes(), sig_b64, admin_pubkey).map_err(|e| {
-        anyhow::anyhow!("signature check failed for registration '{}': {e}", reg.name)
-    })?;
+    if let Some(user_pk_b64) = &reg.pubkey {
+        let user_pk = parse_pubkey(user_pk_b64)?;
+        verify_bytes_generic(payload.as_bytes(), sig_b64, &user_pk).map_err(|e| {
+            anyhow::anyhow!(
+                "sovereign signature check failed for registration '{}': {e}",
+                reg.name
+            )
+        })?;
+    } else {
+        verify_bytes_generic(payload.as_bytes(), sig_b64, admin_pubkey.as_bytes()).map_err(
+            |e| {
+                anyhow::anyhow!(
+                    "admin signature check failed for registration '{}': {e}",
+                    reg.name
+                )
+            },
+        )?;
+    }
 
     Ok(VerifiedRegistration(reg.clone()))
 }
@@ -131,32 +150,37 @@ pub fn verify_registration(
 /// Verify a listing's signature against the admin pubkey.
 ///
 /// Pre-image is always `"LIST:{name}:{price}:{nonce}"`.
+/// Listings are always admin-signed.
 pub fn verify_listing(
     listing: &Listing,
     admin_pubkey: &AdminPubkey,
 ) -> anyhow::Result<VerifiedListing> {
     let payload = format!("LIST:{}:{}:{}", listing.name, listing.price, listing.nonce);
-    verify_bytes(payload.as_bytes(), &listing.signature, admin_pubkey).map_err(|e| {
-        anyhow::anyhow!("signature check failed for listing '{}': {e}", listing.name)
-    })?;
+    let payload_bytes = payload.as_bytes();
+    verify_bytes_generic(payload_bytes, &listing.signature, admin_pubkey.as_bytes()).map_err(
+        |e| anyhow::anyhow!("signature check failed for listing '{}': {e}", listing.name),
+    )?;
     Ok(VerifiedListing(listing.clone()))
 }
 
-/// Decode a base64 signature and verify it covers `payload` under
-/// `admin_pubkey`. Shared by [`verify_registration`] and
-/// [`verify_listing`].
-fn verify_bytes(
-    payload: &[u8],
-    sig_b64: &str,
-    admin_pubkey: &AdminPubkey,
-) -> anyhow::Result<()> {
+fn parse_pubkey(b64: &str) -> anyhow::Result<[u8; 32]> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| anyhow::anyhow!("pubkey base64 decode failed: {e}"))?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("pubkey must be exactly 32 bytes, got {}", bytes.len()))
+}
+
+fn verify_bytes_generic(payload: &[u8], sig_b64: &str, pubkey: &[u8; 32]) -> anyhow::Result<()> {
     let sig_bytes = base64::engine::general_purpose::STANDARD
         .decode(sig_b64)
         .map_err(|e| anyhow::anyhow!("base64 decode failed: {e}"))?;
     let sig = Signature::from_slice(&sig_bytes)
         .map_err(|e| anyhow::anyhow!("signature parse failed: {e}"))?;
-    let vk = VerifyingKey::from_bytes(admin_pubkey.as_bytes())
-        .map_err(|e| anyhow::anyhow!("invalid admin pubkey: {e}"))?;
+    let vk =
+        VerifyingKey::from_bytes(pubkey).map_err(|e| anyhow::anyhow!("invalid pubkey: {e}"))?;
     vk.verify(payload, &sig)
         .map_err(|e| anyhow::anyhow!("ed25519 verify failed: {e}"))?;
     Ok(())
@@ -186,6 +210,7 @@ mod tests {
             nonce,
             signature: None,
             last_action,
+            pubkey: None,
             listing: None,
         }
     }
@@ -220,6 +245,41 @@ mod tests {
         let mut reg = reg_template(LastAction::Buy, 0);
         reg.signature = Some(sign_b64(&sk, b"BUY:alice:utest1alice"));
         verify_registration(&reg, &pk).unwrap();
+    }
+
+    #[test]
+    fn verifies_release() {
+        let (sk, pk) = test_key();
+        let mut reg = reg_template(LastAction::Release, 7);
+        reg.signature = Some(sign_b64(&sk, b"RELEASE:alice:7"));
+        verify_registration(&reg, &pk).unwrap();
+    }
+
+    #[test]
+    fn verifies_sovereign_claim() {
+        let user_sk = SigningKey::from_bytes(&[88u8; 32]);
+        let user_pk_bytes = user_sk.verifying_key().to_bytes();
+        let user_pk_b64 = base64::engine::general_purpose::STANDARD.encode(user_pk_bytes);
+        let (_, admin_pk) = test_key();
+
+        let mut reg = reg_template(LastAction::Claim, 0);
+        reg.signature = Some(sign_b64(&user_sk, b"CLAIM:alice:utest1alice"));
+        reg.pubkey = Some(user_pk_b64);
+        verify_registration(&reg, &admin_pk).unwrap();
+    }
+
+    #[test]
+    fn sovereign_rejects_wrong_user_key() {
+        let user_sk = SigningKey::from_bytes(&[88u8; 32]);
+        let other_sk = SigningKey::from_bytes(&[77u8; 32]);
+        let other_pk_b64 =
+            base64::engine::general_purpose::STANDARD.encode(other_sk.verifying_key().to_bytes());
+        let (_, admin_pk) = test_key();
+
+        let mut reg = reg_template(LastAction::Claim, 0);
+        reg.signature = Some(sign_b64(&user_sk, b"CLAIM:alice:utest1alice"));
+        reg.pubkey = Some(other_pk_b64);
+        assert!(verify_registration(&reg, &admin_pk).is_err());
     }
 
     #[test]

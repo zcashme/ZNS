@@ -5,9 +5,11 @@ export interface Registration {
   height: number;
   nonce: number;
   signature: string | null;
-  last_action: string;
+  last_action: LastAction;
   pubkey: string | null;
 }
+
+export type LastAction = "CLAIM" | "BUY" | "UPDATE" | "DELIST" | "RELEASE";
 
 export interface Listing {
   name: string;
@@ -20,18 +22,17 @@ export interface Listing {
 
 export interface ResolveResult extends Registration {
   listing: Listing | null;
+  verified: boolean;
+  sovereign: boolean;
 }
 
-export interface ListForSaleResult {
-  listings: Listing[];
+export interface VerifiedListing extends Listing {
+  verified: boolean;
 }
 
 export interface Pricing {
   nonce: number;
   height: number;
-  /** Per-character claim prices in zats.
-   *  Index 0 = 1-char names, index 1 = 2-char, etc.
-   *  Names longer than the array clamp to the last entry. */
   tiers: number[];
 }
 
@@ -48,7 +49,7 @@ export interface StatusResult {
 export interface Event {
   id: number;
   name: string;
-  action: "CLAIM" | "LIST" | "DELIST" | "RELEASE" | "UPDATE" | "BUY" | "SETPRICE";
+  action: Action;
   txid: string;
   height: number;
   ua: string | null;
@@ -56,7 +57,10 @@ export interface Event {
   nonce: number | null;
   signature: string | null;
   pubkey: string | null;
+  verified?: boolean;
 }
+
+export type Action = "CLAIM" | "LIST" | "DELIST" | "RELEASE" | "UPDATE" | "BUY" | "SETPRICE";
 
 export interface EventsFilter {
   name?: string;
@@ -69,4 +73,15 @@ export interface EventsFilter {
 export interface EventsResult {
   events: Event[];
   total: number;
+}
+
+export interface PreparedAction {
+  payload: string;
+  cost?: number;
+  uri?: string;
+}
+
+export interface CompletedAction {
+  memo: string;
+  uri: string;
 }

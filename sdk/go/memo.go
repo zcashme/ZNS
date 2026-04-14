@@ -28,6 +28,11 @@ func DelistPayload(name string, nonce int) string {
 	return fmt.Sprintf("DELIST:%s:%d", name, nonce)
 }
 
+// ReleasePayload returns the signing payload for a RELEASE action.
+func ReleasePayload(name string, nonce int) string {
+	return fmt.Sprintf("RELEASE:%s:%d", name, nonce)
+}
+
 // UpdatePayload returns the signing payload for an UPDATE action.
 func UpdatePayload(name, newUA string, nonce int) string {
 	return fmt.Sprintf("UPDATE:%s:%s:%d", name, newUA, nonce)
@@ -45,43 +50,75 @@ func SetPricePayload(prices []int, nonce int) string {
 // --- Memo Builders ---
 
 // BuildClaimMemo builds a ZNS CLAIM memo string.
-func BuildClaimMemo(name, ua, signature string) (string, error) {
+func BuildClaimMemo(name, ua, signature string, userPubkey ...string) (string, error) {
 	if !IsValidName(name) {
 		return "", &ZNSError{Code: InvalidParams, Message: fmt.Sprintf("invalid name: %q", name)}
 	}
-	return fmt.Sprintf("ZNS:CLAIM:%s:%s:%s", name, ua, signature), nil
+	base := fmt.Sprintf("ZNS:CLAIM:%s:%s:%s", name, ua, signature)
+	if len(userPubkey) > 0 && userPubkey[0] != "" {
+		return fmt.Sprintf("%s:%s", base, userPubkey[0]), nil
+	}
+	return base, nil
 }
 
 // BuildBuyMemo builds a ZNS BUY memo string.
-func BuildBuyMemo(name, buyerUA, signature string) (string, error) {
+func BuildBuyMemo(name, buyerUA, signature string, userPubkey ...string) (string, error) {
 	if !IsValidName(name) {
 		return "", &ZNSError{Code: InvalidParams, Message: fmt.Sprintf("invalid name: %q", name)}
 	}
-	return fmt.Sprintf("ZNS:BUY:%s:%s:%s", name, buyerUA, signature), nil
+	base := fmt.Sprintf("ZNS:BUY:%s:%s:%s", name, buyerUA, signature)
+	if len(userPubkey) > 0 && userPubkey[0] != "" {
+		return fmt.Sprintf("%s:%s", base, userPubkey[0]), nil
+	}
+	return base, nil
 }
 
 // BuildListMemo builds a ZNS LIST memo string.
-func BuildListMemo(name string, price, nonce int, signature string) (string, error) {
+func BuildListMemo(name string, price, nonce int, signature string, userPubkey ...string) (string, error) {
 	if !IsValidName(name) {
 		return "", &ZNSError{Code: InvalidParams, Message: fmt.Sprintf("invalid name: %q", name)}
 	}
-	return fmt.Sprintf("ZNS:LIST:%s:%d:%d:%s", name, price, nonce, signature), nil
+	base := fmt.Sprintf("ZNS:LIST:%s:%d:%d:%s", name, price, nonce, signature)
+	if len(userPubkey) > 0 && userPubkey[0] != "" {
+		return fmt.Sprintf("%s:%s", base, userPubkey[0]), nil
+	}
+	return base, nil
 }
 
 // BuildDelistMemo builds a ZNS DELIST memo string.
-func BuildDelistMemo(name string, nonce int, signature string) (string, error) {
+func BuildDelistMemo(name string, nonce int, signature string, userPubkey ...string) (string, error) {
 	if !IsValidName(name) {
 		return "", &ZNSError{Code: InvalidParams, Message: fmt.Sprintf("invalid name: %q", name)}
 	}
-	return fmt.Sprintf("ZNS:DELIST:%s:%d:%s", name, nonce, signature), nil
+	base := fmt.Sprintf("ZNS:DELIST:%s:%d:%s", name, nonce, signature)
+	if len(userPubkey) > 0 && userPubkey[0] != "" {
+		return fmt.Sprintf("%s:%s", base, userPubkey[0]), nil
+	}
+	return base, nil
+}
+
+// BuildReleaseMemo builds a ZNS RELEASE memo string.
+func BuildReleaseMemo(name string, nonce int, signature string, userPubkey ...string) (string, error) {
+	if !IsValidName(name) {
+		return "", &ZNSError{Code: InvalidParams, Message: fmt.Sprintf("invalid name: %q", name)}
+	}
+	base := fmt.Sprintf("ZNS:RELEASE:%s:%d:%s", name, nonce, signature)
+	if len(userPubkey) > 0 && userPubkey[0] != "" {
+		return fmt.Sprintf("%s:%s", base, userPubkey[0]), nil
+	}
+	return base, nil
 }
 
 // BuildUpdateMemo builds a ZNS UPDATE memo string.
-func BuildUpdateMemo(name, newUA string, nonce int, signature string) (string, error) {
+func BuildUpdateMemo(name, newUA string, nonce int, signature string, userPubkey ...string) (string, error) {
 	if !IsValidName(name) {
 		return "", &ZNSError{Code: InvalidParams, Message: fmt.Sprintf("invalid name: %q", name)}
 	}
-	return fmt.Sprintf("ZNS:UPDATE:%s:%s:%d:%s", name, newUA, nonce, signature), nil
+	base := fmt.Sprintf("ZNS:UPDATE:%s:%s:%d:%s", name, newUA, nonce, signature)
+	if len(userPubkey) > 0 && userPubkey[0] != "" {
+		return fmt.Sprintf("%s:%s", base, userPubkey[0]), nil
+	}
+	return base, nil
 }
 
 // BuildSetPriceMemo builds a ZNS SETPRICE memo string.

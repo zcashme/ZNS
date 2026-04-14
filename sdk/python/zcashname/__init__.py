@@ -35,14 +35,25 @@ from .memo import (
     build_claim_memo,
     build_delist_memo,
     build_list_memo,
+    build_release_memo,
     build_set_price_memo,
     build_update_memo,
     buy_payload,
     claim_payload,
     delist_payload,
     list_payload,
+    release_payload,
     set_price_payload,
     update_payload,
+)
+
+# Verification
+from .verify import (
+    verify_signature,
+    verify_registration,
+    verify_listing,
+    registration_payload,
+    listing_payload,
 )
 
 # ZIP-321 URI helpers
@@ -83,14 +94,22 @@ __all__ = [
     "buy_payload",
     "list_payload",
     "delist_payload",
+    "release_payload",
     "update_payload",
     "set_price_payload",
     "build_claim_memo",
     "build_buy_memo",
     "build_list_memo",
     "build_delist_memo",
+    "build_release_memo",
     "build_update_memo",
     "build_set_price_memo",
+    # Verification
+    "verify_signature",
+    "verify_registration",
+    "verify_listing",
+    "registration_payload",
+    "listing_payload",
     # ZIP-321
     "to_base64_url",
     "decode_base64_url",

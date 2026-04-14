@@ -23,6 +23,10 @@ def delist_payload(name: str, nonce: int) -> str:
     return f"DELIST:{name}:{nonce}"
 
 
+def release_payload(name: str, nonce: int) -> str:
+    return f"RELEASE:{name}:{nonce}"
+
+
 def update_payload(name: str, new_ua: str, nonce: int) -> str:
     return f"UPDATE:{name}:{new_ua}:{nonce}"
 
@@ -42,29 +46,40 @@ def _require_valid(name: str) -> None:
         raise ValueError(f"Invalid name: {name}")
 
 
-def build_claim_memo(name: str, ua: str, signature: str) -> str:
+def build_claim_memo(name: str, ua: str, signature: str, user_pubkey: str | None = None) -> str:
     _require_valid(name)
-    return f"ZNS:CLAIM:{name}:{ua}:{signature}"
+    base = f"ZNS:CLAIM:{name}:{ua}:{signature}"
+    return f"{base}:{user_pubkey}" if user_pubkey else base
 
 
-def build_buy_memo(name: str, buyer_ua: str, signature: str) -> str:
+def build_buy_memo(name: str, buyer_ua: str, signature: str, user_pubkey: str | None = None) -> str:
     _require_valid(name)
-    return f"ZNS:BUY:{name}:{buyer_ua}:{signature}"
+    base = f"ZNS:BUY:{name}:{buyer_ua}:{signature}"
+    return f"{base}:{user_pubkey}" if user_pubkey else base
 
 
-def build_list_memo(name: str, price: int, nonce: int, signature: str) -> str:
+def build_list_memo(name: str, price: int, nonce: int, signature: str, user_pubkey: str | None = None) -> str:
     _require_valid(name)
-    return f"ZNS:LIST:{name}:{price}:{nonce}:{signature}"
+    base = f"ZNS:LIST:{name}:{price}:{nonce}:{signature}"
+    return f"{base}:{user_pubkey}" if user_pubkey else base
 
 
-def build_delist_memo(name: str, nonce: int, signature: str) -> str:
+def build_delist_memo(name: str, nonce: int, signature: str, user_pubkey: str | None = None) -> str:
     _require_valid(name)
-    return f"ZNS:DELIST:{name}:{nonce}:{signature}"
+    base = f"ZNS:DELIST:{name}:{nonce}:{signature}"
+    return f"{base}:{user_pubkey}" if user_pubkey else base
 
 
-def build_update_memo(name: str, new_ua: str, nonce: int, signature: str) -> str:
+def build_release_memo(name: str, nonce: int, signature: str, user_pubkey: str | None = None) -> str:
     _require_valid(name)
-    return f"ZNS:UPDATE:{name}:{new_ua}:{nonce}:{signature}"
+    base = f"ZNS:RELEASE:{name}:{nonce}:{signature}"
+    return f"{base}:{user_pubkey}" if user_pubkey else base
+
+
+def build_update_memo(name: str, new_ua: str, nonce: int, signature: str, user_pubkey: str | None = None) -> str:
+    _require_valid(name)
+    base = f"ZNS:UPDATE:{name}:{new_ua}:{nonce}:{signature}"
+    return f"{base}:{user_pubkey}" if user_pubkey else base
 
 
 def build_set_price_memo(prices: list[int], nonce: int, signature: str) -> str:

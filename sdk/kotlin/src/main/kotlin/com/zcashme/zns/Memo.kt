@@ -23,6 +23,11 @@ fun listPayload(name: String, price: Long, nonce: Int): String = "LIST:$name:$pr
 fun delistPayload(name: String, nonce: Int): String = "DELIST:$name:$nonce"
 
 /**
+ * Build the signing payload for a RELEASE action.
+ */
+fun releasePayload(name: String, nonce: Int): String = "RELEASE:$name:$nonce"
+
+/**
  * Build the signing payload for an UPDATE action.
  */
 fun updatePayload(name: String, newUa: String, nonce: Int): String = "UPDATE:$name:$newUa:$nonce"
@@ -44,9 +49,10 @@ private fun requireValid(name: String) {
  *
  * @throws IllegalArgumentException if [name] is not a valid ZNS name.
  */
-fun buildClaimMemo(name: String, ua: String, signature: String): String {
+fun buildClaimMemo(name: String, ua: String, signature: String, userPubkey: String? = null): String {
     requireValid(name)
-    return "ZNS:CLAIM:$name:$ua:$signature"
+    val base = "ZNS:CLAIM:$name:$ua:$signature"
+    return userPubkey?.let { "$base:$it" } ?: base
 }
 
 /**
@@ -54,9 +60,10 @@ fun buildClaimMemo(name: String, ua: String, signature: String): String {
  *
  * @throws IllegalArgumentException if [name] is not a valid ZNS name.
  */
-fun buildBuyMemo(name: String, buyerUa: String, signature: String): String {
+fun buildBuyMemo(name: String, buyerUa: String, signature: String, userPubkey: String? = null): String {
     requireValid(name)
-    return "ZNS:BUY:$name:$buyerUa:$signature"
+    val base = "ZNS:BUY:$name:$buyerUa:$signature"
+    return userPubkey?.let { "$base:$it" } ?: base
 }
 
 /**
@@ -64,9 +71,10 @@ fun buildBuyMemo(name: String, buyerUa: String, signature: String): String {
  *
  * @throws IllegalArgumentException if [name] is not a valid ZNS name.
  */
-fun buildListMemo(name: String, price: Long, nonce: Int, signature: String): String {
+fun buildListMemo(name: String, price: Long, nonce: Int, signature: String, userPubkey: String? = null): String {
     requireValid(name)
-    return "ZNS:LIST:$name:$price:$nonce:$signature"
+    val base = "ZNS:LIST:$name:$price:$nonce:$signature"
+    return userPubkey?.let { "$base:$it" } ?: base
 }
 
 /**
@@ -74,9 +82,21 @@ fun buildListMemo(name: String, price: Long, nonce: Int, signature: String): Str
  *
  * @throws IllegalArgumentException if [name] is not a valid ZNS name.
  */
-fun buildDelistMemo(name: String, nonce: Int, signature: String): String {
+fun buildDelistMemo(name: String, nonce: Int, signature: String, userPubkey: String? = null): String {
     requireValid(name)
-    return "ZNS:DELIST:$name:$nonce:$signature"
+    val base = "ZNS:DELIST:$name:$nonce:$signature"
+    return userPubkey?.let { "$base:$it" } ?: base
+}
+
+/**
+ * Build the memo string for a RELEASE transaction.
+ *
+ * @throws IllegalArgumentException if [name] is not a valid ZNS name.
+ */
+fun buildReleaseMemo(name: String, nonce: Int, signature: String, userPubkey: String? = null): String {
+    requireValid(name)
+    val base = "ZNS:RELEASE:$name:$nonce:$signature"
+    return userPubkey?.let { "$base:$it" } ?: base
 }
 
 /**
@@ -84,9 +104,10 @@ fun buildDelistMemo(name: String, nonce: Int, signature: String): String {
  *
  * @throws IllegalArgumentException if [name] is not a valid ZNS name.
  */
-fun buildUpdateMemo(name: String, newUa: String, nonce: Int, signature: String): String {
+fun buildUpdateMemo(name: String, newUa: String, nonce: Int, signature: String, userPubkey: String? = null): String {
     requireValid(name)
-    return "ZNS:UPDATE:$name:$newUa:$nonce:$signature"
+    val base = "ZNS:UPDATE:$name:$newUa:$nonce:$signature"
+    return userPubkey?.let { "$base:$it" } ?: base
 }
 
 /**

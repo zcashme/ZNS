@@ -31,8 +31,17 @@ pub fn claim_payload(name: &str, ua: &str) -> String {
 }
 
 /// Build the memo for a CLAIM action.
-pub fn build_claim_memo(name: &str, ua: &str, signature_b64: &str) -> String {
-    format!("ZNS:CLAIM:{name}:{ua}:{signature_b64}")
+pub fn build_claim_memo(
+    name: &str,
+    ua: &str,
+    signature_b64: &str,
+    user_pubkey: Option<&str>,
+) -> String {
+    let base = format!("ZNS:CLAIM:{name}:{ua}:{signature_b64}");
+    match user_pubkey {
+        Some(pk) => format!("{base}:{pk}"),
+        None => base,
+    }
 }
 
 // ── LIST ─────────────────────────────────────────────────────────────────────
@@ -43,8 +52,18 @@ pub fn list_payload(name: &str, price: u64, nonce: u64) -> String {
 }
 
 /// Build the memo for a LIST action.
-pub fn build_list_memo(name: &str, price: u64, nonce: u64, signature_b64: &str) -> String {
-    format!("ZNS:LIST:{name}:{price}:{nonce}:{signature_b64}")
+pub fn build_list_memo(
+    name: &str,
+    price: u64,
+    nonce: u64,
+    signature_b64: &str,
+    user_pubkey: Option<&str>,
+) -> String {
+    let base = format!("ZNS:LIST:{name}:{price}:{nonce}:{signature_b64}");
+    match user_pubkey {
+        Some(pk) => format!("{base}:{pk}"),
+        None => base,
+    }
 }
 
 // ── DELIST ───────────────────────────────────────────────────────────────────
@@ -55,8 +74,17 @@ pub fn delist_payload(name: &str, nonce: u64) -> String {
 }
 
 /// Build the memo for a DELIST action.
-pub fn build_delist_memo(name: &str, nonce: u64, signature_b64: &str) -> String {
-    format!("ZNS:DELIST:{name}:{nonce}:{signature_b64}")
+pub fn build_delist_memo(
+    name: &str,
+    nonce: u64,
+    signature_b64: &str,
+    user_pubkey: Option<&str>,
+) -> String {
+    let base = format!("ZNS:DELIST:{name}:{nonce}:{signature_b64}");
+    match user_pubkey {
+        Some(pk) => format!("{base}:{pk}"),
+        None => base,
+    }
 }
 
 // ── RELEASE ──────────────────────────────────────────────────────────────────
@@ -67,8 +95,17 @@ pub fn release_payload(name: &str, nonce: u64) -> String {
 }
 
 /// Build the memo for a RELEASE action.
-pub fn build_release_memo(name: &str, nonce: u64, signature_b64: &str) -> String {
-    format!("ZNS:RELEASE:{name}:{nonce}:{signature_b64}")
+pub fn build_release_memo(
+    name: &str,
+    nonce: u64,
+    signature_b64: &str,
+    user_pubkey: Option<&str>,
+) -> String {
+    let base = format!("ZNS:RELEASE:{name}:{nonce}:{signature_b64}");
+    match user_pubkey {
+        Some(pk) => format!("{base}:{pk}"),
+        None => base,
+    }
 }
 
 // ── UPDATE ───────────────────────────────────────────────────────────────────
@@ -79,8 +116,18 @@ pub fn update_payload(name: &str, new_ua: &str, nonce: u64) -> String {
 }
 
 /// Build the memo for an UPDATE action.
-pub fn build_update_memo(name: &str, new_ua: &str, nonce: u64, signature_b64: &str) -> String {
-    format!("ZNS:UPDATE:{name}:{new_ua}:{nonce}:{signature_b64}")
+pub fn build_update_memo(
+    name: &str,
+    new_ua: &str,
+    nonce: u64,
+    signature_b64: &str,
+    user_pubkey: Option<&str>,
+) -> String {
+    let base = format!("ZNS:UPDATE:{name}:{new_ua}:{nonce}:{signature_b64}");
+    match user_pubkey {
+        Some(pk) => format!("{base}:{pk}"),
+        None => base,
+    }
 }
 
 // ── BUY ──────────────────────────────────────────────────────────────────────
@@ -91,8 +138,17 @@ pub fn buy_payload(name: &str, buyer_ua: &str) -> String {
 }
 
 /// Build the memo for a BUY action.
-pub fn build_buy_memo(name: &str, buyer_ua: &str, signature_b64: &str) -> String {
-    format!("ZNS:BUY:{name}:{buyer_ua}:{signature_b64}")
+pub fn build_buy_memo(
+    name: &str,
+    buyer_ua: &str,
+    signature_b64: &str,
+    user_pubkey: Option<&str>,
+) -> String {
+    let base = format!("ZNS:BUY:{name}:{buyer_ua}:{signature_b64}");
+    match user_pubkey {
+        Some(pk) => format!("{base}:{pk}"),
+        None => base,
+    }
 }
 
 // ── SETPRICE ─────────────────────────────────────────────────────────────────
@@ -129,8 +185,12 @@ mod tests {
     fn claim_roundtrip() {
         assert_eq!(claim_payload("alice", "utest1xxx"), "CLAIM:alice:utest1xxx");
         assert_eq!(
-            build_claim_memo("alice", "utest1xxx", "SIG"),
+            build_claim_memo("alice", "utest1xxx", "SIG", None),
             "ZNS:CLAIM:alice:utest1xxx:SIG"
+        );
+        assert_eq!(
+            build_claim_memo("alice", "utest1xxx", "SIG", Some("PK")),
+            "ZNS:CLAIM:alice:utest1xxx:SIG:PK"
         );
     }
 
@@ -138,15 +198,39 @@ mod tests {
     fn list_roundtrip() {
         assert_eq!(list_payload("bob", 100_000, 3), "LIST:bob:100000:3");
         assert_eq!(
-            build_list_memo("bob", 100_000, 3, "SIG"),
+            build_list_memo("bob", 100_000, 3, "SIG", None),
             "ZNS:LIST:bob:100000:3:SIG"
+        );
+        assert_eq!(
+            build_list_memo("bob", 100_000, 3, "SIG", Some("PK")),
+            "ZNS:LIST:bob:100000:3:SIG:PK"
         );
     }
 
     #[test]
     fn delist_roundtrip() {
         assert_eq!(delist_payload("bob", 4), "DELIST:bob:4");
-        assert_eq!(build_delist_memo("bob", 4, "SIG"), "ZNS:DELIST:bob:4:SIG");
+        assert_eq!(
+            build_delist_memo("bob", 4, "SIG", None),
+            "ZNS:DELIST:bob:4:SIG"
+        );
+        assert_eq!(
+            build_delist_memo("bob", 4, "SIG", Some("PK")),
+            "ZNS:DELIST:bob:4:SIG:PK"
+        );
+    }
+
+    #[test]
+    fn release_roundtrip() {
+        assert_eq!(release_payload("bob", 5), "RELEASE:bob:5");
+        assert_eq!(
+            build_release_memo("bob", 5, "SIG", None),
+            "ZNS:RELEASE:bob:5:SIG"
+        );
+        assert_eq!(
+            build_release_memo("bob", 5, "SIG", Some("PK")),
+            "ZNS:RELEASE:bob:5:SIG:PK"
+        );
     }
 
     #[test]
@@ -156,20 +240,25 @@ mod tests {
             "UPDATE:alice:utest1new:2"
         );
         assert_eq!(
-            build_update_memo("alice", "utest1new", 2, "SIG"),
+            build_update_memo("alice", "utest1new", 2, "SIG", None),
             "ZNS:UPDATE:alice:utest1new:2:SIG"
+        );
+        assert_eq!(
+            build_update_memo("alice", "utest1new", 2, "SIG", Some("PK")),
+            "ZNS:UPDATE:alice:utest1new:2:SIG:PK"
         );
     }
 
     #[test]
     fn buy_roundtrip() {
+        assert_eq!(buy_payload("carol", "utest1buy"), "BUY:carol:utest1buy");
         assert_eq!(
-            buy_payload("carol", "utest1buy"),
-            "BUY:carol:utest1buy"
+            build_buy_memo("carol", "utest1buy", "SIG", None),
+            "ZNS:BUY:carol:utest1buy:SIG"
         );
         assert_eq!(
-            build_buy_memo("carol", "utest1buy", "SIG"),
-            "ZNS:BUY:carol:utest1buy:SIG"
+            build_buy_memo("carol", "utest1buy", "SIG", Some("PK")),
+            "ZNS:BUY:carol:utest1buy:SIG:PK"
         );
     }
 

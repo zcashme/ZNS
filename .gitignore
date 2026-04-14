@@ -1,7 +1,14 @@
 /target
 /circuit/
+__pycache__/
+*.pyc
 zns_signing_key.txt
 instances.txt
+test_keypair.txt
+test_keypair_private.pem
+
+tools/
+test_zns_indexer.py
 
 *.md
 *.yml

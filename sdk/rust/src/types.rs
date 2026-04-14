@@ -36,6 +36,8 @@ pub enum LastAction {
     Delist,
     #[serde(rename = "BUY")]
     Buy,
+    #[serde(rename = "RELEASE")]
+    Release,
 }
 
 /// An active marketplace listing for a registered name.
