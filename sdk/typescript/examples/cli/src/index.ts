@@ -188,7 +188,7 @@ async function main() {
       console.log(`Synced:     ${status.synced_height}`);
       console.log(`UIVK:       ${status.uivk.slice(0, 30)}...`);
       console.log(`Admin:      ${status.admin_pubkey.slice(0, 30)}...`);
-      console.log(`Registry:   ${status.address}`);
+      console.log(`Registry:   ${zns.registryAddress}`);
       console.log(`Registered: ${status.registered}`);
       console.log(`Listed:     ${status.listed}`);
       if (status.pricing) {
@@ -252,15 +252,15 @@ async function main() {
         console.error("Could not calculate claim cost");
         process.exit(1);
       }
-      const result = zns.prepareClaim(name, address, status.address, cost);
+      const result = zns.prepareClaim(name, address, cost);
       console.log(`Name:    ${result.name}`);
       console.log(`Address: ${result.address}`);
       console.log(`Cost:    ${result.cost / 1e8} ZEC (${result.cost} zats)`);
-      console.log(`Registry: ${status.address}`);
+      console.log(`Registry: ${zns.registryAddress}`);
       console.log(`Payload: ${result.payload}`);
       console.log("");
       console.log("Sign this payload with your Ed25519 private key, then:");
-      console.log(`  zns complete-claim ${name} ${address} ${status.address} ${cost} <signature> [pubkey]`);
+      console.log(`  zns complete-claim ${name} ${address} ${zns.registryAddress} ${cost} <signature> [pubkey]`);
       break;
     }
 
@@ -283,7 +283,7 @@ async function main() {
       }
       
       const privateKey = await loadPrivateKey(flags);
-      const action = zns.prepareClaim(name, address, status.address, cost);
+      const action = zns.prepareClaim(name, address, cost);
       
       const { memo, uri, pubkey } = await signAndComplete(
         action.payload,
@@ -294,7 +294,7 @@ async function main() {
       console.log(`Name:      ${name}`);
       console.log(`Address:   ${address}`);
       console.log(`Cost:      ${action.cost / 1e8} ZEC`);
-      console.log(`Registry:  ${status.address}`);
+      console.log(`Registry:  ${zns.registryAddress}`);
       console.log(`Public Key: ${pubkey}`);
       console.log("");
       console.log("Memo:");
@@ -316,7 +316,7 @@ async function main() {
       const price = parseInt(priceStr, 10);
       const nonce = parseInt(nonceStr, 10);
       const privateKey = await loadPrivateKey(flags);
-      const action = zns.prepareList(name, price, nonce, status.address);
+      const action = zns.prepareList(name, price, nonce, zns.registryAddress);
       
       const { memo, uri, pubkey } = await signAndComplete(
         action.payload,
@@ -346,7 +346,7 @@ async function main() {
       const status = await zns.status();
       const nonce = parseInt(nonceStr, 10);
       const privateKey = await loadPrivateKey(flags);
-      const action = zns.prepareDelist(name, nonce, status.address);
+      const action = zns.prepareDelist(name, nonce, zns.registryAddress);
       
       const { memo, uri } = await signAndComplete(
         action.payload,
@@ -373,7 +373,7 @@ async function main() {
       const status = await zns.status();
       const nonce = parseInt(nonceStr, 10);
       const privateKey = await loadPrivateKey(flags);
-      const action = zns.prepareUpdate(name, newAddress, nonce, status.address);
+      const action = zns.prepareUpdate(name, newAddress, nonce, zns.registryAddress);
       
       const { memo, uri } = await signAndComplete(
         action.payload,
@@ -401,7 +401,7 @@ async function main() {
       const status = await zns.status();
       const nonce = parseInt(nonceStr, 10);
       const privateKey = await loadPrivateKey(flags);
-      const action = zns.prepareRelease(name, nonce, status.address);
+      const action = zns.prepareRelease(name, nonce, zns.registryAddress);
       
       const { memo, uri } = await signAndComplete(
         action.payload,

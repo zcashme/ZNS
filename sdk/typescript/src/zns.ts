@@ -50,17 +50,30 @@ export const MAINNET_UIVK =
 
 const KNOWN_UIVKS = [TESTNET_UIVK, MAINNET_UIVK];
 
+// Registry addresses where ZNS memos are sent
+const REGISTRY_ADDRESSES: Record<string, string> = {
+  testnet: "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+  mainnet: "u1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+};
+
 const NAME_RE = /^[a-z0-9]{1,62}$/;
+
+export type Network = "testnet" | "mainnet";
 
 export class ZNS {
   private url: string;
+  private network: Network;
   private rpcId = 0;
   private _verified = false;
 
   /**
    * Creates a new ZNS client.
+   * @param options - Configuration options
+   * @param options.network - Network to connect to ("testnet" | "mainnet"), defaults to "testnet"
+   * @param options.url - Custom indexer URL (optional)
    */
-  constructor(options?: { url?: string }) {
+  constructor(options?: { network?: Network; url?: string }) {
+    this.network = options?.network ?? "testnet";
     this.url = options?.url ?? DEFAULT_URL;
   }
 
@@ -81,6 +94,15 @@ export class ZNS {
   /** Returns true if {@link verify} has been called and passed. */
   get verified(): boolean {
     return this._verified;
+  }
+
+  /** Get the registry address for the current network. */
+  get registryAddress(): string {
+    const addr = REGISTRY_ADDRESSES[this.network];
+    if (!addr) {
+      throw new Error(`Unknown network: ${this.network}`);
+    }
+    return addr;
   }
 
   /** Fetch current server status including pricing and configuration. */
@@ -206,14 +228,12 @@ export class ZNS {
    * Prepare a name claim transaction.
    * @param name The name to claim (1-62 lowercase alphanumeric chars)
    * @param address Your Zcash Unified Address
-   * @param registryAddress The registry's Zcash Unified Address - obtain from {@link status}
    * @param cost The claim cost in zatoshis - obtain from {@link claimCost}
    * @returns Prepared claim ready for signature completion
    */
   prepareClaim(
     name: string,
     address: string,
-    registryAddress: string,
     cost: Zats,
   ): PreparedClaim {
     this.requireValidName(name);
@@ -230,7 +250,7 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:CLAIM:${name}:${address}:${signature}:${userPubkey}`
           : `ZNS:CLAIM:${name}:${address}:${signature}`;
-        const uri = this.buildZcashUri(registryAddress, cost, memo);
+        const uri = this.buildZcashUri(this.registryAddress, cost, memo);
         return { memo, uri };
       },
     };
@@ -240,7 +260,6 @@ export class ZNS {
     name: string,
     price: Zats,
     nonce: number,
-    registryAddress: string,
   ): PreparedList {
     this.requireValidName(name);
 
@@ -253,7 +272,7 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:LIST:${name}:${price}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:LIST:${name}:${price}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
+        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
       },
     };
   }
@@ -261,7 +280,6 @@ export class ZNS {
   prepareDelist(
     name: string,
     nonce: number,
-    registryAddress: string,
   ): PreparedDelist {
     this.requireValidName(name);
 
@@ -273,7 +291,7 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:DELIST:${name}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:DELIST:${name}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
+        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
       },
     };
   }
@@ -282,7 +300,6 @@ export class ZNS {
     name: string,
     newAddress: string,
     nonce: number,
-    registryAddress: string,
   ): PreparedUpdate {
     this.requireValidName(name);
     if (!this.isValidUnifiedAddress(newAddress)) {
@@ -298,7 +315,7 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
+        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
       },
     };
   }
@@ -306,7 +323,6 @@ export class ZNS {
   prepareBuy(
     name: string,
     buyerAddress: string,
-    registryAddress: string,
   ): PreparedBuy {
     this.requireValidName(name);
     if (!this.isValidUnifiedAddress(buyerAddress)) {
@@ -321,7 +337,7 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:BUY:${name}:${buyerAddress}:${signature}:${userPubkey}`
           : `ZNS:BUY:${name}:${buyerAddress}:${signature}`;
-        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
+        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
       },
     };
   }
@@ -329,7 +345,6 @@ export class ZNS {
   prepareRelease(
     name: string,
     nonce: number,
-    registryAddress: string,
   ): PreparedRelease {
     this.requireValidName(name);
 
@@ -341,7 +356,7 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:RELEASE:${name}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:RELEASE:${name}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
+        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
       },
     };
   }
@@ -349,7 +364,6 @@ export class ZNS {
   prepareSetPrice(
     prices: Zats[],
     nonce: number,
-    registryAddress: string,
   ): PreparedSetPrice {
     return {
       prices,
@@ -357,7 +371,7 @@ export class ZNS {
       payload: `SETPRICE:${prices.length}:${prices.join(":")}:${nonce}`,
       complete: (signature: string): CompletedAction => {
         const memo = `ZNS:SETPRICE:${prices.length}:${prices.join(":")}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
+        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
       },
     };
   }

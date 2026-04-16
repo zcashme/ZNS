@@ -232,13 +232,10 @@ describe("verification", () => {
 describe("action flows", () => {
   let zns: ZNS;
   let mockPricing: typeof mockStatus.pricing;
-  let mockRegistryAddress: string;
-
   beforeEach(async () => {
     globalThis.fetch = mockRpc(mockStatus);
     zns = new ZNS();
     mockPricing = mockStatus.pricing;
-    mockRegistryAddress = mockStatus.address;
   });
 
   describe("prepareClaim / completeClaim", () => {
@@ -246,7 +243,7 @@ describe("action flows", () => {
     
     it("prepareClaim returns payload, cost, and complete method", () => {
       const cost = zns.claimCost(5, mockPricing);
-      const result = zns.prepareClaim("alice", validTestnetAddr, mockRegistryAddress, cost!);
+      const result = zns.prepareClaim("alice", validTestnetAddr, cost!);
       expect(result.payload).toBe(`CLAIM:alice:${validTestnetAddr}`);
       expect(result.cost).toBe(75_000_000);
       expect(typeof result.complete).toBe("function");
@@ -254,7 +251,7 @@ describe("action flows", () => {
 
     it("complete returns memo and uri", () => {
       const cost = zns.claimCost(5, mockPricing);
-      const action = zns.prepareClaim("alice", validTestnetAddr, mockRegistryAddress, cost!);
+      const action = zns.prepareClaim("alice", validTestnetAddr, cost!);
       const result = action.complete("sig123", "pubkey456");
       expect(result.memo).toBe(`ZNS:CLAIM:alice:${validTestnetAddr}:sig123:pubkey456`);
       expect(result.uri).toContain("memo=");
@@ -262,19 +259,19 @@ describe("action flows", () => {
 
     it("complete without userPubkey omits it", () => {
       const cost = zns.claimCost(5, mockPricing);
-      const action = zns.prepareClaim("alice", validTestnetAddr, mockRegistryAddress, cost!);
+      const action = zns.prepareClaim("alice", validTestnetAddr, cost!);
       const result = action.complete("sig123");
       expect(result.memo).toBe(`ZNS:CLAIM:alice:${validTestnetAddr}:sig123`);
     });
 
     it("throws on invalid name", () => {
-      expect(() => zns.prepareClaim("INVALID", validTestnetAddr, mockRegistryAddress, 100)).toThrow("Invalid ZNS name");
+      expect(() => zns.prepareClaim("INVALID", validTestnetAddr, 100)).toThrow("Invalid ZNS name");
     });
   });
 
   describe("prepareList / complete", () => {
     it("returns correct payload and memo", () => {
-      const pre = zns.prepareList("alice", 100_000, 1, mockRegistryAddress);
+      const pre = zns.prepareList("alice", 100_000, 1);
       expect(pre.payload).toBe("LIST:alice:100000:1");
 
       const post = pre.complete("dummySig");
@@ -283,7 +280,7 @@ describe("action flows", () => {
     });
 
     it("supports sovereign userPubkey", () => {
-      const action = zns.prepareList("alice", 100_000, 1, mockRegistryAddress);
+      const action = zns.prepareList("alice", 100_000, 1);
       const result = action.complete("dummySig", "mypk");
       expect(result.memo).toBe("ZNS:LIST:alice:100000:1:dummySig:mypk");
     });
@@ -291,7 +288,7 @@ describe("action flows", () => {
 
   describe("prepareDelist / complete", () => {
     it("returns correct payload and memo", () => {
-      const pre = zns.prepareDelist("alice", 2, mockRegistryAddress);
+      const pre = zns.prepareDelist("alice", 2);
       expect(pre.payload).toBe("DELIST:alice:2");
 
       const post = pre.complete("dummySig");
@@ -301,7 +298,7 @@ describe("action flows", () => {
 
   describe("prepareUpdate / complete", () => {
     it("returns correct payload and memo", () => {
-      const pre = zns.prepareUpdate("alice", VALID_TESTNET_ADDR, 3, mockRegistryAddress);
+      const pre = zns.prepareUpdate("alice", VALID_TESTNET_ADDR, 3);
       expect(pre.payload).toBe(`UPDATE:alice:${VALID_TESTNET_ADDR}:3`);
 
       const post = pre.complete("dummySig");
@@ -311,7 +308,7 @@ describe("action flows", () => {
 
   describe("prepareBuy / complete", () => {
     it("returns correct payload and memo", () => {
-      const pre = zns.prepareBuy("alice", VALID_TESTNET_ADDR, mockRegistryAddress);
+      const pre = zns.prepareBuy("alice", VALID_TESTNET_ADDR);
       expect(pre.payload).toBe(`BUY:alice:${VALID_TESTNET_ADDR}`);
 
       const post = pre.complete("dummySig");
@@ -321,7 +318,7 @@ describe("action flows", () => {
 
   describe("prepareRelease / complete", () => {
     it("returns correct payload and memo", () => {
-      const pre = zns.prepareRelease("alice", 3, mockRegistryAddress);
+      const pre = zns.prepareRelease("alice", 3);
       expect(pre.payload).toBe("RELEASE:alice:3");
 
       const post = pre.complete("dummySig");
@@ -331,7 +328,7 @@ describe("action flows", () => {
 
   describe("prepareSetPrice / complete", () => {
     it("returns correct payload and memo", () => {
-      const pre = zns.prepareSetPrice([60000, 42500], 1, mockRegistryAddress);
+      const pre = zns.prepareSetPrice([60000, 42500], 1);
       expect(pre.payload).toBe("SETPRICE:2:60000:42500:1");
 
       const post = pre.complete("dummySig");
