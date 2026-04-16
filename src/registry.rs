@@ -30,7 +30,8 @@ impl Registry {
                 nonce     INTEGER NOT NULL,
                 txid      TEXT NOT NULL,
                 height    INTEGER NOT NULL,
-                signature TEXT NOT NULL
+                signature TEXT NOT NULL,
+                pubkey    TEXT
             );
             CREATE TABLE IF NOT EXISTS events (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,10 +119,11 @@ impl Registry {
         signature: &str,
         txid: &str,
         height: u64,
+        pubkey: Option<&str>,
     ) -> rusqlite::Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO listings (name, price, nonce, signature, txid, height) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![name, price as i64, nonce as i64, signature, txid, height as i64],
+            "INSERT OR REPLACE INTO listings (name, price, nonce, signature, txid, height, pubkey) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![name, price as i64, nonce as i64, signature, txid, height as i64, pubkey],
         )?;
         Ok(())
     }
@@ -336,7 +338,7 @@ impl Registry {
     pub fn get_listing(&self, name: &str) -> Option<Listing> {
         self.db
             .query_row(
-                "SELECT name, price, nonce, txid, height, signature FROM listings WHERE name = ?1",
+                "SELECT name, price, nonce, txid, height, signature, pubkey FROM listings WHERE name = ?1",
                 [name],
                 |row| {
                     Ok(Listing {
@@ -346,6 +348,7 @@ impl Registry {
                         txid: row.get(3)?,
                         height: row.get::<_, i64>(4)? as u64,
                         signature: row.get(5)?,
+                        pubkey: row.get(6)?,
                     })
                 },
             )
@@ -354,7 +357,7 @@ impl Registry {
 
     pub fn list_for_sale(&self) -> Vec<Listing> {
         let mut stmt = match self.db.prepare(
-            "SELECT l.name, l.price, l.nonce, l.txid, l.height, l.signature
+            "SELECT l.name, l.price, l.nonce, l.txid, l.height, l.signature, l.pubkey
              FROM listings l
              ORDER BY l.height DESC",
         ) {
@@ -369,6 +372,7 @@ impl Registry {
                 txid: row.get(3)?,
                 height: row.get::<_, i64>(4)? as u64,
                 signature: row.get(5)?,
+                pubkey: row.get(6)?,
             })
         })
         .unwrap_or_else(|_| panic!("query failed"))
@@ -524,6 +528,7 @@ pub struct Listing {
     pub txid: String,
     pub height: u64,
     pub signature: String,
+    pub pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone)]

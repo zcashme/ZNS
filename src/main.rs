@@ -224,7 +224,11 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 return;
             }
             let owner_ua = reg.get_owner_ua(&action.name);
-            match reg.create_listing(&action.name, *price, *nonce, &action.signature, txid, height) {
+            let listing_pubkey_b64 = action
+                .user_pubkey
+                .as_ref()
+                .map(|k| base64::engine::general_purpose::STANDARD.encode(k));
+            match reg.create_listing(&action.name, *price, *nonce, &action.signature, txid, height, listing_pubkey_b64.as_deref()) {
                 Ok(()) => {
                     let _ = reg.insert_event(
                         &action,

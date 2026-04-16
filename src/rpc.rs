@@ -43,6 +43,7 @@ pub(crate) struct ListingEntry {
     txid: String,
     height: u64,
     signature: String,
+    pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +233,7 @@ fn listing_entry(l: crate::registry::Listing) -> ListingEntry {
         txid: l.txid,
         height: l.height,
         signature: l.signature,
+        pubkey: l.pubkey,
     }
 }
 
