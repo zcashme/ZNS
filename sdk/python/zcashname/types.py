@@ -29,6 +29,7 @@ class Listing:
     txid: str
     height: int
     signature: str
+    pubkey: str | None = None
 
 
 @dataclass

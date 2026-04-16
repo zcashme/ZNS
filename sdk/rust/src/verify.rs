@@ -147,19 +147,37 @@ pub fn verify_registration(
     Ok(VerifiedRegistration(reg.clone()))
 }
 
-/// Verify a listing's signature against the admin pubkey.
+/// Verify a listing's signature.
 ///
 /// Pre-image is always `"LIST:{name}:{price}:{nonce}"`.
-/// Listings are always admin-signed.
+/// If `listing.pubkey` is present, verifies against the sovereign user key.
+/// Otherwise, verifies against the admin pubkey.
 pub fn verify_listing(
     listing: &Listing,
     admin_pubkey: &AdminPubkey,
 ) -> anyhow::Result<VerifiedListing> {
     let payload = format!("LIST:{}:{}:{}", listing.name, listing.price, listing.nonce);
     let payload_bytes = payload.as_bytes();
-    verify_bytes_generic(payload_bytes, &listing.signature, admin_pubkey.as_bytes()).map_err(
-        |e| anyhow::anyhow!("signature check failed for listing '{}': {e}", listing.name),
-    )?;
+
+    if let Some(user_pk_b64) = &listing.pubkey {
+        let user_pk = parse_pubkey(user_pk_b64)?;
+        verify_bytes_generic(payload_bytes, &listing.signature, &user_pk).map_err(|e| {
+            anyhow::anyhow!(
+                "sovereign signature check failed for listing '{}': {e}",
+                listing.name
+            )
+        })?;
+    } else {
+        verify_bytes_generic(payload_bytes, &listing.signature, admin_pubkey.as_bytes()).map_err(
+            |e| {
+                anyhow::anyhow!(
+                    "admin signature check failed for listing '{}': {e}",
+                    listing.name
+                )
+            },
+        )?;
+    }
+
     Ok(VerifiedListing(listing.clone()))
 }
 
@@ -337,6 +355,7 @@ mod tests {
             txid: "txid".into(),
             height: 1001,
             signature: sign_b64(&sk, b"LIST:bob:100000:3"),
+            pubkey: None,
         };
         verify_listing(&listing, &pk).unwrap();
     }
@@ -351,6 +370,7 @@ mod tests {
             txid: "txid".into(),
             height: 1001,
             signature: sign_b64(&sk, b"LIST:bob:100000:3"),
+            pubkey: None,
         };
         listing.price = 50_000;
         assert!(verify_listing(&listing, &pk).is_err());

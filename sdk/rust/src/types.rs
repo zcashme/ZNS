@@ -49,6 +49,7 @@ pub struct Listing {
     pub txid: String,
     pub height: u64,
     pub signature: String,
+    pub pubkey: Option<String>,
 }
 
 /// Current indexer state.
