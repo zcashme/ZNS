@@ -19,11 +19,17 @@ export interface Registration {
 export type LastAction = "CLAIM" | "BUY" | "UPDATE" | "DELIST" | "RELEASE";
 
 /** All actions that can appear in the Event log (includes non-ownership actions like LIST) */
-export type EventAction = "CLAIM" | "LIST" | "DELIST" | "RELEASE" | "UPDATE" | "BUY" | "SETPRICE";
+export type EventAction =
+  | "CLAIM"
+  | "LIST"
+  | "DELIST"
+  | "RELEASE"
+  | "UPDATE"
+  | "BUY"
+  | "SETPRICE";
 
 export interface Listing {
   name: string;
-  /** Asking price in zatoshis */
   price: Zats;
   nonce: number;
   txid: string;
@@ -35,7 +41,6 @@ export interface Listing {
 export interface Pricing {
   nonce: number;
   height: number;
-  /** Claim costs in zatoshis. tiers[i] is the cost for a name of length i+1 */
   tiers: Zats[];
 }
 
@@ -56,7 +61,6 @@ export interface Event {
   txid: string;
   height: number;
   ua: string | null;
-  /** Transaction price in zatoshis, if applicable */
   price: Zats | null;
   nonce: number | null;
   signature: string | null;
@@ -76,14 +80,66 @@ export interface EventsResult {
   total: number;
 }
 
-export interface PreparedAction {
-  payload: string;
-  /** Claim cost in zatoshis */
-  cost?: Zats;
-  uri?: string;
-}
-
+/** Completed action ready to be used in a Zcash transaction */
 export interface CompletedAction {
   memo: string;
   uri: string;
+}
+
+/** Base interface for prepared actions that can be completed with a signature */
+export interface PreparedAction {
+  /** The signing payload - what needs to be signed */
+  readonly payload: string;
+
+  /** Complete the action with a signature.
+   *  @param signature - Base64-encoded Ed25519 signature of the payload
+   *  @param userPubkey - Optional user pubkey for sovereign names
+   *  @returns The completed action with memo and URI for the Zcash transaction
+   */
+  complete(signature: string, userPubkey?: string): CompletedAction;
+}
+
+/** Prepared CLAIM action */
+export interface PreparedClaim extends PreparedAction {
+  readonly name: string;
+  readonly address: string;
+  readonly cost: Zats;
+}
+
+/** Prepared LIST action */
+export interface PreparedList extends PreparedAction {
+  readonly name: string;
+  readonly price: Zats;
+  readonly nonce: number;
+}
+
+/** Prepared DELIST action */
+export interface PreparedDelist extends PreparedAction {
+  readonly name: string;
+  readonly nonce: number;
+}
+
+/** Prepared UPDATE action */
+export interface PreparedUpdate extends PreparedAction {
+  readonly name: string;
+  readonly newAddress: string;
+  readonly nonce: number;
+}
+
+/** Prepared BUY action */
+export interface PreparedBuy extends PreparedAction {
+  readonly name: string;
+  readonly buyerAddress: string;
+}
+
+/** Prepared RELEASE action */
+export interface PreparedRelease extends PreparedAction {
+  readonly name: string;
+  readonly nonce: number;
+}
+
+/** Prepared SETPRICE action (admin only) */
+export interface PreparedSetPrice extends PreparedAction {
+  readonly prices: readonly Zats[];
+  readonly nonce: number;
 }

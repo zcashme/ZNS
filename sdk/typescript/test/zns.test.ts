@@ -189,21 +189,23 @@ describe("action flows", () => {
   });
 
   describe("prepareClaim / completeClaim", () => {
-    it("prepareClaim returns payload, cost, uri", () => {
+    it("prepareClaim returns payload, cost, and complete method", () => {
       const result = zns.prepareClaim("alice", "utest1addr");
       expect(result.payload).toBe("CLAIM:alice:utest1addr");
       expect(result.cost).toBe(75_000_000);
-      expect(result.uri).toContain("zcash:utest1registry");
+      expect(typeof result.complete).toBe("function");
     });
 
-    it("completeClaim returns memo and uri", () => {
-      const result = zns.completeClaim("alice", "utest1addr", "sig123", "pubkey456");
+    it("complete returns memo and uri", () => {
+      const action = zns.prepareClaim("alice", "utest1addr");
+      const result = action.complete("sig123", "pubkey456");
       expect(result.memo).toBe("ZNS:CLAIM:alice:utest1addr:sig123:pubkey456");
       expect(result.uri).toContain("memo=");
     });
 
-    it("completeClaim without userPubkey omits it", () => {
-      const result = zns.completeClaim("alice", "utest1addr", "sig123");
+    it("complete without userPubkey omits it", () => {
+      const action = zns.prepareClaim("alice", "utest1addr");
+      const result = action.complete("sig123");
       expect(result.memo).toBe("ZNS:CLAIM:alice:utest1addr:sig123");
     });
 
@@ -212,69 +214,70 @@ describe("action flows", () => {
     });
   });
 
-  describe("prepareList / completeList", () => {
+  describe("prepareList / complete", () => {
     it("returns correct payload and memo", () => {
       const pre = zns.prepareList("alice", 100_000, 1);
       expect(pre.payload).toBe("LIST:alice:100000:1");
 
-      const post = zns.completeList("alice", 100_000, 1, "sig1");
-      expect(post.memo).toBe("ZNS:LIST:alice:100000:1:sig1");
+      const post = pre.complete("dummySig");
+      expect(post.memo).toBe("ZNS:LIST:alice:100000:1:dummySig");
       expect(post.uri).toContain("memo=");
     });
 
     it("supports sovereign userPubkey", () => {
-      const post = zns.completeList("alice", 100_000, 1, "sig1", "mypk");
-      expect(post.memo).toBe("ZNS:LIST:alice:100000:1:sig1:mypk");
+      const action = zns.prepareList("alice", 100_000, 1);
+      const result = action.complete("dummySig", "mypk");
+      expect(result.memo).toBe("ZNS:LIST:alice:100000:1:dummySig:mypk");
     });
   });
 
-  describe("prepareDelist / completeDelist", () => {
+  describe("prepareDelist / complete", () => {
     it("returns correct payload and memo", () => {
       const pre = zns.prepareDelist("alice", 2);
       expect(pre.payload).toBe("DELIST:alice:2");
 
-      const post = zns.completeDelist("alice", 2, "sig2");
-      expect(post.memo).toBe("ZNS:DELIST:alice:2:sig2");
+      const post = pre.complete("dummySig");
+      expect(post.memo).toBe("ZNS:DELIST:alice:2:dummySig");
     });
   });
 
-  describe("prepareUpdate / completeUpdate", () => {
+  describe("prepareUpdate / complete", () => {
     it("returns correct payload and memo", () => {
       const pre = zns.prepareUpdate("alice", "utest1new", 3);
       expect(pre.payload).toBe("UPDATE:alice:utest1new:3");
 
-      const post = zns.completeUpdate("alice", "utest1new", 3, "sig3");
-      expect(post.memo).toBe("ZNS:UPDATE:alice:utest1new:3:sig3");
+      const post = pre.complete("dummySig");
+      expect(post.memo).toBe("ZNS:UPDATE:alice:utest1new:3:dummySig");
     });
   });
 
-  describe("prepareBuy / completeBuy", () => {
+  describe("prepareBuy / complete", () => {
     it("returns correct payload and memo", () => {
       const pre = zns.prepareBuy("alice", "utest1buyer");
       expect(pre.payload).toBe("BUY:alice:utest1buyer");
 
-      const post = zns.completeBuy("alice", "utest1buyer", "sig4");
-      expect(post.memo).toBe("ZNS:BUY:alice:utest1buyer:sig4");
+      const post = pre.complete("dummySig");
+      expect(post.memo).toBe("ZNS:BUY:alice:utest1buyer:dummySig");
     });
   });
 
-  describe("prepareRelease / completeRelease", () => {
+  describe("prepareRelease / complete", () => {
     it("returns correct payload and memo", () => {
       const pre = zns.prepareRelease("alice", 3);
       expect(pre.payload).toBe("RELEASE:alice:3");
 
-      const post = zns.completeRelease("alice", 3, "sig5");
-      expect(post.memo).toBe("ZNS:RELEASE:alice:3:sig5");
+      const post = pre.complete("dummySig");
+      expect(post.memo).toBe("ZNS:RELEASE:alice:3:dummySig");
     });
   });
 
-  describe("prepareSetPrice / completeSetPrice", () => {
+  describe("prepareSetPrice / complete", () => {
     it("returns correct payload and memo", () => {
       const pre = zns.prepareSetPrice([60000, 42500], 1);
       expect(pre.payload).toBe("SETPRICE:2:60000:42500:1");
 
-      const post = zns.completeSetPrice([60000, 42500], 1, "sig6");
-      expect(post.memo).toBe("ZNS:SETPRICE:2:60000:42500:1:sig6");
+      const post = pre.complete("dummySig");
+      expect(post.memo).toBe("ZNS:SETPRICE:2:60000:42500:1:dummySig");
     });
   });
 });

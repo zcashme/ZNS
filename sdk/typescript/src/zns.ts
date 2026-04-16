@@ -9,8 +9,14 @@ import type {
   EventsFilter,
   EventsResult,
   Pricing,
-  PreparedAction,
   CompletedAction,
+  PreparedClaim,
+  PreparedList,
+  PreparedDelist,
+  PreparedUpdate,
+  PreparedBuy,
+  PreparedRelease,
+  PreparedSetPrice,
 } from "./types.js";
 
 export type {
@@ -22,8 +28,14 @@ export type {
   EventsFilter,
   EventsResult,
   Pricing,
-  PreparedAction,
   CompletedAction,
+  PreparedClaim,
+  PreparedList,
+  PreparedDelist,
+  PreparedUpdate,
+  PreparedBuy,
+  PreparedRelease,
+  PreparedSetPrice,
   LastAction,
   EventAction,
 } from "./types.js";
@@ -103,19 +115,22 @@ export class ZNS {
     return this.rpc<Registration[]>("resolve", { query: address });
   }
 
-  /** Check if a name is available for registration. */
+  /** Check if a name is available for registration.
+   *  Returns false immediately for invalid names without hitting the server. */
   async isAvailable(name: string): Promise<boolean> {
+    if (!this.isValidName(name)) return false;
     const result = await this.resolveName(name);
     return result === null;
   }
 
-  /** Validate a Zcash Unified Address format (bech32m encoding with 'u' prefix).
+  /** Validate a Zcash Unified Address format (bech32m encoding).
+   *  Accepts both mainnet ('u') and testnet ('utest') prefixes.
    *  Performs format validation but NOT cryptographic verification of the address.
    *  Returns true if the address is syntactically valid, false otherwise. */
   isValidUnifiedAddress(address: string): boolean {
     try {
       const decoded = bech32m.decode(address);
-      return decoded.prefix === "u";
+      return decoded.prefix === "u" || decoded.prefix === "utest";
     } catch {
       return false;
     }
@@ -178,98 +193,118 @@ export class ZNS {
 
   // ── Action Helpers ─────────────────────────────────────────────────────────
 
-  prepareClaim(name: string, address: string): PreparedAction {
+  prepareClaim(name: string, address: string): PreparedClaim {
     this.requireValidName(name);
-    const payload = `CLAIM:${name}:${address}`;
     const cost = this.claimCost(name.length);
-    const uri = cost != null && this._registryAddress
-      ? this.buildZcashUri(this._registryAddress, cost / 1e8)
-      : undefined;
-    return { payload, cost: cost ?? undefined, uri };
+    const registryAddress = this._registryAddress ?? "";
+
+    return {
+      name,
+      address,
+      cost: cost ?? 0,
+      payload: `CLAIM:${name}:${address}`,
+      complete: (signature: string, userPubkey?: string): CompletedAction => {
+        const memo = userPubkey
+          ? `ZNS:CLAIM:${name}:${address}:${signature}:${userPubkey}`
+          : `ZNS:CLAIM:${name}:${address}:${signature}`;
+        const uri = this.buildZcashUri(registryAddress, cost ?? undefined, memo);
+        return { memo, uri };
+      },
+    };
   }
 
-  completeClaim(name: string, address: string, signature: string, userPubkey?: string): CompletedAction {
+  prepareList(name: string, price: Zats, nonce: number): PreparedList {
     this.requireValidName(name);
-    const memo = userPubkey
-      ? `ZNS:CLAIM:${name}:${address}:${signature}:${userPubkey}`
-      : `ZNS:CLAIM:${name}:${address}:${signature}`;
-    const cost = this.claimCost(name.length);
-    const uri = this.buildZcashUri(this._registryAddress ?? "", cost != null ? cost / 1e8 : undefined, memo);
-    return { memo, uri };
+
+    return {
+      name,
+      price,
+      nonce,
+      payload: `LIST:${name}:${price}:${nonce}`,
+      complete: (signature: string, userPubkey?: string): CompletedAction => {
+        const memo = userPubkey
+          ? `ZNS:LIST:${name}:${price}:${nonce}:${signature}:${userPubkey}`
+          : `ZNS:LIST:${name}:${price}:${nonce}:${signature}`;
+        return { memo, uri: this.memoUri(memo) };
+      },
+    };
   }
 
-  prepareList(name: string, price: Zats, nonce: number): PreparedAction {
+  prepareDelist(name: string, nonce: number): PreparedDelist {
     this.requireValidName(name);
-    return { payload: `LIST:${name}:${price}:${nonce}` };
+
+    return {
+      name,
+      nonce,
+      payload: `DELIST:${name}:${nonce}`,
+      complete: (signature: string, userPubkey?: string): CompletedAction => {
+        const memo = userPubkey
+          ? `ZNS:DELIST:${name}:${nonce}:${signature}:${userPubkey}`
+          : `ZNS:DELIST:${name}:${nonce}:${signature}`;
+        return { memo, uri: this.memoUri(memo) };
+      },
+    };
   }
 
-  completeList(name: string, price: Zats, nonce: number, signature: string, userPubkey?: string): CompletedAction {
+  prepareUpdate(name: string, newAddress: string, nonce: number): PreparedUpdate {
     this.requireValidName(name);
-    const memo = userPubkey
-      ? `ZNS:LIST:${name}:${price}:${nonce}:${signature}:${userPubkey}`
-      : `ZNS:LIST:${name}:${price}:${nonce}:${signature}`;
-    return { memo, uri: this.memoUri(memo) };
+
+    return {
+      name,
+      newAddress,
+      nonce,
+      payload: `UPDATE:${name}:${newAddress}:${nonce}`,
+      complete: (signature: string, userPubkey?: string): CompletedAction => {
+        const memo = userPubkey
+          ? `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}:${userPubkey}`
+          : `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}`;
+        return { memo, uri: this.memoUri(memo) };
+      },
+    };
   }
 
-  prepareDelist(name: string, nonce: number): PreparedAction {
+  prepareBuy(name: string, buyerAddress: string): PreparedBuy {
     this.requireValidName(name);
-    return { payload: `DELIST:${name}:${nonce}` };
+
+    return {
+      name,
+      buyerAddress,
+      payload: `BUY:${name}:${buyerAddress}`,
+      complete: (signature: string, userPubkey?: string): CompletedAction => {
+        const memo = userPubkey
+          ? `ZNS:BUY:${name}:${buyerAddress}:${signature}:${userPubkey}`
+          : `ZNS:BUY:${name}:${buyerAddress}:${signature}`;
+        return { memo, uri: this.memoUri(memo) };
+      },
+    };
   }
 
-  completeDelist(name: string, nonce: number, signature: string, userPubkey?: string): CompletedAction {
+  prepareRelease(name: string, nonce: number): PreparedRelease {
     this.requireValidName(name);
-    const memo = userPubkey
-      ? `ZNS:DELIST:${name}:${nonce}:${signature}:${userPubkey}`
-      : `ZNS:DELIST:${name}:${nonce}:${signature}`;
-    return { memo, uri: this.memoUri(memo) };
+
+    return {
+      name,
+      nonce,
+      payload: `RELEASE:${name}:${nonce}`,
+      complete: (signature: string, userPubkey?: string): CompletedAction => {
+        const memo = userPubkey
+          ? `ZNS:RELEASE:${name}:${nonce}:${signature}:${userPubkey}`
+          : `ZNS:RELEASE:${name}:${nonce}:${signature}`;
+        return { memo, uri: this.memoUri(memo) };
+      },
+    };
   }
 
-  prepareUpdate(name: string, newAddress: string, nonce: number): PreparedAction {
-    this.requireValidName(name);
-    return { payload: `UPDATE:${name}:${newAddress}:${nonce}` };
-  }
-
-  completeUpdate(name: string, newAddress: string, nonce: number, signature: string, userPubkey?: string): CompletedAction {
-    this.requireValidName(name);
-    const memo = userPubkey
-      ? `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}:${userPubkey}`
-      : `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}`;
-    return { memo, uri: this.memoUri(memo) };
-  }
-
-  prepareBuy(name: string, buyerAddress: string): PreparedAction {
-    this.requireValidName(name);
-    return { payload: `BUY:${name}:${buyerAddress}` };
-  }
-
-  completeBuy(name: string, buyerAddress: string, signature: string, userPubkey?: string): CompletedAction {
-    this.requireValidName(name);
-    const memo = userPubkey
-      ? `ZNS:BUY:${name}:${buyerAddress}:${signature}:${userPubkey}`
-      : `ZNS:BUY:${name}:${buyerAddress}:${signature}`;
-    return { memo, uri: this.memoUri(memo) };
-  }
-
-  prepareRelease(name: string, nonce: number): PreparedAction {
-    this.requireValidName(name);
-    return { payload: `RELEASE:${name}:${nonce}` };
-  }
-
-  completeRelease(name: string, nonce: number, signature: string, userPubkey?: string): CompletedAction {
-    this.requireValidName(name);
-    const memo = userPubkey
-      ? `ZNS:RELEASE:${name}:${nonce}:${signature}:${userPubkey}`
-      : `ZNS:RELEASE:${name}:${nonce}:${signature}`;
-    return { memo, uri: this.memoUri(memo) };
-  }
-
-  prepareSetPrice(prices: Zats[], nonce: number): PreparedAction {
-    return { payload: `SETPRICE:${prices.length}:${prices.join(":")}:${nonce}` };
-  }
-
-  completeSetPrice(prices: Zats[], nonce: number, signature: string): CompletedAction {
-    const memo = `ZNS:SETPRICE:${prices.length}:${prices.join(":")}:${nonce}:${signature}`;
-    return { memo, uri: this.memoUri(memo) };
+  prepareSetPrice(prices: Zats[], nonce: number): PreparedSetPrice {
+    return {
+      prices,
+      nonce,
+      payload: `SETPRICE:${prices.length}:${prices.join(":")}:${nonce}`,
+      complete: (signature: string): CompletedAction => {
+        const memo = `ZNS:SETPRICE:${prices.length}:${prices.join(":")}:${nonce}:${signature}`;
+        return { memo, uri: this.memoUri(memo) };
+      },
+    };
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
@@ -307,11 +342,15 @@ export class ZNS {
       : `zcash:?memo=${this.toBase64Url(memo)}`;
   }
 
-  private buildZcashUri(address: string, amount?: number, memo?: string): string {
+  /** Build a ZIP-321 URI. Amount is in zatoshis and will be converted to ZEC for the URI. */
+  private buildZcashUri(address: string, amountZats?: Zats, memo?: string): string {
     if (!address) return "";
     const base = `zcash:${address}`;
     const params: string[] = [];
-    if (amount !== undefined && amount > 0) params.push(`amount=${amount}`);
+    if (amountZats !== undefined && amountZats > 0) {
+      const amountZec = amountZats / 1e8;
+      params.push(`amount=${amountZec}`);
+    }
     if (memo) params.push(`memo=${this.toBase64Url(memo)}`);
     return params.length ? `${base}?${params.join("&")}` : base;
   }
