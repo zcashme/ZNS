@@ -316,7 +316,7 @@ async function main() {
       const price = parseInt(priceStr, 10);
       const nonce = parseInt(nonceStr, 10);
       const privateKey = await loadPrivateKey(flags);
-      const action = zns.prepareList(name, price, nonce, zns.registryAddress);
+      const action = zns.prepareList(name, price, nonce);
       
       const { memo, uri, pubkey } = await signAndComplete(
         action.payload,
@@ -346,7 +346,7 @@ async function main() {
       const status = await zns.status();
       const nonce = parseInt(nonceStr, 10);
       const privateKey = await loadPrivateKey(flags);
-      const action = zns.prepareDelist(name, nonce, zns.registryAddress);
+      const action = zns.prepareDelist(name, nonce);
       
       const { memo, uri } = await signAndComplete(
         action.payload,
@@ -373,7 +373,7 @@ async function main() {
       const status = await zns.status();
       const nonce = parseInt(nonceStr, 10);
       const privateKey = await loadPrivateKey(flags);
-      const action = zns.prepareUpdate(name, newAddress, nonce, zns.registryAddress);
+      const action = zns.prepareUpdate(name, newAddress, nonce);
       
       const { memo, uri } = await signAndComplete(
         action.payload,
@@ -401,7 +401,7 @@ async function main() {
       const status = await zns.status();
       const nonce = parseInt(nonceStr, 10);
       const privateKey = await loadPrivateKey(flags);
-      const action = zns.prepareRelease(name, nonce, zns.registryAddress);
+      const action = zns.prepareRelease(name, nonce);
       
       const { memo, uri } = await signAndComplete(
         action.payload,
