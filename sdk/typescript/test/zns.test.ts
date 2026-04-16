@@ -67,7 +67,7 @@ describe("ZNS.create", () => {
 });
 
 describe("resolve", () => {
-  it("returns enriched result with verified/sovereign fields", async () => {
+  it("returns resolve result with listing", async () => {
     const reg = {
       name: "alice",
       address: "utest1addr",
@@ -77,6 +77,7 @@ describe("resolve", () => {
       signature: null,
       last_action: "CLAIM",
       pubkey: null,
+      listing: { name: "alice", price: 100_000, nonce: 1, txid: "tx2", height: 200, signature: "sig1", pubkey: null },
     };
     globalThis.fetch = mockRpcSequence([mockStatus, reg]);
 
@@ -86,21 +87,23 @@ describe("resolve", () => {
     expect(result).not.toBeNull();
     if (result && !Array.isArray(result)) {
       expect(result.name).toBe("alice");
-      expect(result.verified).toBe(false);
-      expect(result.sovereign).toBe(false);
+      expect(result.address).toBe("utest1addr");
+      expect(result.listing).not.toBeNull();
+      expect(result.listing?.name).toBe("alice");
     }
   });
 
-  it("detects sovereign names", async () => {
+  it("returns sovereign registration", async () => {
     const reg = {
       name: "alice",
       address: "utest1addr",
       txid: "tx1",
       height: 100,
       nonce: 0,
-      signature: null,
+      signature: "sig1",
       last_action: "CLAIM",
       pubkey: "differentpubkeybase64=",
+      listing: null,
     };
     globalThis.fetch = mockRpcSequence([mockStatus, reg]);
 
@@ -108,7 +111,8 @@ describe("resolve", () => {
     const result = await zns.resolve("alice");
 
     if (result && !Array.isArray(result)) {
-      expect(result.sovereign).toBe(true);
+      expect(result.pubkey).toBe("differentpubkeybase64=");
+      expect(result.listing).toBeNull();
     }
   });
 
@@ -130,7 +134,7 @@ describe("isAvailable", () => {
   it("returns false for registered name", async () => {
     const reg = {
       name: "alice", address: "u1", txid: "tx1", height: 100,
-      nonce: 0, signature: null, last_action: "CLAIM", pubkey: null,
+      nonce: 0, signature: null, last_action: "CLAIM", pubkey: null, listing: null,
     };
     globalThis.fetch = mockRpcSequence([mockStatus, reg]);
     const zns = await ZNS.create();
@@ -139,10 +143,10 @@ describe("isAvailable", () => {
 });
 
 describe("listings", () => {
-  it("returns verified listings", async () => {
+  it("returns raw listings", async () => {
     const listings = {
       listings: [
-        { name: "bob", price: 100_000, nonce: 1, txid: "tx1", height: 200, signature: "sig1" },
+        { name: "bob", price: 100_000, nonce: 1, txid: "tx1", height: 200, signature: "sig1", pubkey: null },
       ],
     };
     globalThis.fetch = mockRpcSequence([mockStatus, listings]);
@@ -150,7 +154,29 @@ describe("listings", () => {
     const result = await zns.listings();
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("bob");
-    expect(result[0].verified).toBe(false);
+    expect(result[0].pubkey).toBeNull();
+  });
+});
+
+describe("verification", () => {
+  it("verifyListing returns false when no admin_pubkey", async () => {
+    globalThis.fetch = mockRpc(mockStatus);
+    const zns = await ZNS.create();
+    // @ts-expect-error - accessing private field for test
+    zns._adminPubkey = null;
+    
+    const listing = { name: "bob", price: 100_000, nonce: 1, txid: "tx1", height: 200, signature: "sig1", pubkey: null };
+    const result = await zns.verifyListing(listing);
+    expect(result).toBe(false);
+  });
+
+  it("verifyRegistration returns false when no signature", async () => {
+    globalThis.fetch = mockRpc(mockStatus);
+    const zns = await ZNS.create();
+    
+    const reg = { name: "alice", address: "u1", txid: "tx1", height: 100, nonce: 0, signature: null, last_action: "CLAIM", pubkey: null };
+    const result = await zns.verifyRegistration(reg);
+    expect(result).toBe(false);
   });
 });
 

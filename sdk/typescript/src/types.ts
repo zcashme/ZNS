@@ -7,7 +7,6 @@ export interface Registration {
   signature: string | null;
   last_action: LastAction;
   pubkey: string | null;
-  /** Raw listing from indexer before SDK enrichment. SDKs add `verified` field after signature verification. */
   listing?: Listing;
 }
 
@@ -23,14 +22,16 @@ export interface Listing {
   pubkey: string | null;
 }
 
-export interface ResolveResult extends Registration {
-  listing: VerifiedListing | null;
-  verified: boolean;
-  sovereign: boolean;
-}
-
-export interface VerifiedListing extends Listing {
-  verified: boolean;
+export interface ResolveResult {
+  name: string;
+  address: string;
+  txid: string;
+  height: number;
+  nonce: number;
+  signature: string | null;
+  last_action: LastAction;
+  pubkey: string | null;
+  listing: Listing | null;
 }
 
 export interface Pricing {
@@ -60,7 +61,6 @@ export interface Event {
   nonce: number | null;
   signature: string | null;
   pubkey: string | null;
-  verified?: boolean;
 }
 
 export type Action = "CLAIM" | "LIST" | "DELIST" | "RELEASE" | "UPDATE" | "BUY" | "SETPRICE";

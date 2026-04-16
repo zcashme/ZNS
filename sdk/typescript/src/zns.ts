@@ -2,7 +2,6 @@ import type {
   Registration,
   Listing,
   ResolveResult,
-  VerifiedListing,
   StatusResult,
   Event,
   EventsFilter,
@@ -16,7 +15,6 @@ export type {
   Registration,
   Listing,
   ResolveResult,
-  VerifiedListing,
   StatusResult,
   Event,
   EventsFilter,
@@ -97,11 +95,9 @@ export class ZNS {
     const raw = await this.rpc<Registration | Registration[] | null>("resolve", { query });
     if (raw === null) return null;
     if (Array.isArray(raw)) {
-      const results: ResolveResult[] = [];
-      for (const r of raw) results.push(await this.enrichRegistration(r));
-      return results;
+      return raw.map(r => this.toResolveResult(r));
     }
-    return this.enrichRegistration(raw);
+    return this.toResolveResult(raw);
   }
 
   async isAvailable(name: string): Promise<boolean> {
@@ -109,11 +105,9 @@ export class ZNS {
     return result === null;
   }
 
-  async listings(): Promise<VerifiedListing[]> {
+  async listings(): Promise<Listing[]> {
     const result = await this.rpc<{ listings: Listing[] }>("list_for_sale");
-    const enriched: VerifiedListing[] = [];
-    for (const l of result.listings) enriched.push(await this.enrichListing(l));
-    return enriched;
+    return result.listings;
   }
 
   async status(): Promise<StatusResult> {
@@ -121,11 +115,52 @@ export class ZNS {
   }
 
   async events(filter?: EventsFilter): Promise<EventsResult> {
-    const result = await this.rpc<EventsResult>("events", (filter ?? {}) as Record<string, unknown>);
-    const enriched: Event[] = [];
-    for (const e of result.events) enriched.push(await this.enrichEvent(e));
-    return { events: enriched, total: result.total };
+    return this.rpc<EventsResult>("events", (filter ?? {}) as Record<string, unknown>);
   }
+
+  /** Verify a listing's signature. Returns true if the signature is valid. */
+  async verifyListing(listing: Listing): Promise<boolean> {
+    const pubkey = listing.pubkey ?? this._adminPubkey;
+    if (!pubkey) return false;
+    const payload = `LIST:${listing.name}:${listing.price}:${listing.nonce}`;
+    return this.verifyEd25519(payload, listing.signature, pubkey);
+  }
+
+  /** Verify a registration's signature. Returns true if the signature is valid. */
+  async verifyRegistration(reg: Registration): Promise<boolean> {
+    if (!reg.signature) return false;
+    const pubkey = reg.pubkey ?? this._adminPubkey;
+    if (!pubkey) return false;
+    const payload = this.registrationPayload(reg);
+    if (!payload) return false;
+    return this.verifyEd25519(payload, reg.signature, pubkey);
+  }
+
+  /** Check if a name is valid format (lowercase alphanumeric, 1-62 chars). */
+  isValidName(name: string): boolean {
+    return NAME_RE.test(name);
+  }
+
+  /** Get the claim cost in zatoshis for a name of given length. Returns null if pricing unavailable. */
+  claimCost(nameLength: number): number | null {
+    if (!this._pricing || this._pricing.tiers.length === 0) return null;
+    const idx = Math.min(Math.max(nameLength - 1, 0), this._pricing.tiers.length - 1);
+    return this._pricing.tiers[idx];
+  }
+
+  /** Parse a ZIP-321 URI into its components. */
+  parseZip321Uri(uri: string): { address: string; amount: string; memoRaw: string; memoDecoded: string } {
+    const withoutScheme = String(uri ?? "").replace(/^zcash:/i, "");
+    const [addressPart, queryPart = ""] = withoutScheme.split("?");
+    const address = addressPart.trim();
+    const params = new URLSearchParams(queryPart);
+    const amount = String(params.get("amount") ?? "").trim();
+    const memoRaw = String(params.get("memo") ?? "").trim();
+    const memoDecoded = memoRaw ? this.decodeBase64Url(memoRaw) : "";
+    return { address, amount, memoRaw, memoDecoded };
+  }
+
+  // ── Action Helpers ─────────────────────────────────────────────────────────
 
   prepareClaim(name: string, address: string): PreparedAction {
     this.requireValidName(name);
@@ -221,72 +256,20 @@ export class ZNS {
     return { memo, uri: this.memoUri(memo) };
   }
 
-  isValidName(name: string): boolean {
-    return NAME_RE.test(name);
-  }
+  // ── Private helpers ────────────────────────────────────────────────────────
 
-  claimCost(nameLength: number): number | null {
-    if (!this._pricing || this._pricing.tiers.length === 0) return null;
-    const idx = Math.min(Math.max(nameLength - 1, 0), this._pricing.tiers.length - 1);
-    return this._pricing.tiers[idx];
-  }
-
-  parseZip321Uri(uri: string): { address: string; amount: string; memoRaw: string; memoDecoded: string } {
-    const withoutScheme = String(uri ?? "").replace(/^zcash:/i, "");
-    const [addressPart, queryPart = ""] = withoutScheme.split("?");
-    const address = addressPart.trim();
-    const params = new URLSearchParams(queryPart);
-    const amount = String(params.get("amount") ?? "").trim();
-    const memoRaw = String(params.get("memo") ?? "").trim();
-    const memoDecoded = memoRaw ? this.decodeBase64Url(memoRaw) : "";
-    return { address, amount, memoRaw, memoDecoded };
-  }
-
-  private async enrichRegistration(raw: Registration & { listing?: Listing }): Promise<ResolveResult> {
-    const { listing: rawListing, ...reg } = raw;
-    
-    const sovereign = reg.pubkey != null && reg.pubkey !== this._adminPubkey;
-    const verified = await this.verifyRegistration(reg, sovereign);
-    const listing = rawListing ? await this.verifyListing(rawListing) : null;
-    
-    return { ...reg, listing, verified, sovereign };
-  }
-
-  private async verifyRegistration(reg: Registration, sovereign: boolean): Promise<boolean> {
-    if (!reg.signature || !this._adminPubkey) return false;
-    const payload = this.registrationPayload(reg);
-    if (!payload) return false;
-    const pubkey = sovereign ? reg.pubkey! : this._adminPubkey;
-    return this.verifyEd25519(payload, reg.signature, pubkey);
-  }
-
-  private async verifyListing(listing: Listing): Promise<VerifiedListing> {
-    // Use listing's pubkey for sovereign, admin pubkey otherwise
-    const pubkey = listing.pubkey ?? this._adminPubkey;
-    const verified = pubkey
-      ? await this.verifyEd25519(this.listingPayload(listing), listing.signature, pubkey)
-      : false;
-    return { ...listing, verified };
-  }
-
-  private async enrichListing(listing: Listing): Promise<VerifiedListing> {
-    // Use listing's pubkey for sovereign, admin pubkey otherwise
-    const pubkey = listing.pubkey ?? this._adminPubkey;
-    let verified = false;
-    if (pubkey) {
-      const payload = this.listingPayload(listing);
-      verified = await this.verifyEd25519(payload, listing.signature, pubkey);
-    }
-    return { ...listing, verified };
-  }
-
-  private async enrichEvent(event: Event): Promise<Event> {
-    if (!event.signature || !this._adminPubkey) return { ...event, verified: false };
-    const payload = this.eventPayload(event);
-    if (!payload) return { ...event, verified: false };
-    const pubkey = event.pubkey ?? this._adminPubkey;
-    const verified = await this.verifyEd25519(payload, event.signature, pubkey);
-    return { ...event, verified };
+  private toResolveResult(reg: Registration): ResolveResult {
+    return {
+      name: reg.name,
+      address: reg.address,
+      txid: reg.txid,
+      height: reg.height,
+      nonce: reg.nonce,
+      signature: reg.signature,
+      last_action: reg.last_action,
+      pubkey: reg.pubkey,
+      listing: reg.listing ?? null,
+    };
   }
 
   private registrationPayload(reg: Registration): string {
@@ -296,22 +279,6 @@ export class ZNS {
       case "UPDATE": return `UPDATE:${reg.name}:${reg.address}:${reg.nonce}`;
       case "DELIST": return `DELIST:${reg.name}:${reg.nonce}`;
       case "RELEASE": return `RELEASE:${reg.name}:${reg.nonce}`;
-      default: return "";
-    }
-  }
-
-  private listingPayload(l: Listing): string {
-    return `LIST:${l.name}:${l.price}:${l.nonce}`;
-  }
-
-  private eventPayload(e: Event): string {
-    switch (e.action) {
-      case "CLAIM": return e.ua ? `CLAIM:${e.name}:${e.ua}` : "";
-      case "BUY": return e.ua ? `BUY:${e.name}:${e.ua}` : "";
-      case "LIST": return e.price != null && e.nonce != null ? `LIST:${e.name}:${e.price}:${e.nonce}` : "";
-      case "DELIST": return e.nonce != null ? `DELIST:${e.name}:${e.nonce}` : "";
-      case "RELEASE": return e.nonce != null ? `RELEASE:${e.name}:${e.nonce}` : "";
-      case "UPDATE": return e.ua && e.nonce != null ? `UPDATE:${e.name}:${e.ua}:${e.nonce}` : "";
       default: return "";
     }
   }
