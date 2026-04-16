@@ -1,4 +1,7 @@
+import * as ed25519 from "@noble/ed25519";
+import { bech32m } from "bech32";
 import type {
+  Zats,
   Registration,
   Listing,
   StatusResult,
@@ -11,6 +14,7 @@ import type {
 } from "./types.js";
 
 export type {
+  Zats,
   Registration,
   Listing,
   StatusResult,
@@ -21,7 +25,7 @@ export type {
   PreparedAction,
   CompletedAction,
   LastAction,
-  Action,
+  EventAction,
 } from "./types.js";
 
 export const DEFAULT_URL = "https://light.zcash.me/zns-testnet";
@@ -89,18 +93,32 @@ export class ZNS {
     return this._registryAddress;
   }
 
-  async resolve(query: string): Promise<Registration | Registration[] | null> {
-    const raw = await this.rpc<Registration | Registration[] | null>("resolve", { query });
-    if (raw === null) return null;
-    if (Array.isArray(raw)) {
-      return raw.map(r => this.normalizeRegistration(r));
-    }
-    return this.normalizeRegistration(raw);
+  /** Resolve a ZNS name to its registration. Returns null if not registered. */
+  async resolveName(name: string): Promise<Registration | null> {
+    return this.rpc<Registration | null>("resolve", { query: name });
   }
 
+  /** Resolve a Zcash Unified Address to all names pointing to it. Returns empty array if none. */
+  async resolveAddress(address: string): Promise<Registration[]> {
+    return this.rpc<Registration[]>("resolve", { query: address });
+  }
+
+  /** Check if a name is available for registration. */
   async isAvailable(name: string): Promise<boolean> {
-    const result = await this.resolve(name);
+    const result = await this.resolveName(name);
     return result === null;
+  }
+
+  /** Validate a Zcash Unified Address format (bech32m encoding with 'u' prefix).
+   *  Performs format validation but NOT cryptographic verification of the address.
+   *  Returns true if the address is syntactically valid, false otherwise. */
+  isValidUnifiedAddress(address: string): boolean {
+    try {
+      const decoded = bech32m.decode(address);
+      return decoded.prefix === "u";
+    } catch {
+      return false;
+    }
   }
 
   async listings(): Promise<Listing[]> {
@@ -140,7 +158,7 @@ export class ZNS {
   }
 
   /** Get the claim cost in zatoshis for a name of given length. Returns null if pricing unavailable. */
-  claimCost(nameLength: number): number | null {
+  claimCost(nameLength: number): Zats | null {
     if (!this._pricing || this._pricing.tiers.length === 0) return null;
     const idx = Math.min(Math.max(nameLength - 1, 0), this._pricing.tiers.length - 1);
     return this._pricing.tiers[idx];
@@ -180,12 +198,12 @@ export class ZNS {
     return { memo, uri };
   }
 
-  prepareList(name: string, price: number, nonce: number): PreparedAction {
+  prepareList(name: string, price: Zats, nonce: number): PreparedAction {
     this.requireValidName(name);
     return { payload: `LIST:${name}:${price}:${nonce}` };
   }
 
-  completeList(name: string, price: number, nonce: number, signature: string, userPubkey?: string): CompletedAction {
+  completeList(name: string, price: Zats, nonce: number, signature: string, userPubkey?: string): CompletedAction {
     this.requireValidName(name);
     const memo = userPubkey
       ? `ZNS:LIST:${name}:${price}:${nonce}:${signature}:${userPubkey}`
@@ -245,24 +263,16 @@ export class ZNS {
     return { memo, uri: this.memoUri(memo) };
   }
 
-  prepareSetPrice(prices: number[], nonce: number): PreparedAction {
+  prepareSetPrice(prices: Zats[], nonce: number): PreparedAction {
     return { payload: `SETPRICE:${prices.length}:${prices.join(":")}:${nonce}` };
   }
 
-  completeSetPrice(prices: number[], nonce: number, signature: string): CompletedAction {
+  completeSetPrice(prices: Zats[], nonce: number, signature: string): CompletedAction {
     const memo = `ZNS:SETPRICE:${prices.length}:${prices.join(":")}:${nonce}:${signature}`;
     return { memo, uri: this.memoUri(memo) };
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
-
-  private normalizeRegistration(reg: Registration): Registration {
-    // Ensure listing is null if missing from RPC response
-    return {
-      ...reg,
-      listing: reg.listing ?? null,
-    };
-  }
 
   private registrationPayload(reg: Registration): string {
     switch (reg.last_action) {
@@ -280,8 +290,8 @@ export class ZNS {
     const pkBytes = this.decodeBase64(pubkeyB64);
     if (sigBytes.length !== 64 || pkBytes.length !== 32) return false;
     try {
-      const key = await crypto.subtle.importKey("raw", pkBytes.buffer as ArrayBuffer, { name: "Ed25519" }, false, ["verify"]);
-      return crypto.subtle.verify("Ed25519", key, sigBytes.buffer as ArrayBuffer, new TextEncoder().encode(payload));
+      const message = new TextEncoder().encode(payload);
+      return await ed25519.verifyAsync(sigBytes, message, pkBytes);
     } catch {
       return false;
     }

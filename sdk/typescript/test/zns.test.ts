@@ -66,8 +66,8 @@ describe("ZNS.create", () => {
   });
 });
 
-describe("resolve", () => {
-  it("returns resolve result with listing", async () => {
+describe("resolveName", () => {
+  it("returns registration with listing", async () => {
     const reg = {
       name: "alice",
       address: "utest1addr",
@@ -82,10 +82,10 @@ describe("resolve", () => {
     globalThis.fetch = mockRpcSequence([mockStatus, reg]);
 
     const zns = await ZNS.create();
-    const result = await zns.resolve("alice");
+    const result = await zns.resolveName("alice");
 
     expect(result).not.toBeNull();
-    if (result && !Array.isArray(result)) {
+    if (result) {
       expect(result.name).toBe("alice");
       expect(result.address).toBe("utest1addr");
       expect(result.listing).not.toBeNull();
@@ -108,9 +108,9 @@ describe("resolve", () => {
     globalThis.fetch = mockRpcSequence([mockStatus, reg]);
 
     const zns = await ZNS.create();
-    const result = await zns.resolve("alice");
+    const result = await zns.resolveName("alice");
 
-    if (result && !Array.isArray(result)) {
+    if (result) {
       expect(result.pubkey).toBe("differentpubkeybase64=");
       expect(result.listing).toBeNull();
     }
@@ -119,7 +119,7 @@ describe("resolve", () => {
   it("returns null for unknown name", async () => {
     globalThis.fetch = mockRpcSequence([mockStatus, null]);
     const zns = await ZNS.create();
-    const result = await zns.resolve("doesnotexist");
+    const result = await zns.resolveName("doesnotexist");
     expect(result).toBeNull();
   });
 });
