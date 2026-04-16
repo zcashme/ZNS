@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ZNS, DEFAULT_URL, TESTNET_UIVK } from "../src/zns.js";
 
+// Valid testnet unified address (bech32m format)
+const VALID_TESTNET_ADDR = "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+
 const mockStatus = {
   synced_height: 3902500,
   admin_pubkey: "YCsjrC6I8UFsWwGJIpCQx9FI98Q4g3E7+8CQ3E8M9OE=",
   uivk: TESTNET_UIVK,
-  address: "utest1registry",
+  address: VALID_TESTNET_ADDR,
   registered: 42,
   listed: 3,
   pricing: {
@@ -45,7 +48,7 @@ describe("ZNS.create", () => {
     expect(zns.verified).toBe(true);
     expect(zns.adminPubkey).toBe(mockStatus.admin_pubkey);
     expect(zns.pricing).toEqual(mockStatus.pricing);
-    expect(zns.registryAddress).toBe("utest1registry");
+    expect(zns.registryAddress).toBe(VALID_TESTNET_ADDR);
   });
 
   it("throws on UIVK mismatch", async () => {
@@ -189,28 +192,30 @@ describe("action flows", () => {
   });
 
   describe("prepareClaim / completeClaim", () => {
+    const validTestnetAddr = "utest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+    
     it("prepareClaim returns payload, cost, and complete method", () => {
-      const result = zns.prepareClaim("alice", "utest1addr");
-      expect(result.payload).toBe("CLAIM:alice:utest1addr");
+      const result = zns.prepareClaim("alice", validTestnetAddr);
+      expect(result.payload).toBe(`CLAIM:alice:${validTestnetAddr}`);
       expect(result.cost).toBe(75_000_000);
       expect(typeof result.complete).toBe("function");
     });
 
     it("complete returns memo and uri", () => {
-      const action = zns.prepareClaim("alice", "utest1addr");
+      const action = zns.prepareClaim("alice", validTestnetAddr);
       const result = action.complete("sig123", "pubkey456");
-      expect(result.memo).toBe("ZNS:CLAIM:alice:utest1addr:sig123:pubkey456");
+      expect(result.memo).toBe(`ZNS:CLAIM:alice:${validTestnetAddr}:sig123:pubkey456`);
       expect(result.uri).toContain("memo=");
     });
 
     it("complete without userPubkey omits it", () => {
-      const action = zns.prepareClaim("alice", "utest1addr");
+      const action = zns.prepareClaim("alice", validTestnetAddr);
       const result = action.complete("sig123");
-      expect(result.memo).toBe("ZNS:CLAIM:alice:utest1addr:sig123");
+      expect(result.memo).toBe(`ZNS:CLAIM:alice:${validTestnetAddr}:sig123`);
     });
 
     it("throws on invalid name", () => {
-      expect(() => zns.prepareClaim("INVALID", "utest1addr")).toThrow("Invalid ZNS name");
+      expect(() => zns.prepareClaim("INVALID", validTestnetAddr)).toThrow("Invalid ZNS name");
     });
   });
 
@@ -243,21 +248,21 @@ describe("action flows", () => {
 
   describe("prepareUpdate / complete", () => {
     it("returns correct payload and memo", () => {
-      const pre = zns.prepareUpdate("alice", "utest1new", 3);
-      expect(pre.payload).toBe("UPDATE:alice:utest1new:3");
+      const pre = zns.prepareUpdate("alice", VALID_TESTNET_ADDR, 3);
+      expect(pre.payload).toBe(`UPDATE:alice:${VALID_TESTNET_ADDR}:3`);
 
       const post = pre.complete("dummySig");
-      expect(post.memo).toBe("ZNS:UPDATE:alice:utest1new:3:dummySig");
+      expect(post.memo).toBe(`ZNS:UPDATE:alice:${VALID_TESTNET_ADDR}:3:dummySig`);
     });
   });
 
   describe("prepareBuy / complete", () => {
     it("returns correct payload and memo", () => {
-      const pre = zns.prepareBuy("alice", "utest1buyer");
-      expect(pre.payload).toBe("BUY:alice:utest1buyer");
+      const pre = zns.prepareBuy("alice", VALID_TESTNET_ADDR);
+      expect(pre.payload).toBe(`BUY:alice:${VALID_TESTNET_ADDR}`);
 
       const post = pre.complete("dummySig");
-      expect(post.memo).toBe("ZNS:BUY:alice:utest1buyer:dummySig");
+      expect(post.memo).toBe(`ZNS:BUY:alice:${VALID_TESTNET_ADDR}:dummySig`);
     });
   });
 

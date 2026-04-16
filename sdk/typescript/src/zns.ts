@@ -93,16 +93,19 @@ export class ZNS {
     return this._verified;
   }
 
-  get adminPubkey(): string | null {
-    return this._adminPubkey;
+  /** The admin Ed25519 public key (base64). Always available after create(). */
+  get adminPubkey(): string {
+    return this._adminPubkey!;
   }
 
-  get pricing(): Pricing | null {
-    return this._pricing;
+  /** Current pricing configuration. Always available after create(). */
+  get pricing(): Pricing {
+    return this._pricing!;
   }
 
-  get registryAddress(): string | null {
-    return this._registryAddress;
+  /** The registry's Zcash Unified Address. Always available after create(). */
+  get registryAddress(): string {
+    return this._registryAddress!;
   }
 
   /** Resolve a ZNS name to its registration. Returns null if not registered. */
@@ -195,8 +198,10 @@ export class ZNS {
 
   prepareClaim(name: string, address: string): PreparedClaim {
     this.requireValidName(name);
+    if (!this.isValidUnifiedAddress(address)) {
+      throw new Error(`Invalid Zcash Unified Address: ${address}`);
+    }
     const cost = this.claimCost(name.length);
-    const registryAddress = this._registryAddress ?? "";
 
     return {
       name,
@@ -207,7 +212,7 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:CLAIM:${name}:${address}:${signature}:${userPubkey}`
           : `ZNS:CLAIM:${name}:${address}:${signature}`;
-        const uri = this.buildZcashUri(registryAddress, cost ?? undefined, memo);
+        const uri = this.buildZcashUri(this._registryAddress, cost ?? undefined, memo);
         return { memo, uri };
       },
     };
@@ -248,6 +253,9 @@ export class ZNS {
 
   prepareUpdate(name: string, newAddress: string, nonce: number): PreparedUpdate {
     this.requireValidName(name);
+    if (!this.isValidUnifiedAddress(newAddress)) {
+      throw new Error(`Invalid Zcash Unified Address: ${newAddress}`);
+    }
 
     return {
       name,
@@ -265,6 +273,9 @@ export class ZNS {
 
   prepareBuy(name: string, buyerAddress: string): PreparedBuy {
     this.requireValidName(name);
+    if (!this.isValidUnifiedAddress(buyerAddress)) {
+      throw new Error(`Invalid Zcash Unified Address: ${buyerAddress}`);
+    }
 
     return {
       name,
