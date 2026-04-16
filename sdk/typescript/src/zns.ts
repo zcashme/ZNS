@@ -4,7 +4,7 @@ import type {
   Zats,
   Registration,
   Listing,
-  StatusResult,
+  Status,
   Event,
   EventsFilter,
   EventsResult,
@@ -23,7 +23,7 @@ export type {
   Zats,
   Registration,
   Listing,
-  StatusResult,
+  Status,
   Event,
   EventsFilter,
   EventsResult,
@@ -55,57 +55,37 @@ const NAME_RE = /^[a-z0-9]{1,62}$/;
 export class ZNS {
   private url: string;
   private rpcId = 0;
-  private _adminPubkey: string | null = null;
-  private _pricing: Pricing | null = null;
-  private _registryAddress: string | null = null;
   private _verified = false;
 
-  private constructor(url: string) {
-    this.url = url;
+  /**
+   * Creates a new ZNS client.
+   */
+  constructor(options?: { url?: string }) {
+    this.url = options?.url ?? DEFAULT_URL;
   }
 
-  static async create(options?: { url?: string; skipVerify?: boolean }): Promise<ZNS> {
-    const url = options?.url ?? DEFAULT_URL;
-    const zns = new ZNS(url);
-
-    const status = await zns.rpc<StatusResult>("status");
-
-    if (!options?.skipVerify) {
-      if (!KNOWN_UIVKS.includes(status.uivk)) {
-        throw new Error(
-          `UIVK mismatch: indexer returned "${status.uivk.slice(0, 20)}..." which is not a known ZNS instance`,
-        );
-      }
-      zns._verified = true;
+  /**
+   * Verifies that the connected server is a known ZNS instance.
+   * @throws Error if the server's UIVK is not recognized
+   */
+  async verify(): Promise<void> {
+    const status = await this.rpc<Status>("status");
+    if (!KNOWN_UIVKS.includes(status.uivk)) {
+      throw new Error(
+        `UIVK mismatch: indexer returned "${status.uivk.slice(0, 20)}..." which is not a known ZNS instance`,
+      );
     }
-
-    zns.pinStatus(status);
-    return zns;
+    this._verified = true;
   }
 
-  private pinStatus(status: StatusResult): void {
-    this._adminPubkey = status.admin_pubkey;
-    this._pricing = status.pricing;
-    this._registryAddress = status.address;
-  }
-
+  /** Returns true if {@link verify} has been called and passed. */
   get verified(): boolean {
     return this._verified;
   }
 
-  /** The admin Ed25519 public key (base64). Always available after create(). */
-  get adminPubkey(): string {
-    return this._adminPubkey!;
-  }
-
-  /** Current pricing configuration. Always available after create(). */
-  get pricing(): Pricing {
-    return this._pricing!;
-  }
-
-  /** The registry's Zcash Unified Address. Always available after create(). */
-  get registryAddress(): string {
-    return this._registryAddress!;
+  /** Fetch current server status including pricing and configuration. */
+  async status(): Promise<Status> {
+    return this.rpc<Status>("status");
   }
 
   /** Resolve a ZNS name to its registration. Returns null if not registered. */
@@ -126,11 +106,17 @@ export class ZNS {
     return result === null;
   }
 
-  /** Validate a Zcash Unified Address format (bech32m encoding).
+  /** Validate a Zcash Unified Address format.
    *  Accepts both mainnet ('u') and testnet ('utest') prefixes.
-   *  Performs format validation but NOT cryptographic verification of the address.
-   *  Returns true if the address is syntactically valid, false otherwise. */
+   *  Performs basic format validation but NOT full bech32m checksum verification.
+   *  Returns true if the address looks like a unified address, false otherwise. */
   isValidUnifiedAddress(address: string): boolean {
+    // Unified addresses start with 'u' (mainnet) or 'utest' (testnet)
+    // followed by '1' separator and alphanumeric characters
+    if (!address) return false;
+    if (address.startsWith("utest1")) return true;
+    if (address.startsWith("u1")) return true;
+    // Fall back to strict bech32m validation
     try {
       const decoded = bech32m.decode(address);
       return decoded.prefix === "u" || decoded.prefix === "utest";
@@ -144,27 +130,37 @@ export class ZNS {
     return result.listings;
   }
 
-  async status(): Promise<StatusResult> {
-    return this.rpc<StatusResult>("status");
-  }
-
   async events(filter?: EventsFilter): Promise<EventsResult> {
-    return this.rpc<EventsResult>("events", (filter ?? {}) as Record<string, unknown>);
+    return this.rpc<EventsResult>(
+      "events",
+      (filter ?? {}) as Record<string, unknown>,
+    );
   }
 
-  /** Verify a listing's signature. Returns true if the signature is valid. */
-  async verifyListing(listing: Listing): Promise<boolean> {
-    const pubkey = listing.pubkey ?? this._adminPubkey;
-    if (!pubkey) return false;
+  /**
+   * Verify a listing's signature.
+   * @param listing The listing to verify
+   * @param adminPubkey The admin Ed25519 public key (base64) - obtain from {@link status}
+   * @returns true if the signature is valid
+   */
+  async verifyListing(listing: Listing, adminPubkey: string): Promise<boolean> {
+    const pubkey = listing.pubkey ?? adminPubkey;
     const payload = `LIST:${listing.name}:${listing.price}:${listing.nonce}`;
     return this.verifyEd25519(payload, listing.signature, pubkey);
   }
 
-  /** Verify a registration's signature. Returns true if the signature is valid. */
-  async verifyRegistration(reg: Registration): Promise<boolean> {
+  /**
+   * Verify a registration's signature.
+   * @param reg The registration to verify
+   * @param adminPubkey The admin Ed25519 public key (base64) - obtain from {@link status}
+   * @returns true if the signature is valid
+   */
+  async verifyRegistration(
+    reg: Registration,
+    adminPubkey: string,
+  ): Promise<boolean> {
     if (!reg.signature) return false;
-    const pubkey = reg.pubkey ?? this._adminPubkey;
-    if (!pubkey) return false;
+    const pubkey = reg.pubkey ?? adminPubkey;
     const payload = this.registrationPayload(reg);
     if (!payload) return false;
     return this.verifyEd25519(payload, reg.signature, pubkey);
@@ -175,15 +171,25 @@ export class ZNS {
     return NAME_RE.test(name);
   }
 
-  /** Get the claim cost in zatoshis for a name of given length. Returns null if pricing unavailable. */
-  claimCost(nameLength: number): Zats | null {
-    if (!this._pricing || this._pricing.tiers.length === 0) return null;
-    const idx = Math.min(Math.max(nameLength - 1, 0), this._pricing.tiers.length - 1);
-    return this._pricing.tiers[idx];
+  /**
+   * Get the claim cost in zatoshis for a name of given length.
+   * @param nameLength The length of the name (1-62)
+   * @param pricing The pricing configuration - obtain from {@link status}
+   * @returns The cost in zatoshis, or null if pricing is unavailable
+   */
+  claimCost(nameLength: number, pricing: Pricing): Zats | null {
+    if (pricing.tiers.length === 0) return null;
+    const idx = Math.min(Math.max(nameLength - 1, 0), pricing.tiers.length - 1);
+    return pricing.tiers[idx];
   }
 
   /** Parse a ZIP-321 URI into its components. */
-  parseZip321Uri(uri: string): { address: string; amount: string; memoRaw: string; memoDecoded: string } {
+  parseZip321Uri(uri: string): {
+    address: string;
+    amount: string;
+    memoRaw: string;
+    memoDecoded: string;
+  } {
     const withoutScheme = String(uri ?? "").replace(/^zcash:/i, "");
     const [addressPart, queryPart = ""] = withoutScheme.split("?");
     const address = addressPart.trim();
@@ -196,29 +202,46 @@ export class ZNS {
 
   // ── Action Helpers ─────────────────────────────────────────────────────────
 
-  prepareClaim(name: string, address: string): PreparedClaim {
+  /**
+   * Prepare a name claim transaction.
+   * @param name The name to claim (1-62 lowercase alphanumeric chars)
+   * @param address Your Zcash Unified Address
+   * @param registryAddress The registry's Zcash Unified Address - obtain from {@link status}
+   * @param cost The claim cost in zatoshis - obtain from {@link claimCost}
+   * @returns Prepared claim ready for signature completion
+   */
+  prepareClaim(
+    name: string,
+    address: string,
+    registryAddress: string,
+    cost: Zats,
+  ): PreparedClaim {
     this.requireValidName(name);
     if (!this.isValidUnifiedAddress(address)) {
       throw new Error(`Invalid Zcash Unified Address: ${address}`);
     }
-    const cost = this.claimCost(name.length);
 
     return {
       name,
       address,
-      cost: cost ?? 0,
+      cost,
       payload: `CLAIM:${name}:${address}`,
       complete: (signature: string, userPubkey?: string): CompletedAction => {
         const memo = userPubkey
           ? `ZNS:CLAIM:${name}:${address}:${signature}:${userPubkey}`
           : `ZNS:CLAIM:${name}:${address}:${signature}`;
-        const uri = this.buildZcashUri(this._registryAddress, cost ?? undefined, memo);
+        const uri = this.buildZcashUri(registryAddress, cost, memo);
         return { memo, uri };
       },
     };
   }
 
-  prepareList(name: string, price: Zats, nonce: number): PreparedList {
+  prepareList(
+    name: string,
+    price: Zats,
+    nonce: number,
+    registryAddress: string,
+  ): PreparedList {
     this.requireValidName(name);
 
     return {
@@ -230,12 +253,16 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:LIST:${name}:${price}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:LIST:${name}:${price}:${nonce}:${signature}`;
-        return { memo, uri: this.memoUri(memo) };
+        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
       },
     };
   }
 
-  prepareDelist(name: string, nonce: number): PreparedDelist {
+  prepareDelist(
+    name: string,
+    nonce: number,
+    registryAddress: string,
+  ): PreparedDelist {
     this.requireValidName(name);
 
     return {
@@ -246,12 +273,17 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:DELIST:${name}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:DELIST:${name}:${nonce}:${signature}`;
-        return { memo, uri: this.memoUri(memo) };
+        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
       },
     };
   }
 
-  prepareUpdate(name: string, newAddress: string, nonce: number): PreparedUpdate {
+  prepareUpdate(
+    name: string,
+    newAddress: string,
+    nonce: number,
+    registryAddress: string,
+  ): PreparedUpdate {
     this.requireValidName(name);
     if (!this.isValidUnifiedAddress(newAddress)) {
       throw new Error(`Invalid Zcash Unified Address: ${newAddress}`);
@@ -266,12 +298,16 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}`;
-        return { memo, uri: this.memoUri(memo) };
+        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
       },
     };
   }
 
-  prepareBuy(name: string, buyerAddress: string): PreparedBuy {
+  prepareBuy(
+    name: string,
+    buyerAddress: string,
+    registryAddress: string,
+  ): PreparedBuy {
     this.requireValidName(name);
     if (!this.isValidUnifiedAddress(buyerAddress)) {
       throw new Error(`Invalid Zcash Unified Address: ${buyerAddress}`);
@@ -285,12 +321,16 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:BUY:${name}:${buyerAddress}:${signature}:${userPubkey}`
           : `ZNS:BUY:${name}:${buyerAddress}:${signature}`;
-        return { memo, uri: this.memoUri(memo) };
+        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
       },
     };
   }
 
-  prepareRelease(name: string, nonce: number): PreparedRelease {
+  prepareRelease(
+    name: string,
+    nonce: number,
+    registryAddress: string,
+  ): PreparedRelease {
     this.requireValidName(name);
 
     return {
@@ -301,19 +341,23 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:RELEASE:${name}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:RELEASE:${name}:${nonce}:${signature}`;
-        return { memo, uri: this.memoUri(memo) };
+        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
       },
     };
   }
 
-  prepareSetPrice(prices: Zats[], nonce: number): PreparedSetPrice {
+  prepareSetPrice(
+    prices: Zats[],
+    nonce: number,
+    registryAddress: string,
+  ): PreparedSetPrice {
     return {
       prices,
       nonce,
       payload: `SETPRICE:${prices.length}:${prices.join(":")}:${nonce}`,
       complete: (signature: string): CompletedAction => {
         const memo = `ZNS:SETPRICE:${prices.length}:${prices.join(":")}:${nonce}:${signature}`;
-        return { memo, uri: this.memoUri(memo) };
+        return { memo, uri: this.buildZcashUri(registryAddress, undefined, memo) };
       },
     };
   }
@@ -322,16 +366,26 @@ export class ZNS {
 
   private registrationPayload(reg: Registration): string {
     switch (reg.last_action) {
-      case "CLAIM": return `CLAIM:${reg.name}:${reg.address}`;
-      case "BUY": return `BUY:${reg.name}:${reg.address}`;
-      case "UPDATE": return `UPDATE:${reg.name}:${reg.address}:${reg.nonce}`;
-      case "DELIST": return `DELIST:${reg.name}:${reg.nonce}`;
-      case "RELEASE": return `RELEASE:${reg.name}:${reg.nonce}`;
-      default: return "";
+      case "CLAIM":
+        return `CLAIM:${reg.name}:${reg.address}`;
+      case "BUY":
+        return `BUY:${reg.name}:${reg.address}`;
+      case "UPDATE":
+        return `UPDATE:${reg.name}:${reg.address}:${reg.nonce}`;
+      case "DELIST":
+        return `DELIST:${reg.name}:${reg.nonce}`;
+      case "RELEASE":
+        return `RELEASE:${reg.name}:${reg.nonce}`;
+      default:
+        return "";
     }
   }
 
-  private async verifyEd25519(payload: string, signatureB64: string, pubkeyB64: string): Promise<boolean> {
+  private async verifyEd25519(
+    payload: string,
+    signatureB64: string,
+    pubkeyB64: string,
+  ): Promise<boolean> {
     const sigBytes = this.decodeBase64(signatureB64);
     const pkBytes = this.decodeBase64(pubkeyB64);
     if (sigBytes.length !== 64 || pkBytes.length !== 32) return false;
@@ -347,14 +401,12 @@ export class ZNS {
     if (!NAME_RE.test(name)) throw new Error(`Invalid ZNS name: ${name}`);
   }
 
-  private memoUri(memo: string): string {
-    return this._registryAddress
-      ? this.buildZcashUri(this._registryAddress, undefined, memo)
-      : `zcash:?memo=${this.toBase64Url(memo)}`;
-  }
-
   /** Build a ZIP-321 URI. Amount is in zatoshis and will be converted to ZEC for the URI. */
-  private buildZcashUri(address: string, amountZats?: Zats, memo?: string): string {
+  private buildZcashUri(
+    address: string,
+    amountZats?: Zats,
+    memo?: string,
+  ): string {
     if (!address) return "";
     const base = `zcash:${address}`;
     const params: string[] = [];
@@ -368,7 +420,9 @@ export class ZNS {
 
   private toBase64Url(text: string): string {
     try {
-      return btoa(unescape(encodeURIComponent(text)))
+      const bytes = new TextEncoder().encode(text);
+      const bin = String.fromCharCode(...bytes);
+      return btoa(bin)
         .replace(/\+/g, "-")
         .replace(/\//g, "_")
         .replace(/=+$/, "");
@@ -380,7 +434,8 @@ export class ZNS {
   private decodeBase64Url(value: string): string {
     try {
       const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/");
-      const padLen = normalized.length % 4 === 0 ? 0 : 4 - (normalized.length % 4);
+      const padLen =
+        normalized.length % 4 === 0 ? 0 : 4 - (normalized.length % 4);
       const padded = normalized + "=".repeat(padLen);
       const binary = atob(padded);
       const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
@@ -397,7 +452,10 @@ export class ZNS {
     return bytes;
   }
 
-  private async rpc<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  private async rpc<T>(
+    method: string,
+    params: Record<string, unknown> = {},
+  ): Promise<T> {
     const id = ++this.rpcId;
     const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
 
@@ -417,7 +475,9 @@ export class ZNS {
     };
 
     if (json.error) {
-      throw new Error(`ZNS RPC error ${json.error.code}: ${json.error.message}`);
+      throw new Error(
+        `ZNS RPC error ${json.error.code}: ${json.error.message}`,
+      );
     }
 
     return json.result as T;

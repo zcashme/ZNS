@@ -44,7 +44,7 @@ export interface Pricing {
   tiers: Zats[];
 }
 
-export interface StatusResult {
+export interface Status {
   synced_height: number;
   admin_pubkey: string;
   uivk: string;
