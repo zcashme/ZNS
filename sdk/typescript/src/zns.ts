@@ -1,7 +1,6 @@
 import type {
   Registration,
   Listing,
-  ResolveResult,
   StatusResult,
   Event,
   EventsFilter,
@@ -14,7 +13,6 @@ import type {
 export type {
   Registration,
   Listing,
-  ResolveResult,
   StatusResult,
   Event,
   EventsFilter,
@@ -91,13 +89,13 @@ export class ZNS {
     return this._registryAddress;
   }
 
-  async resolve(query: string): Promise<ResolveResult | ResolveResult[] | null> {
+  async resolve(query: string): Promise<Registration | Registration[] | null> {
     const raw = await this.rpc<Registration | Registration[] | null>("resolve", { query });
     if (raw === null) return null;
     if (Array.isArray(raw)) {
-      return raw.map(r => this.toResolveResult(r));
+      return raw.map(r => this.normalizeRegistration(r));
     }
-    return this.toResolveResult(raw);
+    return this.normalizeRegistration(raw);
   }
 
   async isAvailable(name: string): Promise<boolean> {
@@ -258,16 +256,10 @@ export class ZNS {
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
-  private toResolveResult(reg: Registration): ResolveResult {
+  private normalizeRegistration(reg: Registration): Registration {
+    // Ensure listing is null if missing from RPC response
     return {
-      name: reg.name,
-      address: reg.address,
-      txid: reg.txid,
-      height: reg.height,
-      nonce: reg.nonce,
-      signature: reg.signature,
-      last_action: reg.last_action,
-      pubkey: reg.pubkey,
+      ...reg,
       listing: reg.listing ?? null,
     };
   }

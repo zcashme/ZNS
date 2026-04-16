@@ -7,10 +7,12 @@ export interface Registration {
   signature: string | null;
   last_action: LastAction;
   pubkey: string | null;
-  listing?: Listing;
+  listing: Listing | null;
 }
 
 export type LastAction = "CLAIM" | "BUY" | "UPDATE" | "DELIST" | "RELEASE";
+
+export type Action = "CLAIM" | "LIST" | "DELIST" | "RELEASE" | "UPDATE" | "BUY" | "SETPRICE";
 
 export interface Listing {
   name: string;
@@ -20,18 +22,6 @@ export interface Listing {
   height: number;
   signature: string;
   pubkey: string | null;
-}
-
-export interface ResolveResult {
-  name: string;
-  address: string;
-  txid: string;
-  height: number;
-  nonce: number;
-  signature: string | null;
-  last_action: LastAction;
-  pubkey: string | null;
-  listing: Listing | null;
 }
 
 export interface Pricing {
@@ -62,8 +52,6 @@ export interface Event {
   signature: string | null;
   pubkey: string | null;
 }
-
-export type Action = "CLAIM" | "LIST" | "DELIST" | "RELEASE" | "UPDATE" | "BUY" | "SETPRICE";
 
 export interface EventsFilter {
   name?: string;
