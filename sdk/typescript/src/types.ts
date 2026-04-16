@@ -20,6 +20,7 @@ export interface Listing {
   txid: string;
   height: number;
   signature: string;
+  pubkey: string | null;
 }
 
 export interface ResolveResult extends Registration {

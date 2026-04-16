@@ -261,17 +261,21 @@ export class ZNS {
   }
 
   private async verifyListing(listing: Listing): Promise<VerifiedListing> {
-    const verified = this._adminPubkey
-      ? await this.verifyEd25519(this.listingPayload(listing), listing.signature, this._adminPubkey)
+    // Use listing's pubkey for sovereign, admin pubkey otherwise
+    const pubkey = listing.pubkey ?? this._adminPubkey;
+    const verified = pubkey
+      ? await this.verifyEd25519(this.listingPayload(listing), listing.signature, pubkey)
       : false;
     return { ...listing, verified };
   }
 
   private async enrichListing(listing: Listing): Promise<VerifiedListing> {
+    // Use listing's pubkey for sovereign, admin pubkey otherwise
+    const pubkey = listing.pubkey ?? this._adminPubkey;
     let verified = false;
-    if (this._adminPubkey) {
+    if (pubkey) {
       const payload = this.listingPayload(listing);
-      verified = await this.verifyEd25519(payload, listing.signature, this._adminPubkey);
+      verified = await this.verifyEd25519(payload, listing.signature, pubkey);
     }
     return { ...listing, verified };
   }
