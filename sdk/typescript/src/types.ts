@@ -7,6 +7,8 @@ export interface Registration {
   signature: string | null;
   last_action: LastAction;
   pubkey: string | null;
+  /** Raw listing from indexer before SDK enrichment. SDKs add `verified` field after signature verification. */
+  listing?: Listing;
 }
 
 export type LastAction = "CLAIM" | "BUY" | "UPDATE" | "DELIST" | "RELEASE";
@@ -21,7 +23,7 @@ export interface Listing {
 }
 
 export interface ResolveResult extends Registration {
-  listing: Listing | null;
+  listing: VerifiedListing | null;
   verified: boolean;
   sovereign: boolean;
 }

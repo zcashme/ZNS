@@ -1,6 +1,6 @@
 {
   "name": "zcashname-sdk",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "type": "module",
   "description": "TypeScript SDK for the Zcash Name System (ZNS)",
   "main": "dist/zns.cjs",
@@ -14,7 +14,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "tsup src/zns.ts --format cjs,esm --dts",

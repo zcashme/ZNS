@@ -242,17 +242,29 @@ export class ZNS {
     return { address, amount, memoRaw, memoDecoded };
   }
 
-  private async enrichRegistration(reg: Registration): Promise<ResolveResult> {
+  private async enrichRegistration(raw: Registration & { listing?: Listing }): Promise<ResolveResult> {
+    const { listing: rawListing, ...reg } = raw;
+    
     const sovereign = reg.pubkey != null && reg.pubkey !== this._adminPubkey;
-    let verified = false;
-    if (reg.signature && this._adminPubkey) {
-      const payload = this.registrationPayload(reg);
-      if (payload) {
-        const pubkey = sovereign ? reg.pubkey! : this._adminPubkey;
-        verified = await this.verifyEd25519(payload, reg.signature, pubkey);
-      }
-    }
-    return { ...reg, listing: null, verified, sovereign };
+    const verified = await this.verifyRegistration(reg, sovereign);
+    const listing = rawListing ? await this.verifyListing(rawListing) : null;
+    
+    return { ...reg, listing, verified, sovereign };
+  }
+
+  private async verifyRegistration(reg: Registration, sovereign: boolean): Promise<boolean> {
+    if (!reg.signature || !this._adminPubkey) return false;
+    const payload = this.registrationPayload(reg);
+    if (!payload) return false;
+    const pubkey = sovereign ? reg.pubkey! : this._adminPubkey;
+    return this.verifyEd25519(payload, reg.signature, pubkey);
+  }
+
+  private async verifyListing(listing: Listing): Promise<VerifiedListing> {
+    const verified = this._adminPubkey
+      ? await this.verifyEd25519(this.listingPayload(listing), listing.signature, this._adminPubkey)
+      : false;
+    return { ...listing, verified };
   }
 
   private async enrichListing(listing: Listing): Promise<VerifiedListing> {
