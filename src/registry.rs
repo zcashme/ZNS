@@ -311,30 +311,6 @@ impl Registry {
             .ok()
     }
 
-    pub fn resolve_by_address(&self, address: &str) -> Vec<Registration> {
-        let mut stmt = match self.db.prepare(
-            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey FROM registrations WHERE ua = ?1",
-        ) {
-            Ok(s) => s,
-            Err(_) => return vec![],
-        };
-        stmt.query_map([address], |row| {
-            Ok(Registration {
-                name: row.get(0)?,
-                address: row.get(1)?,
-                txid: row.get(2)?,
-                height: row.get::<_, i64>(3)? as u64,
-                nonce: row.get::<_, i64>(4)? as u64,
-                signature: row.get(5)?,
-                last_action: row.get(6)?,
-                pubkey: row.get(7)?,
-            })
-        })
-        .unwrap_or_else(|_| panic!("query failed"))
-        .filter_map(|r| r.ok())
-        .collect()
-    }
-
     pub fn get_listing(&self, name: &str) -> Option<Listing> {
         self.db
             .query_row(
@@ -353,31 +329,6 @@ impl Registry {
                 },
             )
             .ok()
-    }
-
-    pub fn list_for_sale(&self) -> Vec<Listing> {
-        let mut stmt = match self.db.prepare(
-            "SELECT l.name, l.price, l.nonce, l.txid, l.height, l.signature, l.pubkey
-             FROM listings l
-             ORDER BY l.height DESC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return vec![],
-        };
-        stmt.query_map([], |row| {
-            Ok(Listing {
-                name: row.get(0)?,
-                price: row.get::<_, i64>(1)? as u64,
-                nonce: row.get::<_, i64>(2)? as u64,
-                txid: row.get(3)?,
-                height: row.get::<_, i64>(4)? as u64,
-                signature: row.get(5)?,
-                pubkey: row.get(6)?,
-            })
-        })
-        .unwrap_or_else(|_| panic!("query failed"))
-        .filter_map(|r| r.ok())
-        .collect()
     }
 
     pub fn count_registrations(&self) -> u64 {
