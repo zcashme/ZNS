@@ -188,18 +188,20 @@ describe("isAvailable", () => {
 });
 
 describe("listings", () => {
-  it("returns raw listings", async () => {
+  it("returns listings with total", async () => {
     const listings = {
       listings: [
         { name: "bob", price: 100_000, nonce: 1, txid: "tx1", height: 200, signature: "sig1", pubkey: null },
       ],
+      total: 1,
     };
     globalThis.fetch = mockRpc(listings);
     const zns = new ZNS();
     const result = await zns.listings();
-    expect(result).toHaveLength(1);
-    expect(result[0].name).toBe("bob");
-    expect(result[0].pubkey).toBeNull();
+    expect(result.listings).toHaveLength(1);
+    expect(result.listings[0].name).toBe("bob");
+    expect(result.listings[0].pubkey).toBeNull();
+    expect(result.total).toBe(1);
   });
 });
 
