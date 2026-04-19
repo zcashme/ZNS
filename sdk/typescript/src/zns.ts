@@ -115,9 +115,24 @@ export class ZNS {
     return this.rpc<Registration | null>("resolve", { query: name });
   }
 
-  /** Resolve a Zcash Unified Address to all names pointing to it. Returns empty array if none. */
-  async resolveAddress(address: string): Promise<Registration[]> {
-    return this.rpc<Registration[]>("resolve", { query: address });
+  /** Resolve a Zcash Unified Address to all names pointing to it. Returns empty array if none.
+   *  Supports pagination with limit (default 50, max 500) and offset (default 0). */
+  async resolveAddress(address: string, limit?: number, offset?: number): Promise<Registration[]> {
+    return this.rpc<Registration[]>("resolve", {
+      query: address,
+      limit,
+      offset,
+    });
+  }
+
+  /** List all registered names. Useful for explorers or browsers.
+   *  Supports pagination with limit (default 50, max 500) and offset (default 0). */
+  async listAllRegistrations(limit?: number, offset?: number): Promise<Registration[]> {
+    return this.rpc<Registration[]>("resolve", {
+      query: "",
+      limit,
+      offset,
+    });
   }
 
   /** Check if a name is available for registration.
@@ -147,9 +162,12 @@ export class ZNS {
     }
   }
 
-  async listings(): Promise<Listing[]> {
-    const result = await this.rpc<{ listings: Listing[] }>("list_for_sale");
-    return result.listings;
+  async listings(limit?: number, offset?: number): Promise<{ listings: Listing[]; total: number }> {
+    const result = await this.rpc<{ listings: Listing[]; total: number }>("listings", {
+      limit,
+      offset,
+    });
+    return result;
   }
 
   async events(filter?: EventsFilter): Promise<EventsResult> {

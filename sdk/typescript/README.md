@@ -72,20 +72,35 @@ console.log("Memo:", memo);
 ## Reading Data
 
 ```ts
-// Resolve name → address
+// Resolve name → address (single lookup)
 const reg = await zns.resolveName("alice");
 
-// Resolve address → names (reverse lookup)
+// Resolve address → names (reverse lookup) - supports pagination
 const names = await zns.resolveAddress("u1qqlzrf9...");
+
+// Paginated address lookup (get next 50 names starting from position 50)
+const namesPage2 = await zns.resolveAddress("u1qqlzrf9...", 50, 50);
+
+// List all registered names (paginated) - useful for explorers
+const allNames = await zns.listAllRegistrations();
+
+// Paginated list (first 100 registrations)
+const first100 = await zns.listAllRegistrations(100, 0);
 
 // Check availability
 const available = await zns.isAvailable("bob");
 
-// Get all listings
+// Get marketplace listings - supports pagination
 const listings = await zns.listings();
 
-// Query events
+// Paginated listings (get 50 listings starting from position 100)
+const listingsPage3 = await zns.listings(50, 100);
+
+// Query events with pagination
 const { events, total } = await zns.events({ action: "CLAIM", limit: 10 });
+
+// Next page of events
+const nextPage = await zns.events({ action: "CLAIM", limit: 10, offset: 10 });
 
 // Get current pricing from status
 const status = await zns.status();
