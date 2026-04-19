@@ -18,20 +18,41 @@
     {
       "name": "resolve",
       "summary": "Look up a name or address registration",
-      "description": "Resolves a ZNS registration by name or by Zcash unified address. If the query is a valid Zcash address, returns an array of all registrations bound to that address (one address may own multiple names). If the query is a name, returns a single registration object or null if not found.",
+      "description": "Resolves a ZNS registration by name or by Zcash unified address. If the query is a valid Zcash address, returns an array of all registrations bound to that address (one address may own multiple names). If the query is a name, returns a single registration object or null if not found. An empty string query returns all registrations, paginated.",
       "params": [
         {
           "name": "query",
           "required": true,
           "schema": {
             "type": "string",
-            "description": "A ZNS name (e.g. \"alice\") or a Zcash unified address"
+            "description": "A ZNS name (e.g. \"alice\"), a Zcash unified address, or an empty string to return all registrations"
+          }
+        },
+        {
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "type": "number",
+            "description": "Maximum number of results to return (default: 50, max: 500)",
+            "default": 50,
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        {
+          "name": "offset",
+          "required": false,
+          "schema": {
+            "type": "number",
+            "description": "Number of results to skip for pagination (default: 0)",
+            "default": 0,
+            "minimum": 0
           }
         }
       ],
       "result": {
         "name": "registration",
-        "description": "For name queries: a single ResolveResult or null. For address queries: an array of ResolveResult.",
+        "description": "For name queries: single ResolveResult or null. For address or empty queries: array of ResolveResult",
         "schema": {
           "oneOf": [
             { "$ref": "#/components/schemas/ResolveResult" },
@@ -140,14 +161,36 @@
       ]
     },
     {
-      "name": "list_for_sale",
-      "summary": "Get all names currently listed for sale",
+      "name": "listings",
+      "summary": "Get names currently listed for sale with pagination",
       "description": "Returns every name that has an active marketplace listing, ordered by block height descending (newest first). Prices are in zatoshis.",
-      "params": [],
+      "params": [
+        {
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "type": "number",
+            "description": "Maximum number of results to return (default: 50, max: 500)",
+            "default": 50,
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        {
+          "name": "offset",
+          "required": false,
+          "schema": {
+            "type": "number",
+            "description": "Number of results to skip for pagination (default: 0)",
+            "default": 0,
+            "minimum": 0
+          }
+        }
+      ],
       "result": {
         "name": "listings",
         "schema": {
-          "$ref": "#/components/schemas/ListForSaleResult"
+          "$ref": "#/components/schemas/ListingsResult"
         }
       },
       "examples": [
@@ -470,6 +513,25 @@
             "type": "array",
             "items": { "$ref": "#/components/schemas/Listing" },
             "description": "All active listings, newest first"
+          },
+          "total": {
+            "type": "number",
+            "description": "Total count of listings"
+          }
+        }
+      },
+      "ListingsResult": {
+        "type": "object",
+        "required": ["listings"],
+        "properties": {
+          "listings": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Listing" },
+            "description": "Paginated active listings, newest first"
+          },
+          "total": {
+            "type": "number",
+            "description": "Total count of listings"
           }
         }
       },
