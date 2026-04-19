@@ -396,6 +396,82 @@ impl Registry {
             .unwrap_or(0)
     }
 
+    pub fn count_registrations_for_address(&self, address: &str) -> u64 {
+        self.db
+            .query_row(
+                "SELECT COUNT(*) FROM registrations WHERE ua = ?1",
+                [address],
+                |row| Ok(row.get::<_, i64>(0)? as u64),
+            )
+            .unwrap_or(0)
+    }
+
+    pub fn list_registrations(&self, limit: u64, offset: u64, total: u64) -> (Vec<Registration>, u64) {
+        let mut stmt = match self.db.prepare(
+            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey 
+             FROM registrations 
+             ORDER BY height DESC LIMIT ?1 OFFSET ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return (vec![], total),
+        };
+        let rows = stmt.query_map([limit as i64, offset as i64], |row| {
+            Ok(Registration {
+                name: row.get(0)?,
+                address: row.get(1)?,
+                txid: row.get(2)?,
+                height: row.get::<_, i64>(3)? as u64,
+                nonce: row.get::<_, i64>(4)? as u64,
+                signature: row.get(5)?,
+                last_action: row.get(6)?,
+                pubkey: row.get(7)?,
+            })
+        });
+        let registrations = match rows {
+            Ok(r) => r.filter_map(|r| r.ok()).collect(),
+            Err(_) => vec![],
+        };
+        (registrations, total)
+    }
+
+    pub fn resolve_by_address_paginated(
+        &self,
+        address: &str,
+        limit: u64,
+        offset: u64,
+        total: u64,
+    ) -> (Vec<Registration>, u64) {
+        let mut stmt = match self.db.prepare(
+            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey 
+             FROM registrations 
+             WHERE ua = ?1 
+             ORDER BY height DESC LIMIT ?2 OFFSET ?3",
+        ) {
+            Ok(s) => s,
+            Err(_) => return (vec![], total),
+        };
+        let rows = stmt.query_map(
+            rusqlite::params![address, limit as i64, offset as i64],
+            |row| {
+                Ok(Registration {
+                    name: row.get(0)?,
+                    address: row.get(1)?,
+                    txid: row.get(2)?,
+                    height: row.get::<_, i64>(3)? as u64,
+                    nonce: row.get::<_, i64>(4)? as u64,
+                    signature: row.get(5)?,
+                    last_action: row.get(6)?,
+                    pubkey: row.get(7)?,
+                })
+            },
+        );
+        let registrations = match rows {
+            Ok(r) => r.filter_map(|r| r.ok()).collect(),
+            Err(_) => vec![],
+        };
+        (registrations, total)
+    }
+
     pub fn list_listings_paginated(&self, limit: u64, offset: u64, total: u64) -> (Vec<Listing>, u64) {
         let mut stmt = match self.db.prepare(
             "SELECT l.name, l.price, l.nonce, l.txid, l.height, l.signature, l.pubkey
