@@ -396,6 +396,33 @@ impl Registry {
             .unwrap_or(0)
     }
 
+    pub fn list_listings_paginated(&self, limit: u64, offset: u64, total: u64) -> (Vec<Listing>, u64) {
+        let mut stmt = match self.db.prepare(
+            "SELECT l.name, l.price, l.nonce, l.txid, l.height, l.signature, l.pubkey
+             FROM listings l
+             ORDER BY l.height DESC LIMIT ?1 OFFSET ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return (vec![], total),
+        };
+        let rows = stmt.query_map([limit as i64, offset as i64], |row| {
+            Ok(Listing {
+                name: row.get(0)?,
+                price: row.get::<_, i64>(1)? as u64,
+                nonce: row.get::<_, i64>(2)? as u64,
+                txid: row.get(3)?,
+                height: row.get::<_, i64>(4)? as u64,
+                signature: row.get(5)?,
+                pubkey: row.get(6)?,
+            })
+        });
+        let listings = match rows {
+            Ok(r) => r.filter_map(|r| r.ok()).collect(),
+            Err(_) => vec![],
+        };
+        (listings, total)
+    }
+
     pub fn get_pricing(&self) -> Option<Pricing> {
         self.db
             .query_row(

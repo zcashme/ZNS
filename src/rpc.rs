@@ -47,8 +47,9 @@ pub(crate) struct ListingEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ListForSaleResult {
+pub(crate) struct ListingsResult {
     listings: Vec<ListingEntry>,
+    total: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,10 +95,19 @@ pub(crate) struct EventsResult {
 #[rpc(server)]
 pub trait ZnsApi {
     #[method(name = "resolve", blocking)]
-    fn resolve(&self, query: String) -> RpcResult<Value>;
+    fn resolve(
+        &self,
+        query: String,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> RpcResult<Value>;
 
-    #[method(name = "list_for_sale", blocking)]
-    fn list_for_sale(&self) -> RpcResult<ListForSaleResult>;
+    #[method(name = "listings", blocking)]
+    fn listings(
+        &self,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> RpcResult<ListingsResult>;
 
     #[method(name = "status", blocking)]
     fn status(&self) -> RpcResult<StatusResult>;
@@ -116,32 +126,64 @@ pub trait ZnsApi {
 // ── Implementation ──────────────────────────────────────────────────────────
 
 impl ZnsApiServer for RpcState {
-    fn resolve(&self, query: String) -> RpcResult<Value> {
+    fn resolve(
+        &self,
+        query: String,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> RpcResult<Value> {
         let reg = open_registry(&self.db_path)?;
+        let limit = limit.unwrap_or(50).min(500);
+        let offset = offset.unwrap_or(0);
 
-        if query.parse::<ZcashAddress>().is_ok() {
-            let entries: Vec<RegistrationEntry> = reg
-                .resolve_by_address(&query)
+        // Empty query = list all registrations
+        if query.is_empty() {
+            let count = reg.count_registrations();
+            let registrations = reg.list_registrations(limit, offset, count);
+            let entries: Vec<RegistrationEntry> = registrations
                 .into_iter()
                 .map(|r| {
                     let listing = reg.get_listing(&r.name).map(listing_entry);
                     registration_entry(r, listing)
                 })
                 .collect();
-            Ok(serde_json::to_value(entries).unwrap())
-        } else {
-            let entry = reg.resolve_by_name(&query).map(|r| {
-                let listing = reg.get_listing(&r.name).map(listing_entry);
-                registration_entry(r, listing)
-            });
-            Ok(serde_json::to_value(entry).unwrap())
+            return Ok(serde_json::to_value(entries).unwrap());
         }
+
+        // Address query = list names for address
+        if query.parse::<ZcashAddress>().is_ok() {
+            let count = reg.count_registrations_for_address(&query);
+            let registrations =
+                reg.resolve_by_address_paginated(&query, limit, offset, count);
+            let entries: Vec<RegistrationEntry> = registrations
+                .into_iter()
+                .map(|r| {
+                    let listing = reg.get_listing(&r.name).map(listing_entry);
+                    registration_entry(r, listing)
+                })
+                .collect();
+            return Ok(serde_json::to_value(entries).unwrap());
+        }
+
+        // Exact name query = single registration
+        let entry = reg.resolve_by_name(&query).map(|r| {
+            let listing = reg.get_listing(&r.name).map(listing_entry);
+            registration_entry(r, listing)
+        });
+        Ok(serde_json::to_value(entry).unwrap())
     }
 
-    fn list_for_sale(&self) -> RpcResult<ListForSaleResult> {
+    fn listings(
+        &self,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> RpcResult<ListingsResult> {
         let reg = open_registry(&self.db_path)?;
-        let listings = reg.list_for_sale().into_iter().map(listing_entry).collect();
-        Ok(ListForSaleResult { listings })
+        let limit = limit.unwrap_or(50).min(500);
+        let offset = offset.unwrap_or(0);
+        let count = reg.count_listings();
+        let (listings, total) = reg.list_listings_paginated(limit, offset, count);
+        Ok(ListingsResult { listings, total })
     }
 
     fn status(&self) -> RpcResult<StatusResult> {
