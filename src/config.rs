@@ -23,7 +23,7 @@ pub const LWD_URL: &str = "https://zec.rocks:443";
 #[cfg(feature = "testnet")]
 pub const BIRTHDAY: u64 = 1_842_420; // NU5 activation
 #[cfg(feature = "mainnet")]
-pub const BIRTHDAY: u64 = 1_687_104; // NU5 activation
+pub const BIRTHDAY: u64 = 2_726_400; // NU6 activation (Nov 23, 2024)
 
 pub const DB_PATH: &str = "zns.db";
 pub const RPC_PORT: u16 = 3000;
