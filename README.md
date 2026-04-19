@@ -96,14 +96,31 @@ The admin pubkey for both is `ce86eb1b2030a4cde6b42d15a3850e9346dcf58820d2074378
 
 ### resolve
 
-Who is `alice`?
+Who is `alice`? Pass an empty string as the query to list **all** registrations, paginated with `limit`/`offset` just like the `listings` method.
 
 ```sh
+# Exact name lookup (returns object or null)
 curl -s https://light.zcash.me/zns-mainnet-test \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"resolve","params":{"query":"alice"}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"resolve","params":["alice"]}'
+
+# List all registrations (first 50 results)
+curl -s https://light.zcash.me/zns-mainnet-test \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"resolve","params":["", 50, 0]}'
+
+# List all registrations (next page)
+curl -s https://light.zcash.me/zns-mainnet-test \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"resolve","params":["", 50, 50]}'
+
+# Query by address to get all names for that address (paginated)
+curl -s https://light.zcash.me/zns-mainnet-test \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"resolve","params":["u1qqlzrf9...", 100, 0]}'
 ```
 
+Single name query returns an object or `null`:
 ```json
 {
   "name": "alice",
@@ -117,18 +134,45 @@ curl -s https://light.zcash.me/zns-mainnet-test \
 }
 ```
 
-- If `alice` were for sale, `listing` would be a `{price, nonce, signature, ...}` object instead of `null`
-- `pubkey` is `null` for admin-signed names; for sovereign names it is the base64 Ed25519 public key of the owner who controls the name
-- Query by address (not name) to get an array of every name resolving to it
+Listing all registrations or querying by address returns an array:
+```json
+[
+  {
+    "name": "alice",
+    "address": "u1qq...fff",
+    "height": 3901200,
+    ...
+  },
+  {
+    "name": "bob",
+    "address": "u1qq...aaa",
+    "height": 3901100,
+    ...
+  }
+]
+```
 
-### list_for_sale
+- **Empty query** (`""`) with `limit`/`offset` lists all registered names, useful for explorers or browsers.
+- **Exact name** query returns single object or `null` if not found.
+- **Address** query returns array of all names registered to that address (paginated).
+- If a name is listed for sale, `listing` contains details (`price`, `nonce`, `signature`).
+- `pubkey` is `null` for admin-signed names; for sovereign names it's the owner's Ed25519 public key.
+- Pagination follows the same `limit`/`offset` pattern as the `listings` and `events` endpoints.
 
-What's on the market?
+### listings
+
+What's on the market? Use `limit` and `offset` to paginate – defaults are `limit=50`, `offset=0`, and `limit` caps at 500.
 
 ```sh
+# First 50 listings (default)
 curl -s https://light.zcash.me/zns-mainnet-test \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"list_for_sale"}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"listings","params":[]}'
+
+# Next page (offset 50)
+curl -s https://light.zcash.me/zns-mainnet-test \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"listings","params":[50, 50]}'
 ```
 
 ```json
@@ -136,7 +180,8 @@ curl -s https://light.zcash.me/zns-mainnet-test \
   "listings": [
     { "name": "bob",   "price": 100000000, "nonce": 3, "height": 3901300, "signature": "..." },
     { "name": "carol", "price":  50000000, "nonce": 1, "height": 3901250, "signature": "..." }
-  ]
+  ],
+  "total": 2
 }
 ```
 
@@ -172,9 +217,25 @@ curl -s https://light.zcash.me/zns-mainnet-test \
 The full activity log. Filter by `name`, `action`, or `since_height`; paginate with `limit` / `offset`. Every event carries its signature, so the log is auditable years later.
 
 ```sh
+# Filter by name
 curl -s https://light.zcash.me/zns-mainnet-test \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"events","params":{"name":"alice"}}'
+
+# Paginate results (first 50 events, starting from position 0)
+curl -s https://light.zcash.me/zns-mainnet-test \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"events","params":{"name":"alice","limit":50,"offset":0}}'
+
+# Next page (events 51-100)
+curl -s https://light.zcash.me/zns-mainnet-test \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"events","params":{"name":"alice","limit":50,"offset":50}}'
+
+# Get all CLAIM actions
+curl -s https://light.zcash.me/zns-mainnet-test \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"events","params":{"action":"CLAIM","limit":100}}'
 ```
 
 ```json
@@ -188,6 +249,13 @@ curl -s https://light.zcash.me/zns-mainnet-test \
 ```
 
 `alice`'s whole story: claimed at block 3,901,200, listed half a ZEC later.
+
+**Pagination parameters:**
+- `limit`: Maximum number of results (default 50, max 500)
+- `offset`: Number of results to skip (default 0)
+- `total`: Total count of matching events (for UI pagination)
+
+All three endpoints (`resolve`, `listings`, `events`) follow the same pagination pattern.
 
 ## Claim a name
 
