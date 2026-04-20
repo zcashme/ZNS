@@ -347,16 +347,6 @@ impl Registry {
             .unwrap_or(0)
     }
 
-    pub fn count_registrations_for_address(&self, address: &str) -> u64 {
-        self.db
-            .query_row(
-                "SELECT COUNT(*) FROM registrations WHERE ua = ?1",
-                [address],
-                |row| Ok(row.get::<_, i64>(0)? as u64),
-            )
-            .unwrap_or(0)
-    }
-
     pub fn list_registrations(&self, limit: u64, offset: u64, total: u64) -> (Vec<Registration>, u64) {
         let mut stmt = match self.db.prepare(
             "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey 

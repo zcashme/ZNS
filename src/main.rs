@@ -115,17 +115,16 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
         }
         // For non-establishing actions, prove ownership: stored CLAIM/BUY sig
         // must verify against this user key (it was signed by them, not admin).
-        if !matches!(action.kind, ActionKind::Claim { .. } | ActionKind::Buy { .. }) {
+        if !matches!(action.kind, memo::ActionKind::Claim { .. } | memo::ActionKind::Buy { .. }) {
             let Some((stored_sig, stored_ua, stored_action)) =
                 reg.get_claim_sig_for_ownership(&action.name)
             else {
                 eprintln!("No claim record for sovereign action on '{}'", action.name);
                 return false;
             };
-            let payload = match stored_action.as_str() {
-                "CLAIM" => format!("CLAIM:{}:{stored_ua}", action.name),
-                "BUY" => format!("BUY:{}:{stored_ua}", action.name),
-                _ => return false,
+            let Some(payload) = memo::ownership_payload(&stored_action, &action.name, &stored_ua) else {
+                eprintln!("Invalid stored action '{}' for ownership proof on '{}'", stored_action, action.name);
+                return false;
             };
             if !memo::verify_signature(&payload, &stored_sig, &user_pk) {
                 eprintln!("Ownership proof failed for '{}'", action.name);
@@ -137,14 +136,13 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
         // Admin path: first check sovereignty, then verify sig.
         if !matches!(
             action.kind,
-            ActionKind::SetPrice { .. } | ActionKind::Claim { .. } | ActionKind::Buy { .. }
+            memo::ActionKind::SetPrice { .. } | memo::ActionKind::Claim { .. } | memo::ActionKind::Buy { .. }
         ) && let Some((stored_sig, stored_ua, stored_action)) =
             reg.get_claim_sig_for_ownership(&action.name)
         {
-            let payload = match stored_action.as_str() {
-                "CLAIM" => format!("CLAIM:{}:{stored_ua}", action.name),
-                "BUY" => format!("BUY:{}:{stored_ua}", action.name),
-                _ => return false,
+            let Some(payload) = memo::ownership_payload(&stored_action, &action.name, &stored_ua) else {
+                eprintln!("Invalid stored action '{}' for ownership proof on '{}'", stored_action, action.name);
+                return false;
             };
             if !memo::verify_signature(&payload, &stored_sig, admin_pubkey) {
                 eprintln!("Admin rejected: '{}' is sovereign", action.name);
@@ -182,7 +180,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 .join(":");
             match reg.store_pricing(*nonce, height, &tiers_str, txid, &action.signature) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, "SETPRICE", txid, height, None, None, Some(*nonce), None);
+                    let _ = reg.insert_event(&action, action.kind.label(), txid, height, None, None, Some(*nonce), None);
                     println!(
                         "Pricing set: {} tiers, nonce {nonce} (height {height})",
                         prices.len()
@@ -208,7 +206,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
             match reg.create_registration(&action.name, ua, &action.signature, txid, height, pubkey) {
                 Ok(true) => {
-                    let _ = reg.insert_event(&action, "CLAIM", txid, height, Some(ua), None, None, pubkey);
+                    let _ = reg.insert_event(&action, action.kind.label(), txid, height, Some(ua), None, None, pubkey);
                     println!(
                         "Claimed: {} → {ua} for {note_value} zats (height {height})",
                         action.name
@@ -232,7 +230,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 Ok(()) => {
                     let _ = reg.insert_event(
                         &action,
-                        "LIST",
+                        action.kind.label(),
                         txid,
                         height,
                         owner_ua.as_deref(),
@@ -256,7 +254,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
             match reg.delete_listing(&action.name, &action.signature) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, "DELIST", txid, height, None, None, Some(*nonce), pubkey);
+                    let _ = reg.insert_event(&action, action.kind.label(), txid, height, None, None, Some(*nonce), pubkey);
                     println!("Delisted: {} (height {height})", action.name)
                 }
                 Err(e) => eprintln!("DB error (delist): {e}"),
@@ -273,7 +271,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
             match reg.delete_registration(&action.name) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, "RELEASE", txid, height, None, None, Some(*nonce), pubkey);
+                    let _ = reg.insert_event(&action, action.kind.label(), txid, height, None, None, Some(*nonce), pubkey);
                     println!("Released: {} (height {height})", action.name)
                 }
                 Err(e) => eprintln!("DB error (release): {e}"),
@@ -286,7 +284,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
             match reg.update_address(&action.name, new_ua, &action.signature, txid, height) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, "UPDATE", txid, height, Some(new_ua), None, Some(*nonce), pubkey);
+                    let _ = reg.insert_event(&action, action.kind.label(), txid, height, Some(new_ua), None, Some(*nonce), pubkey);
                     println!("Updated: {} → {new_ua} (height {height})", action.name)
                 }
                 Err(e) => eprintln!("DB error (update): {e}"),
@@ -307,7 +305,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             match reg.process_buy(&action.name, buyer_ua, &action.signature, txid, height, pubkey) {
                 Ok(()) => {
                     let _ =
-                        reg.insert_event(&action, "BUY", txid, height, Some(buyer_ua), Some(price), None, pubkey);
+                        reg.insert_event(&action, action.kind.label(), txid, height, Some(buyer_ua), Some(price), None, pubkey);
                     println!(
                         "Sold: {} → {buyer_ua} for {price} zats (height {height})",
                         action.name

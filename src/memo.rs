@@ -23,6 +23,35 @@ pub enum ActionKind {
     SetPrice { prices: Vec<u64>, nonce: u64 },
 }
 
+impl ActionKind {
+    /// Returns the wire-format action label used in events and signing payloads.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ActionKind::Claim { .. } => "CLAIM",
+            ActionKind::List { .. } => "LIST",
+            ActionKind::Delist { .. } => "DELIST",
+            ActionKind::Release { .. } => "RELEASE",
+            ActionKind::Update { .. } => "UPDATE",
+            ActionKind::Buy { .. } => "BUY",
+            ActionKind::SetPrice { .. } => "SETPRICE",
+        }
+    }
+}
+
+/// Constructs the ownership payload for a CLAIM or BUY establishing action.
+///
+/// Ownership proofs verify that the stored signature from the original CLAIM or BUY
+/// still validates against a given key, proving sovereign control. The payload format
+/// is `CLAIM:{name}:{ua}` or `BUY:{name}:{ua}` — same as the signing payload for
+/// those actions (they have no nonce).
+pub fn ownership_payload(action: &str, name: &str, ua: &str) -> Option<String> {
+    match action {
+        "CLAIM" => Some(format!("CLAIM:{name}:{ua}")),
+        "BUY" => Some(format!("BUY:{name}:{ua}")),
+        _ => None,
+    }
+}
+
 // ── Validation ───────────────────────────────────────────────────────────────
 
 fn validate_ua(ua: &str) -> bool {
@@ -35,6 +64,42 @@ pub fn validate_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+// ── Signing payload construction (single source of truth) ────────────────────
+
+/// Returns the signing payload for a given action, per the ZNS namespace spec.
+///
+/// This is the canonical construction used for both signature verification
+/// and ownership proofs. The format is defined in NAMESPACE_SPEC.md §4:
+///
+/// | Action    | Signing payload format                    |
+/// |-----------|-----------------------------------------|
+/// | CLAIM     | `CLAIM:{name}:{ua}`                     |
+/// | LIST      | `LIST:{name}:{price}:{nonce}`           |
+/// | DELIST    | `DELIST:{name}:{nonce}`                  |
+/// | RELEASE   | `RELEASE:{name}:{nonce}`                 |
+/// | UPDATE    | `UPDATE:{name}:{new_ua}:{nonce}`         |
+/// | BUY       | `BUY:{name}:{buyer_ua}`                  |
+/// | SETPRICE  | `SETPRICE:{count}:{tier1}:...:{nonce}`  |
+pub fn signing_payload(action: &MemoAction) -> String {
+    match &action.kind {
+        ActionKind::Claim { ua } => format!("CLAIM:{}:{ua}", action.name),
+        ActionKind::List { price, nonce } => format!("LIST:{}:{price}:{nonce}", action.name),
+        ActionKind::Delist { nonce } => format!("DELIST:{}:{nonce}", action.name),
+        ActionKind::Release { nonce } => format!("RELEASE:{}:{nonce}", action.name),
+        ActionKind::Update { new_ua, nonce } => format!("UPDATE:{}:{new_ua}:{nonce}", action.name),
+        ActionKind::Buy { buyer_ua } => format!("BUY:{}:{buyer_ua}", action.name),
+        ActionKind::SetPrice { prices, nonce } => {
+            let count = prices.len();
+            let prices_str: String = prices
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(":");
+            format!("SETPRICE:{count}:{prices_str}:{nonce}")
+        }
+    }
 }
 
 // ── Signature verification ───────────────────────────────────────────────────
@@ -53,24 +118,7 @@ pub fn verify_signature(payload: &str, sig_b64: &str, pubkey: &[u8; 32]) -> bool
 }
 
 pub fn verify_action(action: &MemoAction, pubkey: &[u8; 32]) -> bool {
-    let payload = match &action.kind {
-        ActionKind::Claim { ua } => format!("CLAIM:{}:{ua}", action.name),
-        ActionKind::List { price, nonce } => format!("LIST:{}:{price}:{nonce}", action.name),
-        ActionKind::Delist { nonce } => format!("DELIST:{}:{nonce}", action.name),
-        ActionKind::Release { nonce } => format!("RELEASE:{}:{nonce}", action.name),
-        ActionKind::Update { new_ua, nonce } => format!("UPDATE:{}:{new_ua}:{nonce}", action.name),
-        ActionKind::Buy { buyer_ua } => format!("BUY:{}:{buyer_ua}", action.name),
-        ActionKind::SetPrice { prices, nonce } => {
-            let count = prices.len();
-            let prices_str: String = prices
-                .iter()
-                .map(|p| p.to_string())
-                .collect::<Vec<_>>()
-                .join(":");
-            format!("SETPRICE:{count}:{prices_str}:{nonce}")
-        }
-    };
-    verify_signature(&payload, &action.signature, pubkey)
+    verify_signature(&signing_payload(action), &action.signature, pubkey)
 }
 
 // ── Parsing ──────────────────────────────────────────────────────────────────
