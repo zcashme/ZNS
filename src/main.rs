@@ -291,15 +291,15 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
         }
         ActionKind::Buy { buyer_ua } => {
-            // In the MPC escrow design, the BUY memo is embedded in a treasury
-            // output carrying only commission (not the full sale price). The
-            // admin signature on the BUY memo itself is the trust signal; the
-            // off-chain service has already verified escrow payment via
-            // lightwalletd + MPC threshold signing.
-            if reg.get_listing_price(&action.name).is_none() {
-                eprintln!("BUY for unlisted name {}", action.name);
-                return;
-            }
+            // The admin signature on this BUY is the indexer's only trust
+            // signal. The off-chain custody service is trusted to broadcast a
+            // BUY only after observing on-chain payment to the per-intent
+            // burner t-address; the indexer cannot independently verify that
+            // payment occurred. The note carrying this memo holds only the
+            // commission, not the full sale price, so no value check applies.
+            // The seller's listing state is intentionally not consulted: once
+            // the buyer has paid the burner, a late DELIST must not strand
+            // their funds.
             match reg.process_buy(&action.name,
                 buyer_ua,
                 &action.signature,
