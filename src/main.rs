@@ -300,6 +300,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             // The seller's listing state is intentionally not consulted: once
             // the buyer has paid the burner, a late DELIST must not strand
             // their funds.
+            let sale_price = reg.get_listing_price(&action.name);
             match reg.process_buy(&action.name,
                 buyer_ua,
                 &action.signature,
@@ -314,14 +315,20 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                         txid,
                         height,
                         Some(buyer_ua),
-                        None,
+                        sale_price,
                         None,
                         pubkey,
                     );
-                    println!(
-                        "Sold: {} → {buyer_ua} (height {height})",
-                        action.name
-                    );
+                    match sale_price {
+                        Some(p) => println!(
+                            "Sold: {} → {buyer_ua} for {p} zats (height {height})",
+                            action.name
+                        ),
+                        None => println!(
+                            "Sold: {} → {buyer_ua} (height {height}, unlisted)",
+                            action.name
+                        ),
+                    }
                 }
                 Err(e) => eprintln!("DB error (buy): {e}"),
             }
