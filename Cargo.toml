@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "service"]
+resolver = "2"
+
 [package]
 name = "zns-indexer"
 version = "0.1.0"

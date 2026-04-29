@@ -1,5 +1,6 @@
 /target
 /circuit/
+service/.env
 __pycache__/
 *.pyc
 zns_signing_key.txt
