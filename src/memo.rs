@@ -259,16 +259,20 @@ fn parse_update(rest: &str) -> Option<MemoAction> {
 }
 
 fn parse_buy(rest: &str) -> Option<MemoAction> {
-    // ZNS:BUY:<name>:<buyer_ua>:<sig>[:<user_pubkey>]
-    let parts: Vec<&str> = rest.splitn(4, ':').collect();
-    if parts.len() < 3 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
+    // ZNS:BUY:<name>:<buyer_ua>:<admin_sig>
+    //
+    // Under the non-custodial flow the buyer never signs the memo, so the
+    // optional trailing user_pubkey slot accepted by other actions is rejected
+    // here. Reserving the slot keeps the door open for a future protocol
+    // revision that introduces buyer-side sovereignty.
+    let parts: Vec<&str> = rest.split(':').collect();
+    if parts.len() != 3 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
         return None;
     }
-    let (sig, pk) = extract_sig_and_pubkey(&parts, 2)?;
     Some(MemoAction {
         name: parts[0].into(),
-        signature: sig,
-        user_pubkey: pk,
+        signature: parts[2].into(),
+        user_pubkey: None,
         kind: ActionKind::Buy { buyer_ua: parts[1].into() },
     })
 }
