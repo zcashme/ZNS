@@ -9,7 +9,7 @@
 //   LIST      — put a name up for sale at a price
 //   DELIST    — remove a listing
 //   UPDATE    — change the address behind a name
-//   BUY       — purchase a listed name (admin-signed; buyer may append pubkey)
+//   BUY       — memo-only advisory event (sales are non-custodial via NEAR contract)
 //   RELEASE   — release a name back to the pool
 
 mod config;
@@ -291,25 +291,37 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
         }
         ActionKind::Buy { buyer_ua } => {
-            let Some(price) = reg.get_listing_price(&action.name) else {
+            // In the MPC escrow design, the BUY memo is embedded in a treasury
+            // output carrying only commission (not the full sale price). The
+            // admin signature on the BUY memo itself is the trust signal; the
+            // off-chain service has already verified escrow payment via
+            // lightwalletd + MPC threshold signing.
+            if reg.get_listing_price(&action.name).is_none() {
                 eprintln!("BUY for unlisted name {}", action.name);
                 return;
-            };
-            if note_value < price {
-                eprintln!(
-                    "BUY underpayment for {}: {note_value} < {price}",
-                    action.name
-                );
-                return;
             }
-            match reg.process_buy(&action.name, buyer_ua, &action.signature, txid, height, pubkey) {
+            match reg.process_buy(&action.name,
+                buyer_ua,
+                &action.signature,
+                txid,
+                height,
+                pubkey,
+            ) {
                 Ok(()) => {
-                    let _ =
-                        reg.insert_event(&action, action.kind.label(), txid, height, Some(buyer_ua), Some(price), None, pubkey);
+                    let _ = reg.insert_event(
+                        &action,
+                        action.kind.label(),
+                        txid,
+                        height,
+                        Some(buyer_ua),
+                        None,
+                        None,
+                        pubkey,
+                    );
                     println!(
-                        "Sold: {} → {buyer_ua} for {price} zats (height {height})",
+                        "Sold: {} → {buyer_ua} (height {height})",
                         action.name
-                    )
+                    );
                 }
                 Err(e) => eprintln!("DB error (buy): {e}"),
             }
