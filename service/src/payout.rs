@@ -37,6 +37,7 @@ use zcash_address::ZcashAddress;
 use zcash_keys::address::{Address as ZAddress, UnifiedAddress};
 use zcash_primitives::transaction::{
     Authorized, TransactionData, TxVersion, Unauthorized,
+    fees::{self, zip317, FeeRule as _},
     sighash::{SignableInput, signature_hash},
     txid::TxIdDigester,
 };
@@ -46,7 +47,20 @@ use zcash_protocol::{
 };
 use zcash_transparent::{self as transparent};
 
-const ZCASH_FEE_DEFAULT: u64 = 10_000;
+pub fn payout_fee() -> u64 {
+    zip317::FeeRule::standard()
+        .fee_required(
+            &TestNetwork,
+            BlockHeight::from_u32(1),
+            [fees::transparent::InputSize::STANDARD_P2PKH],
+            std::iter::empty::<usize>(),
+            0,
+            0,
+            2,
+        )
+        .expect("ZIP-317 fee for 1 P2PKH input + 2 orchard actions")
+        .into_u64()
+}
 
 /// Result of phase 1.  Hold this opaquely between the sighash request and the MPC
 /// signature application.
@@ -141,7 +155,7 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
         _ => BranchId::for_height(&TestNetwork, target_height),
     };
 
-    let fee = input.fee.unwrap_or(ZCASH_FEE_DEFAULT);
+    let fee = input.fee.unwrap_or_else(payout_fee);
     let total_out = input
         .seller_amount
         .checked_add(input.treasury_amount)
@@ -212,22 +226,11 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
 
     let txid_parts = td_unauth.digest(TxIdDigester);
 
-    let orchard_sighash = {
-        let txid = zcash_primitives::transaction::txid::to_txid(
-            TxVersion::V5,
-            branch,
-            &txid_parts,
-        );
-        let mut h = blake2b_simd::Params::new()
-            .hash_length(32)
-            .personal(b"ZcashAuthDigest_")
-            .to_state();
-        h.update(txid.as_ref());
-        let hash = h.finalize();
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(hash.as_bytes());
-        arr
-    };
+    let orchard_sighash = *signature_hash(
+        &td_unauth,
+        &SignableInput::Shielded,
+        &txid_parts,
+    ).as_ref();
 
     let script_pk =
         transparent::address::Script(zcash_script::script::Code(input.utxo_script_pubkey));

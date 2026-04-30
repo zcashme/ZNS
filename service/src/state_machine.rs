@@ -103,7 +103,8 @@ impl StateMachine {
     async fn handle_pending(&self, intent: &crate::db::Intent) -> Result<()> {
         let utxos = self.watcher.get_utxos(&intent.burner_taddr).await?;
 
-        let fee_reserve = 10_000u64; // TODO: dynamic fee estimation
+        let fee = payout::payout_fee();
+        let fee_reserve = fee;
         let found = utxos.into_iter().find(|u| {
             escrow::verify_sufficient_payment(
                 u.value_zats,
@@ -169,7 +170,7 @@ impl StateMachine {
         // implement refunds. Underpayment is already rejected upstream by
         // `verify_sufficient_payment`, so utxo.value_zats >= price + fee here.
         let commission = intent.price_zat * self.cfg.commission_bps as u64 / 10_000;
-        let fee = 10_000u64;
+        let fee = payout::payout_fee();
         let seller_amount = utxo
             .value_zats
             .checked_sub(commission)
