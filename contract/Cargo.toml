@@ -11,11 +11,13 @@ near-sdk = "5.8.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10", default-features = false }
 ripemd = { version = "0.1", default-features = false }
 blake2b_simd = { version = "1", default-features = false }
 bs58 = { version = "0.5", default-features = false, features = ["check", "alloc"] }
 bech32 = { version = "0.11", default-features = false, features = ["alloc"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "alloc"] }
 
 [dev-dependencies]
 near-sdk = { version = "5.8.0", features = ["unit-testing"] }

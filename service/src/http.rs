@@ -6,11 +6,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::db::{Listing, ListingStatus, Store};
-use crate::escrow;
-use crate::memo::MemoSigner;
+use crate::db::{ListingStatus, Store};
 use crate::near::NearClient;
-use crate::payout;
 use crate::zcash::Watcher;
 
 pub struct AppState {
@@ -18,13 +15,7 @@ pub struct AppState {
     pub store: Arc<Store>,
     pub near: NearClient,
     pub watcher: Watcher,
-    pub memo_signer: MemoSigner,
 }
-
-// ─── POST /purchase ─────────────────────────────────────────────────────
-/// Buyer calls this with the name they want and their UA.
-/// The service resolves the listing from the ZNS indexer, auto-creates the
-/// NEAR contract entry if needed, and returns a burner address to pay.
 
 #[derive(Deserialize)]
 pub struct CreatePurchaseRequest {
@@ -37,15 +28,49 @@ pub struct CreatePurchaseResponse {
     pub local_purchase_id: i64,
     pub contract_purchase_id: u64,
     pub burner_taddr: String,
+    pub required_memo: String,
     pub price_zat: u64,
     pub commission_zat: u64,
     pub fee_zat: u64,
     pub seller_receives_zat: u64,
+    pub refund_receives_zat: u64,
     pub expires_at: String,
 }
 
-/// Resolve a name from the ZNS indexer.
-async fn resolve_name(indexer_url: &str, name: &str) -> Result<( String, u64 ), reqwest::Error> {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct ContractListingView {
+    pub id: u64,
+    pub name: String,
+    pub seller_ua: String,
+    pub price_zat: u64,
+    pub commission_bps: u64,
+    pub treasury_ua: String,
+    pub status: String,
+    pub created_at_ns: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PurchaseAcceptedView {
+    pub purchase_id: u64,
+    pub listing_id: u64,
+    pub burner_taddr: String,
+    pub burner_pubkey_hex: String,
+    pub mpc_path: String,
+    pub required_memo: String,
+    pub price_zat: u64,
+    pub commission_zat: u64,
+    pub payout_fee_zat: u64,
+    pub seller_receives_zat: u64,
+    pub refund_receives_zat: u64,
+    pub expires_at_ns: u64,
+}
+
+struct ResolvedListing {
+    local_id: i64,
+    contract: ContractListingView,
+}
+
+async fn resolve_name(indexer_url: &str, name: &str) -> Result<(String, u64), reqwest::Error> {
     let resp: serde_json::Value = reqwest::Client::new()
         .post(indexer_url)
         .json(&serde_json::json!({
@@ -62,22 +87,63 @@ async fn resolve_name(indexer_url: &str, name: &str) -> Result<( String, u64 ), 
     Ok((seller_ua, price))
 }
 
-/// Get or create the NEAR contract listing for a name.
-/// First checks local DB, then falls back to creating on-chain.
+fn listing_status_from_contract(status: &str) -> ListingStatus {
+    match status {
+        "Open" => ListingStatus::Open,
+        "Sold" => ListingStatus::Sold,
+        "Cancelled" => ListingStatus::Cancelled,
+        _ => ListingStatus::Cancelled,
+    }
+}
+
+fn cache_listing(
+    state: &AppState,
+    listing: &ContractListingView,
+) -> Result<i64, axum::http::StatusCode> {
+    state
+        .store
+        .upsert_listing(
+            listing.id as i64,
+            &listing.name,
+            &listing.seller_ua,
+            listing.price_zat,
+            listing.commission_bps,
+            &listing.treasury_ua,
+            listing_status_from_contract(&listing.status),
+        )
+        .map_err(|e| {
+            tracing::error!("upsert listing: {e}");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
 async fn ensure_listing(
     state: &AppState,
     name: &str,
-) -> Result<Listing, axum::http::StatusCode> {
-    // 1. Check local DB first
-    if let Ok(Some(listing)) = state.store.get_listing_by_name(name) {
-        if listing.status == ListingStatus::Open {
-            return Ok(listing);
+) -> Result<ResolvedListing, axum::http::StatusCode> {
+    let on_chain = state
+        .near
+        .view_zns::<Option<ContractListingView>>(
+            "get_listing_by_name",
+            serde_json::json!({ "name": name }),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("NEAR get_listing_by_name: {e}");
+            axum::http::StatusCode::BAD_GATEWAY
+        })?;
+
+    if let Some(listing) = on_chain {
+        let local_id = cache_listing(state, &listing)?;
+        if listing.status == "Open" {
+            return Ok(ResolvedListing {
+                local_id,
+                contract: listing,
+            });
         }
-        // If Sold/Cancelled, return conflict
         return Err(axum::http::StatusCode::CONFLICT);
     }
 
-    // 2. Not in DB — resolve from indexer
     let (seller_ua, price_zat) = resolve_name(&state.cfg.indexer_rpc, name)
         .await
         .map_err(|e| {
@@ -90,14 +156,13 @@ async fn ensure_listing(
         return Err(axum::http::StatusCode::NOT_FOUND);
     }
 
-    // 3. Create on-chain via NEAR contract
     let args = serde_json::json!({
         "name": name,
         "seller_ua": seller_ua,
         "price_zat": price_zat,
     });
-    let deposit_yocto = 50_000_000_000_000_000_000_000u128; // 0.05 NEAR
-    let gas = 50_000_000_000_000u64; // 50 Tgas
+    let deposit_yocto = 50_000_000_000_000_000_000_000u128;
+    let gas = 50_000_000_000_000u64;
 
     let outcome = state
         .near
@@ -120,156 +185,45 @@ async fn ensure_listing(
         }
     };
 
-    if value.len() < 8 {
-        tracing::error!("NEAR create_listing return value too short");
-        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    }
-    let contract_listing_id = u64::from_le_bytes(value[..8].try_into().map_err(|_| {
-        tracing::error!("NEAR create_listing return value not a valid u64");
+    let listing: ContractListingView = serde_json::from_slice(&value).map_err(|e| {
+        tracing::error!("decode create_listing result: {e}");
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
-    })?);
+    })?;
+    let local_id = cache_listing(state, &listing)?;
+    Ok(ResolvedListing {
+        local_id,
+        contract: listing,
+    })
+}
 
-    // 4. Store locally
-    let local_id = state
-        .store
-        .insert_listing(name, &seller_ua, price_zat, state.cfg.commission_bps as u64, &state.cfg.treasury_ua)
-        .map_err(|e| {
-            tracing::error!("insert listing: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    state
-        .store
-        .set_contract_listing_id(local_id, contract_listing_id as i64)
-        .map_err(|e| {
-            tracing::error!("update contract_listing_id: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    // Return the newly created listing
-    state
-        .store
-        .get_listing_by_id(local_id)
-        .map_err(|e| {
-            tracing::error!("get listing after insert: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+fn ns_to_rfc3339(ts_ns: u64) -> Result<String, axum::http::StatusCode> {
+    let ts = chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(ts_ns as i64);
+    Ok(ts.to_rfc3339())
 }
 
 async fn create_purchase_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreatePurchaseRequest>,
 ) -> Result<Json<CreatePurchaseResponse>, axum::http::StatusCode> {
-    // 1. Resolve or create the NEAR listing for this name
-    let listing = ensure_listing(&state, &body.name)
-        .await?;
+    let listing = ensure_listing(&state, &body.name).await?;
 
-    if listing.status != ListingStatus::Open {
+    if listing.contract.status != "Open" {
         return Err(axum::http::StatusCode::CONFLICT);
     }
 
-    // 2. Derive unique MPC path and burner
     let path = format!(
         "zns-purchase-{}-{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-        listing.id
+        listing.contract.id
     );
-    let burner = escrow::derive_burner(
-        &state.cfg.mpc_master_pubkey,
-        &state.cfg.near_account,
-        &path,
-        &state.cfg.zcash_network,
-    )
-    .map_err(|e| {
-        tracing::error!("derive burner: {e}");
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
-    })?;
 
-    let script_pubkey = escrow::p2pkh_script(&burner.public_key);
-
-    // 3. Compute amounts from the snapshotted listing terms
-    let price = listing.price_zat;
-    let commission = price * listing.commission_bps / 10_000;
-    let fee = payout::payout_fee();
-    let seller_amount = price
-        .checked_sub(commission)
-        .and_then(|v| v.checked_sub(fee))
-        .ok_or_else(|| {
-            tracing::error!("price too small to cover commission + fee");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    // 4. Current chain height for bundle construction
-    let target_height = state
-        .watcher
-        .latest_height()
-        .await
-        .map_err(|e| {
-            tracing::error!("lightwalletd height: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })? as u32;
-
-    // 5. Build BUY memo
-    let memo_str = state.memo_signer.sign_buy(&body.name, &body.buyer_ua);
-    let mut memo_bytes = [0u8; 512];
-    let raw = memo_str.as_bytes();
-    let len = raw.len().min(512);
-    memo_bytes[..len].copy_from_slice(&raw[..len]);
-
-    // 6. Build payout bundle (placeholder outpoint)
-    let payout_bundle = payout::build_bundle_bytes(
-        &state.cfg.zcash_network,
-        target_height,
-        &listing.seller_ua,
-        &listing.treasury_ua,
-        &body.buyer_ua,
-        seller_amount,
-        commission,
-        fee,
-        memo_bytes,
-        burner.public_key,
-        script_pubkey.clone(),
-        false,
-    )
-    .map_err(|e| {
-        tracing::error!("build payout bundle: {e}");
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    // 7. Build refund bundle (placeholder outpoint)
-    let refund_bundle = payout::build_bundle_bytes(
-        &state.cfg.zcash_network,
-        target_height,
-        &listing.seller_ua,
-        &listing.treasury_ua,
-        &body.buyer_ua,
-        price - fee, // refund amount
-        0,           // treasury gets 0 on refund
-        fee,
-        [0u8; 512],  // no memo on refund
-        burner.public_key,
-        script_pubkey,
-        true,
-    )
-    .map_err(|e| {
-        tracing::error!("build refund bundle: {e}");
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    // 8. Call contract.accept_listing
     let args = serde_json::json!({
-        "listing_id": listing.contract_listing_id.map(|v| v as u64).unwrap_or(listing.id as u64),
+        "listing_id": listing.contract.id,
         "buyer_ua": body.buyer_ua,
-        "burner_taddr": burner.taddr,
-        "burner_pubkey": burner.public_key.to_vec(),
         "mpc_path": path,
-        "payout_bundle": payout_bundle,
-        "refund_bundle": refund_bundle,
     });
-
-    let deposit_yocto = 100_000_000_000_000_000_000_000u128; // 0.1 NEAR
-    let gas = 100_000_000_000_000u64; // 100 Tgas
+    let deposit_yocto = 100_000_000_000_000_000_000_000u128;
+    let gas = 100_000_000_000_000u64;
 
     let outcome = state
         .near
@@ -292,48 +246,55 @@ async fn create_purchase_handler(
         }
     };
 
-    if value.len() < 8 {
-        tracing::error!("NEAR accept_listing return value too short: {} bytes", value.len());
-        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    }
-    let contract_purchase_id =
-        u64::from_le_bytes(value[..8].try_into().map_err(|_| {
-            tracing::error!("NEAR accept_listing return value not a valid u64");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?);
+    let accepted: PurchaseAcceptedView = serde_json::from_slice(&value).map_err(|e| {
+        tracing::error!("decode accept_listing result: {e}");
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    // 9. Store locally
-    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+    let expires_at = ns_to_rfc3339(accepted.expires_at_ns)?;
     let local_purchase_id = state
         .store
         .insert_purchase(
-            listing.id,
+            listing.local_id,
             &body.buyer_ua,
-            &burner.taddr,
-            &hex::encode(burner.public_key),
-            &path,
-            &payout_bundle,
-            &refund_bundle,
-            expires_at,
+            &accepted.burner_taddr,
+            &accepted.burner_pubkey_hex,
+            &accepted.mpc_path,
+            &[],
+            &[],
+            chrono::DateTime::parse_from_rfc3339(&expires_at)
+                .map_err(|e| {
+                    tracing::error!("parse expires_at: {e}");
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .with_timezone(&chrono::Utc),
         )
         .map_err(|e| {
             tracing::error!("insert purchase: {e}");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    state
+        .store
+        .set_contract_purchase_id(local_purchase_id, accepted.purchase_id as i64)
+        .map_err(|e| {
+            tracing::error!("set contract_purchase_id: {e}");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
     Ok(Json(CreatePurchaseResponse {
         local_purchase_id,
-        contract_purchase_id,
-        burner_taddr: burner.taddr,
-        price_zat: price,
-        commission_zat: commission,
-        fee_zat: fee,
-        seller_receives_zat: seller_amount,
-        expires_at: expires_at.to_rfc3339(),
+        contract_purchase_id: accepted.purchase_id,
+        burner_taddr: accepted.burner_taddr,
+        required_memo: accepted.required_memo,
+        price_zat: accepted.price_zat,
+        commission_zat: accepted.commission_zat,
+        fee_zat: accepted.payout_fee_zat,
+        seller_receives_zat: accepted.seller_receives_zat,
+        refund_receives_zat: accepted.refund_receives_zat,
+        expires_at,
     }))
 }
-
-// ─── Server ─────────────────────────────────────────────────────────────
 
 pub async fn serve(bind: SocketAddr, state: Arc<AppState>) -> Result<()> {
     let app = Router::new()

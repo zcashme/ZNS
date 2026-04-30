@@ -186,6 +186,18 @@ impl Store {
         .context("get listing")
     }
 
+    pub fn get_listing_by_name(&self, name: &str) -> Result<Option<Listing>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, contract_listing_id, name, seller_ua, price_zat, commission_bps, treasury_ua, status, created_at
+             FROM listings WHERE name = ?1",
+            params![name],
+            |row| self.row_to_listing(row),
+        )
+        .optional()
+        .context("get listing by name")
+    }
+
     pub fn list_open_listings(&self) -> Result<Vec<Listing>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -202,6 +214,48 @@ impl Store {
             params![contract_id, id],
         )?;
         Ok(())
+    }
+
+    pub fn upsert_listing(
+        &self,
+        contract_listing_id: i64,
+        name: &str,
+        seller_ua: &str,
+        price_zat: u64,
+        commission_bps: u64,
+        treasury_ua: &str,
+        status: ListingStatus,
+    ) -> Result<i64> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO listings (contract_listing_id, name, seller_ua, price_zat, commission_bps, treasury_ua, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(name) DO UPDATE SET
+                 contract_listing_id = excluded.contract_listing_id,
+                 seller_ua = excluded.seller_ua,
+                 price_zat = excluded.price_zat,
+                 commission_bps = excluded.commission_bps,
+                 treasury_ua = excluded.treasury_ua,
+                 status = excluded.status",
+            params![
+                contract_listing_id,
+                name,
+                seller_ua,
+                price_zat as i64,
+                commission_bps as i64,
+                treasury_ua,
+                status.as_str(),
+                now
+            ],
+        )
+        .context("upsert listing")?;
+        conn.query_row(
+            "SELECT id FROM listings WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+        .context("get upserted listing id")
     }
 
     pub fn insert_purchase(
@@ -221,9 +275,17 @@ impl Store {
         conn.execute(
             "INSERT INTO purchases (listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, payout_bundle, refund_bundle, status, created_at, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, payout_bundle, refund_bundle, PurchaseStatus::Draft.as_str(), now, exp],
+            params![listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, payout_bundle, refund_bundle, PurchaseStatus::AwaitingPayment.as_str(), now, exp],
         ).context("insert purchase")?;
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn set_contract_purchase_id(&self, id: i64, contract_id: i64) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE purchases SET contract_purchase_id = ?1 WHERE id = ?2",
+            params![contract_id, id],
+        )?;
+        Ok(())
     }
 
     pub fn get_purchase_by_id(&self, id: i64) -> Result<Option<Purchase>> {
@@ -251,20 +313,25 @@ impl Store {
              ORDER BY created_at"
         )?;
         let rows = stmt.query_map([], |row| self.row_to_purchase(row))?;
-        rows.collect::<Result<_, _>>().context("list active purchases")
+        rows.collect::<Result<_, _>>()
+            .context("list active purchases")
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────
 
-    fn row_to_listing(&self,
-        row: &rusqlite::Row,
-    ) -> rusqlite::Result<Listing> {
+    fn row_to_listing(&self, row: &rusqlite::Row) -> rusqlite::Result<Listing> {
         let status_str: String = row.get(7)?;
         let created_at_str: String = row.get(8)?;
-        let status = ListingStatus::from_str(&status_str)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, e.to_string().into()))?;
-        let created_at = created_at_str.parse::<DateTime<Utc>>()
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e)))?;
+        let status = ListingStatus::from_str(&status_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                e.to_string().into(),
+            )
+        })?;
+        let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
+        })?;
         Ok(Listing {
             id: row.get(0)?,
             contract_listing_id: row.get(1)?,
@@ -278,20 +345,24 @@ impl Store {
         })
     }
 
-    fn row_to_purchase(
-        &self,
-        row: &rusqlite::Row,
-    ) -> rusqlite::Result<Purchase> {
+    fn row_to_purchase(&self, row: &rusqlite::Row) -> rusqlite::Result<Purchase> {
         let status_str: String = row.get(9)?;
         let created_at_str: String = row.get(10)?;
         let expires_at_str: String = row.get(11)?;
 
-        let status = PurchaseStatus::from_str(&status_str)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, e.to_string().into()))?;
-        let created_at = created_at_str.parse::<DateTime<Utc>>()
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e)))?;
-        let expires_at = expires_at_str.parse::<DateTime<Utc>>()
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(e)))?;
+        let status = PurchaseStatus::from_str(&status_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                e.to_string().into(),
+            )
+        })?;
+        let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+        let expires_at = expires_at_str.parse::<DateTime<Utc>>().map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(e))
+        })?;
 
         Ok(Purchase {
             id: row.get(0)?,

@@ -3,16 +3,11 @@ use std::net::SocketAddr;
 
 /// zns-custody-service
 ///
-/// Watches Zcash transparent escrows, coordinates MPC signing, and broadcasts
-/// BUY memos.  Holds no escrow keys.
+/// Builds Zcash escrow transactions and submits them to the contract.
 #[derive(Parser, Clone, Debug)]
 #[command(name = "zns-custody-service")]
 #[command(about = "ZNS non-custodial sale orchestrator")]
 pub struct Config {
-    /// Admin Ed25519 private key (hex, 64 chars) used for BUY memo signing.
-    #[arg(long, env = "ZNS_ADMIN_ED25519_KEY")]
-    pub admin_ed25519_key: String,
-
     /// NEAR account ID used to pay gas for v1.signer calls.
     #[arg(long, env = "ZNS_NEAR_ACCOUNT")]
     pub near_account: String,
@@ -29,23 +24,9 @@ pub struct Config {
     )]
     pub near_rpc: String,
 
-    /// MPC signer contract on NEAR (v1.signer).
-    #[arg(
-        long,
-        env = "ZNS_MPC_CONTRACT",
-        default_value = "v1.signer-prod.testnet"
-    )]
-    pub mpc_contract: String,
-
     /// ZNS marketplace contract on NEAR.
     #[arg(long, env = "ZNS_CONTRACT")]
     pub zns_contract: String,
-
-    /// MPC master public key (hex, 66 bytes compressed secp256k1) used to derive
-    /// transparent escrow addresses.  This MUST match the key managed by the
-    /// MPC network for the NEAR account above.
-    #[arg(long, env = "ZNS_MPC_MASTER_PUBKEY")]
-    pub mpc_master_pubkey: String,
 
     /// Zcash unified address receiving commission / treasury funds.
     #[arg(long, env = "ZNS_TREASURY_UA")]

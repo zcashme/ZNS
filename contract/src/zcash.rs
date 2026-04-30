@@ -10,8 +10,19 @@
 //! Anything outside this envelope is rejected at parse time.
 
 use blake2b_simd::Params;
+use k256::{
+    elliptic_curve::{
+        bigint::U256,
+        ops::Reduce,
+        sec1::FromEncodedPoint,
+    },
+    AffinePoint, EncodedPoint, FieldBytes, ProjectivePoint, PublicKey,
+};
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
+use sha3::Sha3_256;
+
+const EPSILON_PREFIX: &str = "near-mpc-recovery v0.1.0 epsilon derivation:";
 
 // ─── Hashes ──────────────────────────────────────────────────────────────
 
@@ -20,6 +31,13 @@ pub fn hash160(data: &[u8]) -> [u8; 20] {
     let ripe = <Ripemd160 as Digest>::digest(sha);
     let mut out = [0u8; 20];
     out.copy_from_slice(&ripe);
+    out
+}
+
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    let hash = Sha256::digest(data);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hash);
     out
 }
 
@@ -307,6 +325,68 @@ pub fn validate_burner_script(script: &[u8], burner_pubkey: &[u8; 33]) -> Result
 
 const TADDR_VERSION_MAINNET: [u8; 2] = [0x1C, 0xB8];
 const TADDR_VERSION_TESTNET: [u8; 2] = [0x1D, 0x25];
+
+pub fn derive_burner(
+    mpc_root_pubkey: &str,
+    predecessor_account_id: &str,
+    path: &str,
+    mainnet: bool,
+) -> Result<(String, [u8; 33]), &'static str> {
+    let root_pk = parse_near_pubkey(mpc_root_pubkey)?;
+    let mut hasher = Sha3_256::new();
+    hasher.update(EPSILON_PREFIX.as_bytes());
+    hasher.update(predecessor_account_id.as_bytes());
+    hasher.update(b",");
+    hasher.update(path.as_bytes());
+    let epsilon_bytes: [u8; 32] = hasher.finalize().into();
+
+    let epsilon =
+        <k256::Scalar as Reduce<U256>>::reduce_bytes(FieldBytes::from_slice(&epsilon_bytes));
+    if bool::from(epsilon.is_zero()) {
+        return Err("derived zero epsilon");
+    }
+
+    let child = (ProjectivePoint::from(*root_pk.as_affine())
+        + (ProjectivePoint::GENERATOR * epsilon))
+        .to_affine();
+    let encoded = EncodedPoint::from(child).compress();
+    let bytes = encoded.as_bytes();
+    if bytes.len() != 33 {
+        return Err("derived burner pubkey wrong length");
+    }
+    let mut pubkey = [0u8; 33];
+    pubkey.copy_from_slice(bytes);
+
+    let version = if mainnet {
+        TADDR_VERSION_MAINNET
+    } else {
+        TADDR_VERSION_TESTNET
+    };
+    let mut payload = Vec::with_capacity(22);
+    payload.extend_from_slice(&version);
+    payload.extend_from_slice(&hash160(&pubkey));
+    let taddr = bs58::encode(payload).with_check().into_string();
+    Ok((taddr, pubkey))
+}
+
+fn parse_near_pubkey(input: &str) -> Result<PublicKey, &'static str> {
+    let b58 = input
+        .strip_prefix("secp256k1:")
+        .ok_or("mpc_root_pubkey must start with secp256k1:")?;
+    let bytes = bs58::decode(b58)
+        .into_vec()
+        .map_err(|_| "invalid base58 mpc_root_pubkey")?;
+    if bytes.len() != 64 {
+        return Err("mpc_root_pubkey payload must be 64 bytes");
+    }
+
+    let x = FieldBytes::from_slice(&bytes[..32]);
+    let y = FieldBytes::from_slice(&bytes[32..]);
+    let encoded = EncodedPoint::from_affine_coordinates(x, y, false);
+    let point = Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&encoded))
+        .ok_or("invalid secp256k1 point")?;
+    PublicKey::from_affine(point).map_err(|_| "invalid secp256k1 public key")
+}
 
 /// Decode a P2PKH t-address and verify it commits to `pubkey`.
 pub fn verify_burner_taddr(

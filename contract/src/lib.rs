@@ -1,16 +1,24 @@
 //! ZNS non-custodial marketplace escrow contract.
 //!
-//! Two top-level entities:
-//!   * Listing  — created by seller, immutable terms
-//!   * Purchase — created by buyer, binds a listing to a burner + pre-built bundles
+//! The contract is the authority for:
+//!   * listing terms (seller, treasury, price, commission, fee)
+//!   * the deterministic burner address derived from MPC root key + path
+//!   * the required BUY memo commitment for a purchase
+//!   * the exact funded payout/refund transaction bytes and sighashes that may be signed
+//!
+//! The relayer service becomes only a transaction builder and submitter.
+//! The MPC is only a signer invoked by this contract.
 
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::LookupMap;
-use near_sdk::{env, near_bindgen, AccountId, Gas, NearToken, Promise, PromiseError};
+use near_sdk::{
+    env, ext_contract, near_bindgen, AccountId, Gas, NearToken, PanicOnDefault, Promise,
+    PromiseError,
+};
 use serde::{Deserialize, Serialize};
 
 mod zcash;
-use zcash::{validate_burner_script, verify_burner_taddr};
+use zcash::{compute_sighash_all, derive_burner, parse_tx, sha256, validate_burner_script};
 
 const SIGN_GAS: Gas = Gas::from_tgas(250);
 const CALLBACK_GAS: Gas = Gas::from_tgas(50);
@@ -22,11 +30,10 @@ const MIN_EXPIRY_SECONDS: u64 = 60;
 const MAX_UA_LEN: usize = 512;
 const MAX_NAME_LEN: usize = 256;
 const MAX_PATH_LEN: usize = 128;
+const MAX_TX_BYTES: usize = 20_000;
 
 const EVENT_STANDARD: &str = "zns";
 const EVENT_VERSION: &str = "1.0.0";
-
-// ─── MPC types ──────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -48,7 +55,32 @@ pub struct MpcSignature {
     pub recovery_id: u8,
 }
 
-// ─── Listing ────────────────────────────────────────────────────────────
+#[derive(Serialize, Deserialize)]
+pub struct SignRequestArgs {
+    pub request: SignPayload,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SignPayload {
+    pub payload: Vec<u8>,
+    pub path: String,
+    pub key_version: u32,
+}
+
+#[ext_contract(ext_mpc)]
+trait ExtMpc {
+    fn sign(&self, request: SignRequestArgs) -> MpcSignature;
+}
+
+#[ext_contract(ext_self)]
+trait ExtSelf {
+    fn mpc_sign_callback(
+        &mut self,
+        #[callback_result] result: Result<MpcSignature, PromiseError>,
+        purchase_id: u64,
+        is_payout: bool,
+    );
+}
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -83,8 +115,6 @@ pub struct ListingView {
     pub created_at_ns: u64,
 }
 
-// ─── Purchase ───────────────────────────────────────────────────────────
-
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
 #[borsh(crate = "near_sdk::borsh")]
 pub enum PurchaseStatus {
@@ -102,22 +132,28 @@ pub struct Purchase {
     pub id: u64,
     pub listing_id: u64,
     pub buyer_ua: String,
+    pub required_memo: String,
+    pub price_zat: u64,
+    pub commission_zat: u64,
+    pub payout_fee_zat: u64,
+    pub seller_receives_zat: u64,
+    pub refund_receives_zat: u64,
     pub burner_taddr: String,
     pub burner_pubkey: [u8; 33],
     pub mpc_path: String,
-    /// Pre-built payout bundle bytes (~3-5 KB).
-    pub payout_bundle: Vec<u8>,
-    /// Pre-built refund bundle bytes (~3-5 KB).
-    pub refund_bundle: Vec<u8>,
     pub status: PurchaseStatus,
     pub created_at_ns: u64,
     pub expires_at_ns: u64,
-    /// Set at submit_funding.
-    pub funding_outpoint: Option<( [u8; 32], u32 )>, // txid le, vout
-    /// Set at submit_funding.
-    pub sighash: Option<[u8; 32]>,
-    /// Set at request_signature callback.
-    pub signature: Option<MpcSignature>,
+    pub funding_outpoint: Option<([u8; 32], u32)>,
+    pub utxo_value_zats: Option<u64>,
+    pub payout_tx: Option<Vec<u8>>,
+    pub refund_tx: Option<Vec<u8>>,
+    pub payout_tx_hash: Option<[u8; 32]>,
+    pub refund_tx_hash: Option<[u8; 32]>,
+    pub payout_sighash: Option<[u8; 32]>,
+    pub refund_sighash: Option<[u8; 32]>,
+    pub payout_signature: Option<MpcSignature>,
+    pub refund_signature: Option<MpcSignature>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -125,6 +161,12 @@ pub struct PurchaseView {
     pub id: u64,
     pub listing_id: u64,
     pub buyer_ua: String,
+    pub required_memo: String,
+    pub price_zat: u64,
+    pub commission_zat: u64,
+    pub payout_fee_zat: u64,
+    pub seller_receives_zat: u64,
+    pub refund_receives_zat: u64,
     pub burner_taddr: String,
     pub burner_pubkey_hex: String,
     pub mpc_path: String,
@@ -133,34 +175,59 @@ pub struct PurchaseView {
     pub expires_at_ns: u64,
     pub funding_outpoint_txid_hex: Option<String>,
     pub funding_vout: Option<u32>,
-    pub sighash_hex: Option<String>,
+    pub utxo_value_zats: Option<u64>,
+    pub payout_tx_hash_hex: Option<String>,
+    pub refund_tx_hash_hex: Option<String>,
+    pub payout_sighash_hex: Option<String>,
+    pub refund_sighash_hex: Option<String>,
 }
 
-// ─── Contract ───────────────────────────────────────────────────────────
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PurchaseAcceptedView {
+    pub purchase_id: u64,
+    pub listing_id: u64,
+    pub burner_taddr: String,
+    pub burner_pubkey_hex: String,
+    pub mpc_path: String,
+    pub required_memo: String,
+    pub price_zat: u64,
+    pub commission_zat: u64,
+    pub payout_fee_zat: u64,
+    pub seller_receives_zat: u64,
+    pub refund_receives_zat: u64,
+    pub expires_at_ns: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SubmittedFundingView {
+    pub purchase_id: u64,
+    pub payout_tx_hash_hex: String,
+    pub refund_tx_hash_hex: String,
+    pub payout_sighash_hex: String,
+    pub refund_sighash_hex: String,
+    pub status: String,
+}
 
 #[near_bindgen(contract_state)]
-#[derive(BorshSerialize, BorshDeserialize)]
+#[derive(BorshSerialize, BorshDeserialize, PanicOnDefault)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct ZnsContract {
     pub owner: AccountId,
     pub relayer: AccountId,
     pub mpc_contract: AccountId,
+    pub mpc_root_pubkey: String,
     pub treasury_ua: String,
     pub commission_bps: u64,
+    pub payout_fee_zat: u64,
     pub default_expiry_seconds: u64,
     pub mainnet: bool,
     pub consensus_branch_id: u32,
     pub next_listing_id: u64,
     pub next_purchase_id: u64,
     pub listings: LookupMap<u64, Listing>,
+    pub listing_ids_by_name: LookupMap<String, u64>,
     pub purchases: LookupMap<u64, Purchase>,
     pub used_paths: LookupMap<String, u64>,
-}
-
-impl Default for ZnsContract {
-    fn default() -> Self {
-        env::panic_str("Contract must be initialized with new()")
-    }
 }
 
 #[near_bindgen]
@@ -170,36 +237,45 @@ impl ZnsContract {
         owner: AccountId,
         relayer: AccountId,
         mpc_contract: AccountId,
+        mpc_root_pubkey: String,
         treasury_ua: String,
         commission_bps: u64,
+        payout_fee_zat: u64,
         default_expiry_seconds: u64,
         mainnet: bool,
         consensus_branch_id: u32,
     ) -> Self {
         assert!(!env::state_exists(), "already initialized");
-        assert!(commission_bps <= MAX_COMMISSION_BPS, "commission_bps too high");
+        assert!(
+            commission_bps <= MAX_COMMISSION_BPS,
+            "commission_bps too high"
+        );
         assert!(
             (MIN_EXPIRY_SECONDS..=MAX_EXPIRY_SECONDS).contains(&default_expiry_seconds),
             "expiry out of range"
         );
+        validate_unified_address(&treasury_ua, mainnet)
+            .unwrap_or_else(|e| env::panic_str(&format!("treasury_ua invalid: {e}")));
+        assert!(payout_fee_zat > 0, "payout_fee_zat must be > 0");
         Self {
             owner,
             relayer,
             mpc_contract,
+            mpc_root_pubkey,
             treasury_ua,
             commission_bps,
+            payout_fee_zat,
             default_expiry_seconds,
             mainnet,
             consensus_branch_id,
             next_listing_id: 1,
             next_purchase_id: 1,
             listings: LookupMap::new(b"L"),
+            listing_ids_by_name: LookupMap::new(b"N"),
             purchases: LookupMap::new(b"P"),
             used_paths: LookupMap::new(b"p"),
         }
     }
-
-    // ── Owner config ────────────────────────────────────────────────────
 
     pub fn set_relayer(&mut self, account: AccountId) {
         self.assert_owner();
@@ -211,8 +287,15 @@ impl ZnsContract {
         self.mpc_contract = account;
     }
 
+    pub fn set_mpc_root_pubkey(&mut self, pubkey: String) {
+        self.assert_owner();
+        self.mpc_root_pubkey = pubkey;
+    }
+
     pub fn set_treasury_ua(&mut self, ua: String) {
         self.assert_owner();
+        validate_unified_address(&ua, self.mainnet)
+            .unwrap_or_else(|e| env::panic_str(&format!("treasury_ua invalid: {e}")));
         self.treasury_ua = ua;
     }
 
@@ -220,6 +303,12 @@ impl ZnsContract {
         self.assert_owner();
         assert!(bps <= MAX_COMMISSION_BPS, "commission_bps too high");
         self.commission_bps = bps;
+    }
+
+    pub fn set_payout_fee_zat(&mut self, fee: u64) {
+        self.assert_owner();
+        assert!(fee > 0, "payout_fee_zat must be > 0");
+        self.payout_fee_zat = fee;
     }
 
     pub fn set_default_expiry_seconds(&mut self, secs: u64) {
@@ -241,20 +330,35 @@ impl ZnsContract {
         self.owner = new_owner;
     }
 
-    // ── Listing lifecycle ─────────────────────────────────────────────
-
     #[payable]
     pub fn create_listing(
         &mut self,
         name: String,
         seller_ua: String,
         price_zat: u64,
-    ) -> u64 {
+    ) -> ListingView {
         self.assert_relayer();
-        assert!(!name.is_empty() && name.len() <= MAX_NAME_LEN, "name length");
+        assert!(
+            !name.is_empty() && name.len() <= MAX_NAME_LEN,
+            "name length"
+        );
         validate_unified_address(&seller_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("seller_ua invalid: {e}")));
-        assert!(price_zat > 0, "price_zat must be > 0");
+        assert!(
+            price_zat > self.payout_fee_zat,
+            "price_zat must exceed payout fee"
+        );
+
+        if let Some(existing_id) = self.listing_ids_by_name.get(&name) {
+            let existing = self
+                .listings
+                .get(existing_id)
+                .expect("listing index out of sync");
+            assert!(
+                !matches!(existing.status, ListingStatus::Open),
+                "listing already open for name"
+            );
+        }
 
         let storage_before = env::storage_usage();
         let id = self.next_listing_id;
@@ -270,24 +374,10 @@ impl ZnsContract {
             status: ListingStatus::Open,
             created_at_ns: now,
         };
-        self.listings.insert(id, listing);
+        self.listings.insert(id, listing.clone());
+        self.listing_ids_by_name.insert(name.clone(), id);
 
-        let storage_used = env::storage_usage().saturating_sub(storage_before) as u128;
-        let cost_yocto = env::storage_byte_cost()
-            .as_yoctonear()
-            .saturating_mul(storage_used);
-        let deposit_yocto = env::attached_deposit().as_yoctonear();
-        assert!(
-            deposit_yocto >= cost_yocto,
-            "insufficient storage deposit: need {} yocto, attached {}",
-            cost_yocto,
-            deposit_yocto
-        );
-        let refund_yocto = deposit_yocto - cost_yocto;
-        if refund_yocto > 0 {
-            let _refund = Promise::new(env::predecessor_account_id())
-                .transfer(NearToken::from_yoctonear(refund_yocto));
-        }
+        self.refund_unused_storage(storage_before);
 
         emit_event(
             "listing_created",
@@ -298,74 +388,73 @@ impl ZnsContract {
                 "price_zat": price_zat,
                 "commission_bps": self.commission_bps,
                 "treasury_ua": self.treasury_ua,
+                "payout_fee_zat": self.payout_fee_zat,
                 "created_at_ns": now,
             }),
         );
-        id
+        self.listing_to_view(&listing)
     }
 
     pub fn cancel_listing(&mut self, id: u64) {
         self.assert_owner();
         let mut listing = self.listings.get(&id).expect("not found").clone();
-        assert!(matches!(listing.status, ListingStatus::Open), "listing not open");
+        assert!(
+            matches!(listing.status, ListingStatus::Open),
+            "listing not open"
+        );
         listing.status = ListingStatus::Cancelled;
         self.listings.insert(id, listing);
         emit_event("listing_cancelled", serde_json::json!({ "id": id }));
     }
-
-    // ── Purchase lifecycle ──────────────────────────────────────────────
 
     #[payable]
     pub fn accept_listing(
         &mut self,
         listing_id: u64,
         buyer_ua: String,
-        burner_taddr: String,
-        burner_pubkey: Vec<u8>,
         mpc_path: String,
-        payout_bundle: Vec<u8>,
-        refund_bundle: Vec<u8>,
-    ) -> u64 {
+    ) -> PurchaseAcceptedView {
         self.assert_relayer();
 
-        // listing must exist and be Open
-        let listing = self.listings.get(&listing_id).expect("listing not found");
-        assert!(matches!(listing.status, ListingStatus::Open), "listing not open");
+        let listing = self
+            .listings
+            .get(&listing_id)
+            .expect("listing not found")
+            .clone();
+        assert!(
+            matches!(listing.status, ListingStatus::Open),
+            "listing not open"
+        );
 
-        // validate buyer UA
         validate_unified_address(&buyer_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("buyer_ua invalid: {e}")));
-
-        // validate burner pubkey
-        assert!(!burner_pubkey.is_empty(), "burner_pubkey empty");
-        let burner_pubkey: [u8; 33] = burner_pubkey
-            .as_slice()
-            .try_into()
-            .unwrap_or_else(|_| env::panic_str("burner_pubkey must be 33 bytes (compressed)"));
-        assert!(
-            matches!(burner_pubkey[0], 0x02 | 0x03),
-            "burner_pubkey not compressed"
-        );
-        verify_burner_taddr(&burner_taddr,
-            &burner_pubkey,
-            self.mainnet,
-        )
-        .unwrap_or_else(|e| env::panic_str(&format!("burner taddr/pubkey mismatch: {e}")));
-
-        // path uniqueness
-        assert!(
-            !self.used_paths.contains_key(&mpc_path),
-            "mpc_path already used"
-        );
         assert!(
             !mpc_path.is_empty() && mpc_path.len() <= MAX_PATH_LEN,
             "mpc_path length"
         );
+        assert!(
+            !self.used_paths.contains_key(&mpc_path),
+            "mpc_path already used"
+        );
 
-        // bundles must be non-empty and not absurdly large (hard cap ~20 KB each)
-        const MAX_BUNDLE_BYTES: usize = 20_000;
-        assert!(!payout_bundle.is_empty() && payout_bundle.len() <= MAX_BUNDLE_BYTES, "payout_bundle size");
-        assert!(!refund_bundle.is_empty() && refund_bundle.len() <= MAX_BUNDLE_BYTES, "refund_bundle size");
+        let (burner_taddr, burner_pubkey) = derive_burner(
+            &self.mpc_root_pubkey,
+            env::current_account_id().as_str(),
+            &mpc_path,
+            self.mainnet,
+        )
+        .unwrap_or_else(|e| env::panic_str(&format!("burner derivation failed: {e}")));
+
+        let commission_zat = listing.price_zat.saturating_mul(listing.commission_bps) / 10_000;
+        let seller_receives_zat = listing
+            .price_zat
+            .checked_sub(commission_zat)
+            .and_then(|v| v.checked_sub(self.payout_fee_zat))
+            .unwrap_or_else(|| env::panic_str("price too small to cover commission + payout fee"));
+        let refund_receives_zat = listing
+            .price_zat
+            .checked_sub(self.payout_fee_zat)
+            .unwrap_or_else(|| env::panic_str("price too small to cover refund fee"));
 
         let storage_before = env::storage_usage();
         let id = self.next_purchase_id;
@@ -373,32 +462,393 @@ impl ZnsContract {
         let now = env::block_timestamp();
         let expires_at_ns =
             now.saturating_add(self.default_expiry_seconds.saturating_mul(1_000_000_000));
+        let required_memo = required_buy_memo(listing_id, id, &listing.name, &buyer_ua);
 
         let purchase = Purchase {
             id,
             listing_id,
             buyer_ua: buyer_ua.clone(),
+            required_memo: required_memo.clone(),
+            price_zat: listing.price_zat,
+            commission_zat,
+            payout_fee_zat: self.payout_fee_zat,
+            seller_receives_zat,
+            refund_receives_zat,
             burner_taddr: burner_taddr.clone(),
             burner_pubkey,
             mpc_path: mpc_path.clone(),
-            payout_bundle,
-            refund_bundle,
             status: PurchaseStatus::AwaitingPayment,
             created_at_ns: now,
             expires_at_ns,
             funding_outpoint: None,
-            sighash: None,
-            signature: None,
+            utxo_value_zats: None,
+            payout_tx: None,
+            refund_tx: None,
+            payout_tx_hash: None,
+            refund_tx_hash: None,
+            payout_sighash: None,
+            refund_sighash: None,
+            payout_signature: None,
+            refund_signature: None,
         };
         self.purchases.insert(id, purchase);
         self.used_paths.insert(mpc_path.clone(), id);
 
-        // mark listing as Sold so no one else can purchase it
-        let mut listing = self.listings.get(&listing_id).unwrap().clone();
-        listing.status = ListingStatus::Sold;
-        self.listings.insert(listing_id, listing);
+        let mut updated_listing = listing.clone();
+        updated_listing.status = ListingStatus::Sold;
+        self.listings.insert(listing_id, updated_listing);
 
-        // storage staking
+        self.refund_unused_storage(storage_before);
+
+        emit_event(
+            "purchase_accepted",
+            serde_json::json!({
+                "purchase_id": id,
+                "listing_id": listing_id,
+                "buyer_ua": buyer_ua,
+                "burner_taddr": burner_taddr,
+                "mpc_path": mpc_path,
+                "required_memo": required_memo,
+                "price_zat": listing.price_zat,
+                "commission_zat": commission_zat,
+                "payout_fee_zat": self.payout_fee_zat,
+                "seller_receives_zat": seller_receives_zat,
+                "refund_receives_zat": refund_receives_zat,
+                "expires_at_ns": expires_at_ns,
+            }),
+        );
+
+        PurchaseAcceptedView {
+            purchase_id: id,
+            listing_id,
+            burner_taddr,
+            burner_pubkey_hex: hex::encode(burner_pubkey),
+            mpc_path,
+            required_memo,
+            price_zat: listing.price_zat,
+            commission_zat,
+            payout_fee_zat: self.payout_fee_zat,
+            seller_receives_zat,
+            refund_receives_zat,
+            expires_at_ns,
+        }
+    }
+
+    pub fn submit_funding(
+        &mut self,
+        purchase_id: u64,
+        utxo_value_zats: u64,
+        utxo_script_pubkey: Vec<u8>,
+        payout_tx: Vec<u8>,
+        refund_tx: Vec<u8>,
+    ) -> SubmittedFundingView {
+        self.assert_relayer();
+        let mut purchase = self
+            .purchases
+            .get(&purchase_id)
+            .expect("purchase not found")
+            .clone();
+        assert!(
+            matches!(purchase.status, PurchaseStatus::AwaitingPayment),
+            "purchase not awaiting payment"
+        );
+        assert!(
+            utxo_value_zats == purchase.price_zat,
+            "utxo value must equal listed price"
+        );
+        validate_burner_script(&utxo_script_pubkey, &purchase.burner_pubkey)
+            .unwrap_or_else(|e| env::panic_str(&format!("burner script invalid: {e}")));
+        assert!(
+            !payout_tx.is_empty() && payout_tx.len() <= MAX_TX_BYTES,
+            "payout_tx size"
+        );
+        assert!(
+            !refund_tx.is_empty() && refund_tx.len() <= MAX_TX_BYTES,
+            "refund_tx size"
+        );
+
+        let payout_parsed = parse_tx(&payout_tx)
+            .unwrap_or_else(|e| env::panic_str(&format!("payout_tx invalid: {e}")));
+        let refund_parsed = parse_tx(&refund_tx)
+            .unwrap_or_else(|e| env::panic_str(&format!("refund_tx invalid: {e}")));
+
+        assert_eq!(
+            payout_parsed.consensus_branch_id, self.consensus_branch_id,
+            "payout_tx wrong consensus branch id"
+        );
+        assert_eq!(
+            refund_parsed.consensus_branch_id, self.consensus_branch_id,
+            "refund_tx wrong consensus branch id"
+        );
+        assert_eq!(
+            payout_parsed.tx_in.prevout_txid, refund_parsed.tx_in.prevout_txid,
+            "payout/refund txid mismatch"
+        );
+        assert_eq!(
+            payout_parsed.tx_in.prevout_vout, refund_parsed.tx_in.prevout_vout,
+            "payout/refund vout mismatch"
+        );
+
+        let payout_sighash =
+            compute_sighash_all(&payout_parsed, utxo_value_zats, &utxo_script_pubkey);
+        let refund_sighash =
+            compute_sighash_all(&refund_parsed, utxo_value_zats, &utxo_script_pubkey);
+        let now = env::block_timestamp();
+        let status = if now >= purchase.expires_at_ns {
+            PurchaseStatus::Refundable
+        } else {
+            PurchaseStatus::PayoutAuthorized
+        };
+
+        purchase.funding_outpoint = Some((
+            payout_parsed.tx_in.prevout_txid,
+            payout_parsed.tx_in.prevout_vout,
+        ));
+        purchase.utxo_value_zats = Some(utxo_value_zats);
+        purchase.payout_tx_hash = Some(sha256(&payout_tx));
+        purchase.refund_tx_hash = Some(sha256(&refund_tx));
+        purchase.payout_tx = Some(payout_tx);
+        purchase.refund_tx = Some(refund_tx);
+        purchase.payout_sighash = Some(payout_sighash);
+        purchase.refund_sighash = Some(refund_sighash);
+        purchase.status = status.clone();
+        self.purchases.insert(purchase_id, purchase);
+
+        emit_event(
+            "funding_submitted",
+            serde_json::json!({
+                "purchase_id": purchase_id,
+                "utxo_txid": hex::encode(payout_parsed.tx_in.prevout_txid),
+                "utxo_vout": payout_parsed.tx_in.prevout_vout,
+                "utxo_value_zats": utxo_value_zats,
+                "payout_tx_hash": hex::encode(sha256(&self.purchases.get(&purchase_id).unwrap().payout_tx.as_ref().unwrap())),
+                "refund_tx_hash": hex::encode(sha256(&self.purchases.get(&purchase_id).unwrap().refund_tx.as_ref().unwrap())),
+                "status": purchase_status_str(&status),
+            }),
+        );
+
+        SubmittedFundingView {
+            purchase_id,
+            payout_tx_hash_hex: hex::encode(
+                self.purchases
+                    .get(&purchase_id)
+                    .unwrap()
+                    .payout_tx_hash
+                    .unwrap(),
+            ),
+            refund_tx_hash_hex: hex::encode(
+                self.purchases
+                    .get(&purchase_id)
+                    .unwrap()
+                    .refund_tx_hash
+                    .unwrap(),
+            ),
+            payout_sighash_hex: hex::encode(
+                self.purchases
+                    .get(&purchase_id)
+                    .unwrap()
+                    .payout_sighash
+                    .unwrap(),
+            ),
+            refund_sighash_hex: hex::encode(
+                self.purchases
+                    .get(&purchase_id)
+                    .unwrap()
+                    .refund_sighash
+                    .unwrap(),
+            ),
+            status: purchase_status_str(&status).to_string(),
+        }
+    }
+
+    pub fn request_payout_signature(&mut self, purchase_id: u64) -> Promise {
+        self.assert_relayer();
+        let purchase = self
+            .purchases
+            .get(&purchase_id)
+            .expect("purchase not found")
+            .clone();
+        assert!(
+            matches!(purchase.status, PurchaseStatus::PayoutAuthorized),
+            "purchase not payout authorized"
+        );
+        let sighash = purchase.payout_sighash.expect("payout_sighash missing");
+        emit_event(
+            "payout_signature_requested",
+            serde_json::json!({
+                "purchase_id": purchase_id,
+                "payout_sighash": hex::encode(sighash),
+            }),
+        );
+        self.request_signature(purchase_id, purchase.mpc_path, sighash, true)
+    }
+
+    pub fn authorize_refund(&mut self, purchase_id: u64) {
+        self.assert_relayer();
+        let mut purchase = self
+            .purchases
+            .get(&purchase_id)
+            .expect("purchase not found")
+            .clone();
+        assert!(
+            env::block_timestamp() >= purchase.expires_at_ns,
+            "purchase not expired"
+        );
+        purchase.status = if purchase.funding_outpoint.is_some() {
+            PurchaseStatus::Refundable
+        } else {
+            PurchaseStatus::Expired
+        };
+        self.purchases.insert(purchase_id, purchase.clone());
+        emit_event(
+            "refund_authorized",
+            serde_json::json!({
+                "purchase_id": purchase_id,
+                "status": purchase_status_str(&purchase.status),
+            }),
+        );
+    }
+
+    pub fn request_refund_signature(&mut self, purchase_id: u64) -> Promise {
+        self.assert_relayer();
+        let purchase = self
+            .purchases
+            .get(&purchase_id)
+            .expect("purchase not found")
+            .clone();
+        assert!(
+            matches!(purchase.status, PurchaseStatus::Refundable),
+            "purchase not refundable"
+        );
+        let sighash = purchase.refund_sighash.expect("refund_sighash missing");
+        emit_event(
+            "refund_signature_requested",
+            serde_json::json!({
+                "purchase_id": purchase_id,
+                "refund_sighash": hex::encode(sighash),
+            }),
+        );
+        self.request_signature(purchase_id, purchase.mpc_path, sighash, false)
+    }
+
+    #[private]
+    pub fn mpc_sign_callback(
+        &mut self,
+        #[callback_result] result: Result<MpcSignature, PromiseError>,
+        purchase_id: u64,
+        is_payout: bool,
+    ) {
+        let mut purchase = self
+            .purchases
+            .get(&purchase_id)
+            .expect("purchase not found")
+            .clone();
+        match result {
+            Ok(signature) => {
+                if is_payout {
+                    purchase.payout_signature = Some(signature.clone());
+                    purchase.status = PurchaseStatus::Completed;
+                } else {
+                    purchase.refund_signature = Some(signature.clone());
+                    purchase.status = PurchaseStatus::Refunded;
+                }
+                self.purchases.insert(purchase_id, purchase.clone());
+                emit_event(
+                    "signature_ready",
+                    serde_json::json!({
+                        "purchase_id": purchase_id,
+                        "kind": if is_payout { "payout" } else { "refund" },
+                        "status": purchase_status_str(&purchase.status),
+                    }),
+                );
+            }
+            Err(err) => {
+                emit_event(
+                    "signature_failed",
+                    serde_json::json!({
+                        "purchase_id": purchase_id,
+                        "kind": if is_payout { "payout" } else { "refund" },
+                        "error": format!("{:?}", err),
+                    }),
+                );
+            }
+        }
+    }
+
+    pub fn prune_terminal(&mut self, purchase_id: u64) {
+        self.assert_owner();
+        let mut purchase = self
+            .purchases
+            .get(&purchase_id)
+            .expect("purchase not found")
+            .clone();
+        assert!(
+            matches!(
+                purchase.status,
+                PurchaseStatus::Completed | PurchaseStatus::Refunded | PurchaseStatus::Expired
+            ),
+            "purchase not terminal"
+        );
+        purchase.payout_tx = None;
+        purchase.refund_tx = None;
+        self.purchases.insert(purchase_id, purchase);
+    }
+
+    pub fn get_listing(&self, id: u64) -> Option<ListingView> {
+        self.listings.get(&id).map(|l| self.listing_to_view(l))
+    }
+
+    pub fn get_listing_by_name(&self, name: String) -> Option<ListingView> {
+        self.listing_ids_by_name
+            .get(&name)
+            .and_then(|id| self.listings.get(id))
+            .map(|l| self.listing_to_view(l))
+    }
+
+    pub fn get_purchase(&self, id: u64) -> Option<PurchaseView> {
+        self.purchases.get(&id).map(|p| self.purchase_to_view(p))
+    }
+
+    pub fn get_payout_signature(&self, purchase_id: u64) -> Option<MpcSignature> {
+        self.purchases
+            .get(&purchase_id)
+            .and_then(|p| p.payout_signature.clone())
+    }
+
+    pub fn get_refund_signature(&self, purchase_id: u64) -> Option<MpcSignature> {
+        self.purchases
+            .get(&purchase_id)
+            .and_then(|p| p.refund_signature.clone())
+    }
+
+    pub fn get_config(&self) -> serde_json::Value {
+        serde_json::json!({
+            "owner": self.owner,
+            "relayer": self.relayer,
+            "mpc_contract": self.mpc_contract,
+            "mpc_root_pubkey": self.mpc_root_pubkey,
+            "treasury_ua": self.treasury_ua,
+            "commission_bps": self.commission_bps,
+            "payout_fee_zat": self.payout_fee_zat,
+            "default_expiry_seconds": self.default_expiry_seconds,
+            "mainnet": self.mainnet,
+            "consensus_branch_id": self.consensus_branch_id,
+            "next_listing_id": self.next_listing_id,
+            "next_purchase_id": self.next_purchase_id,
+        })
+    }
+}
+
+impl ZnsContract {
+    fn assert_owner(&self) {
+        assert_eq!(env::predecessor_account_id(), self.owner, "owner only");
+    }
+
+    fn assert_relayer(&self) {
+        assert_eq!(env::predecessor_account_id(), self.relayer, "relayer only");
+    }
+
+    fn refund_unused_storage(&self, storage_before: u64) {
         let storage_used = env::storage_usage().saturating_sub(storage_before) as u128;
         let cost_yocto = env::storage_byte_cost()
             .as_yoctonear()
@@ -412,137 +862,76 @@ impl ZnsContract {
         );
         let refund_yocto = deposit_yocto - cost_yocto;
         if refund_yocto > 0 {
-            let _refund = Promise::new(env::predecessor_account_id())
+            let _ = Promise::new(env::predecessor_account_id())
                 .transfer(NearToken::from_yoctonear(refund_yocto));
         }
-
-        emit_event(
-            "purchase_accepted",
-            serde_json::json!({
-                "purchase_id": id,
-                "listing_id": listing_id,
-                "buyer_ua": buyer_ua,
-                "burner_taddr": burner_taddr,
-                "mpc_path": mpc_path,
-                "expires_at_ns": expires_at_ns,
-            }),
-        );
-        id
     }
 
-    pub fn submit_funding(
-        &mut self,
+    fn request_signature(
+        &self,
         purchase_id: u64,
-        utxo_txid: [u8; 32], // little-endian
-        utxo_vout: u32,
-        utxo_value_zats: u64,
-        utxo_script_pubkey: Vec<u8>,
-    ) {
-        self.assert_relayer();
-        // TODO: validate script == P2PKH(burner_pubkey), value == price,
-        // splice outpoint into stored bundle, compute sighash, status -> PayoutAuthorized
-        todo!("submit_funding")
-    }
-
-    pub fn request_payout_signature(&mut self, purchase_id: u64) -> Promise {
-        self.assert_relayer();
-        // TODO: verify status == PayoutAuthorized; dispatch MPC; emit event
-        todo!("request_payout_signature")
-    }
-
-    pub fn authorize_refund(&mut self, purchase_id: u64) {
-        self.assert_relayer();
-        // TODO: verify status in (AwaitingPayment post-expiry | PayoutAuthorized post-expiry);
-        // status -> Refundable; emit event
-        todo!("authorize_refund")
-    }
-
-    pub fn request_refund_signature(&mut self, purchase_id: u64) -> Promise {
-        self.assert_relayer();
-        // TODO: verify status == Refundable; dispatch MPC on refund sighash; emit event
-        todo!("request_refund_signature")
-    }
-
-    // ── MPC callbacks ───────────────────────────────────────────────────
-
-    #[private]
-    pub fn mpc_sign_callback(
-        &mut self,
-        #[callback_result] result: Result<MpcSignature, PromiseError>,
-        purchase_id: u64,
+        mpc_path: String,
+        sighash: [u8; 32],
         is_payout: bool,
-    ) {
-        // TODO: store signature, update status (Completed or Refunded), emit event
-        todo!("mpc_sign_callback")
+    ) -> Promise {
+        ext_mpc::ext(self.mpc_contract.clone())
+            .with_static_gas(SIGN_GAS)
+            .with_attached_deposit(MPC_DEPOSIT)
+            .sign(SignRequestArgs {
+                request: SignPayload {
+                    payload: sighash.to_vec(),
+                    path: mpc_path,
+                    key_version: 0,
+                },
+            })
+            .then(
+                ext_self::ext(env::current_account_id())
+                    .with_static_gas(CALLBACK_GAS)
+                    .mpc_sign_callback(purchase_id, is_payout),
+            )
     }
 
-    // ── Maintenance ─────────────────────────────────────────────────────
-
-    pub fn prune_terminal(&mut self, purchase_id: u64) {
-        self.assert_owner();
-        // TODO: drop signature/bundles for terminal purchases to reclaim storage
-        todo!("prune_terminal")
+    fn listing_to_view(&self, listing: &Listing) -> ListingView {
+        ListingView {
+            id: listing.id,
+            name: listing.name.clone(),
+            seller_ua: listing.seller_ua.clone(),
+            price_zat: listing.price_zat,
+            commission_bps: listing.commission_bps,
+            treasury_ua: listing.treasury_ua.clone(),
+            status: listing_status_str(&listing.status).to_string(),
+            created_at_ns: listing.created_at_ns,
+        }
     }
 
-    // ── Views ───────────────────────────────────────────────────────────
-
-    pub fn get_listing(&self, id: u64) -> Option<ListingView> {
-        self.listings.get(&id).map(|l| ListingView {
-            id: l.id,
-            name: l.name.clone(),
-            seller_ua: l.seller_ua.clone(),
-            price_zat: l.price_zat,
-            commission_bps: l.commission_bps,
-            treasury_ua: l.treasury_ua.clone(),
-            status: listing_status_str(&l.status).to_string(),
-            created_at_ns: l.created_at_ns,
-        })
-    }
-
-    pub fn get_purchase(&self, id: u64) -> Option<PurchaseView> {
-        self.purchases.get(&id).map(|p| PurchaseView {
-            id: p.id,
-            listing_id: p.listing_id,
-            buyer_ua: p.buyer_ua.clone(),
-            burner_taddr: p.burner_taddr.clone(),
-            burner_pubkey_hex: hex::encode(p.burner_pubkey),
-            mpc_path: p.mpc_path.clone(),
-            status: purchase_status_str(&p.status).to_string(),
-            created_at_ns: p.created_at_ns,
-            expires_at_ns: p.expires_at_ns,
-            funding_outpoint_txid_hex: p.funding_outpoint.as_ref().map(|(txid, _)| hex::encode(txid)),
-            funding_vout: p.funding_outpoint.map(|(_, vout)| vout),
-            sighash_hex: p.sighash.map(|s| hex::encode(s)),
-        })
-    }
-
-    pub fn get_signature(&self, purchase_id: u64) -> Option<MpcSignature> {
-        self.purchases.get(&purchase_id).and_then(|p| p.signature.clone())
-    }
-
-    pub fn get_config(&self) -> serde_json::Value {
-        serde_json::json!({
-            "owner": self.owner,
-            "relayer": self.relayer,
-            "mpc_contract": self.mpc_contract,
-            "treasury_ua": self.treasury_ua,
-            "commission_bps": self.commission_bps,
-            "default_expiry_seconds": self.default_expiry_seconds,
-            "mainnet": self.mainnet,
-            "consensus_branch_id": self.consensus_branch_id,
-            "next_listing_id": self.next_listing_id,
-            "next_purchase_id": self.next_purchase_id,
-        })
-    }
-
-    // ── Helpers ─────────────────────────────────────────────────────────
-
-    fn assert_owner(&self) {
-        assert_eq!(env::predecessor_account_id(), self.owner, "owner only");
-    }
-
-    fn assert_relayer(&self) {
-        assert_eq!(env::predecessor_account_id(), self.relayer, "relayer only");
+    fn purchase_to_view(&self, purchase: &Purchase) -> PurchaseView {
+        PurchaseView {
+            id: purchase.id,
+            listing_id: purchase.listing_id,
+            buyer_ua: purchase.buyer_ua.clone(),
+            required_memo: purchase.required_memo.clone(),
+            price_zat: purchase.price_zat,
+            commission_zat: purchase.commission_zat,
+            payout_fee_zat: purchase.payout_fee_zat,
+            seller_receives_zat: purchase.seller_receives_zat,
+            refund_receives_zat: purchase.refund_receives_zat,
+            burner_taddr: purchase.burner_taddr.clone(),
+            burner_pubkey_hex: hex::encode(purchase.burner_pubkey),
+            mpc_path: purchase.mpc_path.clone(),
+            status: purchase_status_str(&purchase.status).to_string(),
+            created_at_ns: purchase.created_at_ns,
+            expires_at_ns: purchase.expires_at_ns,
+            funding_outpoint_txid_hex: purchase
+                .funding_outpoint
+                .as_ref()
+                .map(|(txid, _)| hex::encode(txid)),
+            funding_vout: purchase.funding_outpoint.map(|(_, vout)| vout),
+            utxo_value_zats: purchase.utxo_value_zats,
+            payout_tx_hash_hex: purchase.payout_tx_hash.map(hex::encode),
+            refund_tx_hash_hex: purchase.refund_tx_hash.map(hex::encode),
+            payout_sighash_hex: purchase.payout_sighash.map(hex::encode),
+            refund_sighash_hex: purchase.refund_sighash.map(hex::encode),
+        }
     }
 }
 
@@ -556,7 +945,14 @@ fn emit_event(event: &str, data: serde_json::Value) {
     env::log_str(&format!("EVENT_JSON:{}", payload));
 }
 
-/// Validate a Zcash Unified Address (ZIP-316).
+fn required_buy_memo(listing_id: u64, purchase_id: u64, name: &str, buyer_ua: &str) -> String {
+    let commitment = sha256(format!("{listing_id}:{purchase_id}:{name}:{buyer_ua}").as_bytes());
+    format!(
+        "ZNS:BUY:{listing_id}:{purchase_id}:{}",
+        hex::encode(commitment)
+    )
+}
+
 fn validate_unified_address(ua: &str, mainnet: bool) -> Result<(), &'static str> {
     if ua.is_empty() || ua.len() > MAX_UA_LEN {
         return Err("UA length invalid");
@@ -669,14 +1065,10 @@ mod tests {
     }
 
     #[test]
-    fn invalid_empty_receivers() {
-        let ua = make_ua("u", &[]);
-        assert!(validate_unified_address(&ua, true).is_err());
-    }
-
-    #[test]
-    fn invalid_truncated_receiver() {
-        let ua = make_ua("u", &[(0x03, &[0u8; 10])]);
-        assert!(validate_unified_address(&ua, true).is_err());
+    fn required_memo_is_deterministic() {
+        let a = required_buy_memo(1, 2, "alice", "u1test");
+        let b = required_buy_memo(1, 2, "alice", "u1test");
+        assert_eq!(a, b);
+        assert!(a.starts_with("ZNS:BUY:1:2:"));
     }
 }
