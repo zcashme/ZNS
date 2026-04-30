@@ -7,13 +7,13 @@ mod config;
 mod db;
 mod funding;
 mod http;
+mod listings;
 mod near;
 mod payout;
 mod zcash;
 
 use config::Config;
 use db::Store;
-use funding::run_worker;
 use near::NearClient;
 use zcash::Watcher;
 
@@ -53,7 +53,8 @@ async fn main() -> Result<()> {
         watcher,
     });
 
-    tokio::spawn(run_worker(http_state.clone()));
+    tokio::spawn(funding::run_worker(http_state.clone()));
+    tokio::spawn(listings::run_worker(http_state.clone()));
 
     let bind = cfg.bind_addr;
     http::serve(bind, http_state).await.context("http server")?;

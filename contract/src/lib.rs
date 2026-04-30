@@ -414,7 +414,6 @@ impl ZnsContract {
         buyer_ua: String,
         mpc_path: String,
     ) -> PurchaseAcceptedView {
-        self.assert_relayer();
 
         let listing = self
             .listings
@@ -542,7 +541,6 @@ impl ZnsContract {
         payout_tx: Vec<u8>,
         refund_tx: Vec<u8>,
     ) -> SubmittedFundingView {
-        self.assert_relayer();
         let mut purchase = self
             .purchases
             .get(&purchase_id)
@@ -662,7 +660,6 @@ impl ZnsContract {
     }
 
     pub fn request_payout_signature(&mut self, purchase_id: u64) -> Promise {
-        self.assert_relayer();
         let purchase = self
             .purchases
             .get(&purchase_id)
@@ -684,7 +681,6 @@ impl ZnsContract {
     }
 
     pub fn authorize_refund(&mut self, purchase_id: u64) {
-        self.assert_relayer();
         let mut purchase = self
             .purchases
             .get(&purchase_id)
@@ -710,7 +706,6 @@ impl ZnsContract {
     }
 
     pub fn request_refund_signature(&mut self, purchase_id: u64) -> Promise {
-        self.assert_relayer();
         let purchase = self
             .purchases
             .get(&purchase_id)
