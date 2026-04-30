@@ -73,8 +73,7 @@ fn read_compact_size(data: &[u8], offset: &mut usize) -> Option<u64> {
             let bytes = data.get(*offset..*offset + 8)?;
             *offset += 8;
             u64::from_le_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3],
-                bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ])
         }
     };
@@ -288,10 +287,7 @@ pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
 // ─── Script verification ─────────────────────────────────────────────────
 
 /// Validate a 25-byte P2PKH scriptPubKey commits to `burner_pubkey`.
-pub fn validate_burner_script(
-    script: &[u8],
-    burner_pubkey: &[u8; 33],
-) -> Result<(), &'static str> {
+pub fn validate_burner_script(script: &[u8], burner_pubkey: &[u8; 33]) -> Result<(), &'static str> {
     if script.len() != 25 {
         return Err("scriptPubKey wrong length");
     }
@@ -491,9 +487,19 @@ mod tests {
     #[test]
     fn personal_strings_are_16_bytes() {
         for p in [
-            P_HEADERS, P_TRANSPARENT, P_PREVOUTS, P_SEQUENCES, P_OUTPUTS,
-            P_AMOUNTS, P_SCRIPTS, P_TXIN, P_SAPLING, P_ORCHARD,
-            P_ORCH_AC, P_ORCH_AM, P_ORCH_AN,
+            P_HEADERS,
+            P_TRANSPARENT,
+            P_PREVOUTS,
+            P_SEQUENCES,
+            P_OUTPUTS,
+            P_AMOUNTS,
+            P_SCRIPTS,
+            P_TXIN,
+            P_SAPLING,
+            P_ORCHARD,
+            P_ORCH_AC,
+            P_ORCH_AM,
+            P_ORCH_AN,
         ] {
             assert_eq!(p.len(), 16);
         }
