@@ -52,6 +52,7 @@ const ZCASH_FEE_DEFAULT: u64 = 10_000;
 /// signature application.
 pub struct PayoutPlan {
     pub sighash: [u8; 32],
+    pub orchard_sighash: [u8; 32],
     /// Compressed secp256k1 public key the MPC must sign under.
     #[allow(dead_code)]
     pub burner_pubkey: [u8; 33],
@@ -211,6 +212,23 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
 
     let txid_parts = td_unauth.digest(TxIdDigester);
 
+    let orchard_sighash = {
+        let txid = zcash_primitives::transaction::txid::to_txid(
+            TxVersion::V5,
+            branch,
+            &txid_parts,
+        );
+        let mut h = blake2b_simd::Params::new()
+            .hash_length(32)
+            .personal(b"ZcashAuthDigest_")
+            .to_state();
+        h.update(txid.as_ref());
+        let hash = h.finalize();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(hash.as_bytes());
+        arr
+    };
+
     let script_pk =
         transparent::address::Script(zcash_script::script::Code(input.utxo_script_pubkey));
     let signable = transparent::sighash::SignableInput::from_parts(
@@ -229,6 +247,7 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
 
     Ok(PayoutPlan {
         sighash,
+        orchard_sighash,
         burner_pubkey: input.burner_pubkey,
         target_height,
         consensus_branch_id: branch,
@@ -266,7 +285,7 @@ pub fn finalize_with_mpc(plan: PayoutPlan, mpc_sig_compact: &[u8; 64]) -> Result
         .create_proof(orchard_proving_key(), &mut rng)
         .map_err(|e| anyhow!("orchard prove: {e:?}"))?;
     let orchard_authed = orchard_proven
-        .apply_signatures(rng, plan.sighash, &[])
+        .apply_signatures(rng, plan.orchard_sighash, &[])
         .map_err(|e| anyhow!("orchard apply_signatures: {e:?}"))?;
 
     // ── compose authorized transaction and serialize ─────────────────────

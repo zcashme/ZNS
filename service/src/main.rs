@@ -22,6 +22,11 @@ use zcash::Watcher;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install rustls ring crypto provider before any HTTPS connection is made.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     // Load .env file before CLI parsing.
     if let Err(e) = dotenvy::dotenv() {
         tracing::debug!("no .env file loaded: {e}");

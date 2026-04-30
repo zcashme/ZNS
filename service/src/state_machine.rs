@@ -84,12 +84,12 @@ impl StateMachine {
                 }
                 IntentStatus::PaymentConfirmed => {
                     if let Err(e) = self.handle_confirmed(&intent).await {
-                        tracing::warn!(intent.id, "confirmed handler: {e}");
+                        tracing::warn!(intent.id, "confirmed handler: {e:?}");
                     }
                 }
                 IntentStatus::PayoutPending => {
                     if let Err(e) = self.handle_poll_mpc(&intent).await {
-                        tracing::warn!(intent.id, "poll mpc handler: {e}");
+                        tracing::warn!(intent.id, "poll mpc handler: {e:?}");
                     }
                 }
                 _ => {}
@@ -215,9 +215,12 @@ impl StateMachine {
 
         tracing::info!(intent.id, "MPC signature received");
 
-        // Convert v1.signer response {big_r, s} into secp256k1 compact format (64 bytes).
-        let r_bytes = hex::decode(&mpc_sig.big_r).context("decode MPC big_r")?;
-        let s_bytes = hex::decode(&mpc_sig.s).context("decode MPC s")?;
+        // Convert v1.signer response {big_r: {affine_point}, s: {scalar}} into
+        // secp256k1 compact format (64 bytes).
+        let r_bytes = hex::decode(&mpc_sig.big_r.affine_point)
+            .context("decode MPC big_r affine_point")?;
+        let s_bytes = hex::decode(&mpc_sig.s.scalar)
+            .context("decode MPC s scalar")?;
         let mut compact = [0u8; 64];
         // big_r is a compressed point (33 bytes); the r scalar is the last 32 bytes.
         let r_start = r_bytes.len().saturating_sub(32);

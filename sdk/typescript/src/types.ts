@@ -138,8 +138,4 @@ export interface PreparedRelease extends PreparedAction {
   readonly nonce: number;
 }
 
-/** Prepared SETPRICE action (admin only) */
-export interface PreparedSetPrice extends PreparedAction {
-  readonly prices: readonly Zats[];
-  readonly nonce: number;
-}
+

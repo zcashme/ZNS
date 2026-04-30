@@ -67,7 +67,6 @@ console.log("Memo:", memo);
 | `prepareUpdate(name, newAddress, nonce, registryAddress)` | Change address |
 | `prepareBuy(name, buyerAddress, registryAddress)` | Buy a listed name |
 | `prepareRelease(name, nonce, registryAddress)` | Release name (burn) |
-| `prepareSetPrice(prices, nonce, registryAddress)` | Admin: set pricing tiers |
 
 ## Reading Data
 

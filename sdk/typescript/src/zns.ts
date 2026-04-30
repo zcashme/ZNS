@@ -16,7 +16,6 @@ import type {
   PreparedUpdate,
   PreparedBuy,
   PreparedRelease,
-  PreparedSetPrice,
 } from "./types.js";
 
 export type {
@@ -35,7 +34,6 @@ export type {
   PreparedUpdate,
   PreparedBuy,
   PreparedRelease,
-  PreparedSetPrice,
   LastAction,
   EventAction,
 } from "./types.js";
@@ -379,21 +377,6 @@ export class ZNS {
     };
   }
 
-  prepareSetPrice(
-    prices: Zats[],
-    nonce: number,
-  ): PreparedSetPrice {
-    return {
-      prices,
-      nonce,
-      payload: `SETPRICE:${prices.length}:${prices.join(":")}:${nonce}`,
-      complete: (signature: string): CompletedAction => {
-        const memo = `ZNS:SETPRICE:${prices.length}:${prices.join(":")}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
-      },
-    };
-  }
-
   // ── Private helpers ────────────────────────────────────────────────────────
 
   private registrationPayload(reg: Registration): string {
@@ -434,7 +417,7 @@ export class ZNS {
   }
 
   /** Build a ZIP-321 URI. Amount is in zatoshis and will be converted to ZEC for the URI. */
-  private buildZcashUri(
+  buildZcashUri(
     address: string,
     amountZats?: Zats,
     memo?: string,

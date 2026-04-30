@@ -328,15 +328,6 @@ describe("action flows", () => {
     });
   });
 
-  describe("prepareSetPrice / complete", () => {
-    it("returns correct payload and memo", () => {
-      const pre = zns.prepareSetPrice([60000, 42500], 1);
-      expect(pre.payload).toBe("SETPRICE:2:60000:42500:1");
-
-      const post = pre.complete("dummySig");
-      expect(post.memo).toBe("ZNS:SETPRICE:2:60000:42500:1:dummySig");
-    });
-  });
 });
 
 describe("isValidName", () => {

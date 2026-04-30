@@ -34,6 +34,9 @@ near-jsonrpc-primitives = "0.29"
 near-primitives = "0.29"
 near-crypto = "0.29"
 
+# TLS / rustls crypto provider for HTTPS (near-jsonrpc-client -> reqwest -> rustls)
+rustls = { version = "0.23", features = ["ring"], default-features = false }
+
 # Zcash lightwalletd + tx construction
 zcash_client_backend = { version = "0.21", features = ["lightwalletd-tonic-transport", "lightwalletd-tonic-tls-webpki-roots", "orchard"] }
 zcash_primitives = "0.26"

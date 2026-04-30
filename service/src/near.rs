@@ -21,11 +21,21 @@ pub struct NearMpcClient {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct MpcSignature {
-    /// Hex-encoded big-R point.
-    pub big_r: String,
-    /// Hex-encoded signature scalar.
-    pub s: String,
+    pub big_r: AffinePoint,
+    pub s: ScalarHex,
     pub recovery_id: u8,
+    #[allow(dead_code)]
+    pub scheme: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AffinePoint {
+    pub affine_point: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScalarHex {
+    pub scalar: String,
 }
 
 impl NearMpcClient {
@@ -111,22 +121,31 @@ impl NearMpcClient {
     /// This blocks until the MPC nodes have collaboratively produced the signature.
     pub async fn request_sign(&self, path: &str, sighash: &[u8; 32]) -> Result<MpcSignature> {
         tracing::info!(path, "requesting MPC signature");
+        let payload: Vec<u8> = sighash.to_vec();
         let outcome = self
             .call_mut(
                 "sign",
                 serde_json::json!({
-                    "payload": hex::encode(sighash),
-                    "path": path,
-                    "key_version": 0,
+                    "request": {
+                        "payload": payload,
+                        "path": path,
+                        "key_version": 0,
+                    }
                 }),
                 300_000_000_000_000, // 300 Tgas – MPC is expensive
-                0,
+                100,                 // 100 yoctoNEAR (matches MPC localnet example)
             )
             .await?;
 
         let value = match outcome.status {
             FinalExecutionStatus::SuccessValue(v) => v,
-            other => bail!("MPC sign tx failed: {:?}", other),
+            FinalExecutionStatus::Failure(tx_execution_error) => {
+                bail!("MPC sign tx failed: {:?}", tx_execution_error)
+            }
+            other => {
+                tracing::warn!("MPC sign unexpected status: {:?}", other);
+                bail!("MPC sign tx failed: unexpected status {:?}", other)
+            }
         };
 
         let sig: MpcSignature =
@@ -160,3 +179,4 @@ impl NearMpcClient {
         }
     }
 }
+
