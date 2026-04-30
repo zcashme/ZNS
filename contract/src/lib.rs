@@ -10,6 +10,7 @@ use near_sdk::{env, near_bindgen, AccountId, Gas, NearToken, Promise, PromiseErr
 use serde::{Deserialize, Serialize};
 
 mod zcash;
+use zcash::{validate_burner_script, verify_burner_taddr};
 
 const SIGN_GAS: Gas = Gas::from_tgas(250);
 const CALLBACK_GAS: Gas = Gas::from_tgas(50);
@@ -222,14 +223,66 @@ impl ZnsContract {
         price_zat: u64,
     ) -> u64 {
         self.assert_relayer();
-        // TODO: validate name, UA, price; charge storage; emit event
-        todo!("create_listing")
+        assert!(!name.is_empty() && name.len() <= MAX_NAME_LEN, "name length");
+        validate_unified_address(&seller_ua, self.mainnet)
+            .unwrap_or_else(|e| env::panic_str(&format!("seller_ua invalid: {e}")));
+        assert!(price_zat > 0, "price_zat must be > 0");
+
+        let storage_before = env::storage_usage();
+        let id = self.next_listing_id;
+        self.next_listing_id += 1;
+        let now = env::block_timestamp();
+        let listing = Listing {
+            id,
+            name: name.clone(),
+            seller_ua: seller_ua.clone(),
+            price_zat,
+            commission_bps: self.commission_bps,
+            treasury_ua: self.treasury_ua.clone(),
+            status: ListingStatus::Open,
+            created_at_ns: now,
+        };
+        self.listings.insert(id, listing);
+
+        let storage_used = env::storage_usage().saturating_sub(storage_before) as u128;
+        let cost_yocto = env::storage_byte_cost()
+            .as_yoctonear()
+            .saturating_mul(storage_used);
+        let deposit_yocto = env::attached_deposit().as_yoctonear();
+        assert!(
+            deposit_yocto >= cost_yocto,
+            "insufficient storage deposit: need {} yocto, attached {}",
+            cost_yocto,
+            deposit_yocto
+        );
+        let refund_yocto = deposit_yocto - cost_yocto;
+        if refund_yocto > 0 {
+            let _refund = Promise::new(env::predecessor_account_id())
+                .transfer(NearToken::from_yoctonear(refund_yocto));
+        }
+
+        emit_event(
+            "listing_created",
+            serde_json::json!({
+                "id": id,
+                "name": name,
+                "seller_ua": seller_ua,
+                "price_zat": price_zat,
+                "commission_bps": self.commission_bps,
+                "treasury_ua": self.treasury_ua,
+                "created_at_ns": now,
+            }),
+        );
+        id
     }
 
     pub fn cancel_listing(&mut self, id: u64) {
         self.assert_owner();
-        // TODO: only if Open; emit event
-        todo!("cancel_listing")
+        let mut listing = self.listings.get(&id).expect("not found").clone();
+        assert!(matches!(listing.status, ListingStatus::Open), "listing not open");
+        listing.status = ListingStatus::Cancelled;
+        self.listings.insert(id, listing);
+        emit_event("listing_cancelled", serde_json::json!({ "id": id }));
     }
 
     // ── Purchase lifecycle ──────────────────────────────────────────────
@@ -353,4 +406,109 @@ fn emit_event(event: &str, data: serde_json::Value) {
         "data": [data],
     });
     env::log_str(&format!("EVENT_JSON:{}", payload));
+}
+
+/// Validate a Zcash Unified Address (ZIP-316).
+fn validate_unified_address(ua: &str, mainnet: bool) -> Result<(), &'static str> {
+    if ua.is_empty() || ua.len() > MAX_UA_LEN {
+        return Err("UA length invalid");
+    }
+    let parsed = bech32::primitives::decode::CheckedHrpstring::new::<bech32::Bech32m>(ua)
+        .map_err(|_| "invalid Bech32m encoding")?;
+    let hrp = parsed.hrp().as_str();
+    let expected = if mainnet { "u" } else { "utest" };
+    if hrp != expected {
+        return Err("wrong HRP for network");
+    }
+    let data: Vec<u8> = parsed.byte_iter().collect();
+    if data.is_empty() {
+        return Err("empty receiver list");
+    }
+    let mut offset = 0;
+    let mut count = 0;
+    while offset < data.len() {
+        if offset + 2 > data.len() {
+            return Err("truncated receiver header");
+        }
+        let typecode = data[offset];
+        let len = data[offset + 1] as usize;
+        offset += 2;
+        if len == 0 {
+            return Err("empty receiver payload");
+        }
+        if offset + len > data.len() {
+            return Err("truncated receiver payload");
+        }
+        match typecode {
+            0x00 | 0x01 => {
+                if len != 20 {
+                    return Err("invalid transparent receiver length");
+                }
+            }
+            0x02 | 0x03 => {
+                if len != 43 {
+                    return Err("invalid shielded receiver length");
+                }
+            }
+            _ => {}
+        }
+        offset += len;
+        count += 1;
+    }
+    if count == 0 {
+        return Err("no receivers");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ua(hrp: &str, receivers: &[(u8, &[u8])]) -> String {
+        let hrp = bech32::Hrp::parse(hrp).unwrap();
+        let mut data = vec![];
+        for (tc, payload) in receivers {
+            data.push(*tc);
+            data.push(payload.len() as u8);
+            data.extend_from_slice(payload);
+        }
+        bech32::encode::<bech32::Bech32m>(hrp, &data).unwrap()
+    }
+
+    #[test]
+    fn valid_mainnet_ua_orchard() {
+        let ua = make_ua("u", &[(0x03, &[0u8; 43])]);
+        assert!(validate_unified_address(&ua, true).is_ok());
+    }
+
+    #[test]
+    fn valid_mainnet_ua_mixed() {
+        let ua = make_ua("u", &[(0x00, &[0u8; 20]), (0x03, &[0u8; 43])]);
+        assert!(validate_unified_address(&ua, true).is_ok());
+    }
+
+    #[test]
+    fn valid_testnet_ua() {
+        let ua = make_ua("utest", &[(0x02, &[0u8; 43])]);
+        assert!(validate_unified_address(&ua, false).is_ok());
+    }
+
+    #[test]
+    fn invalid_wrong_hrp_mainnet() {
+        let ua = make_ua("utest", &[(0x03, &[0u8; 43])]);
+        assert!(validate_unified_address(&ua, true).is_err());
+    }
+
+    #[test]
+    fn invalid_empty_receivers() {
+        let ua = make_ua("u", &[]);
+        assert!(validate_unified_address(&ua, true).is_err());
+    }
+
+    #[test]
+    fn invalid_truncated_receiver() {
+        let ua = make_ua("u", &[(0x03, &[0u8; 10])]);
+        assert!(validate_unified_address(&ua, true).is_err());
+    }
 }
