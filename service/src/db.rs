@@ -121,6 +121,7 @@ impl Store {
                 created_at        TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_listings_name ON listings(name);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_name_unique ON listings(name);
             CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);
 
             CREATE TABLE IF NOT EXISTS purchases (

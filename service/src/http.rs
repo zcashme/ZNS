@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::db::Store;
+use crate::db::{Listing, ListingStatus, Store};
 use crate::escrow;
 use crate::memo::MemoSigner;
 use crate::near::NearClient;
@@ -21,47 +21,80 @@ pub struct AppState {
     pub memo_signer: MemoSigner,
 }
 
-// ─── POST /listing ──────────────────────────────────────────────────────
+// ─── POST /purchase ─────────────────────────────────────────────────────
+/// Buyer calls this with the name they want and their UA.
+/// The service resolves the listing from the ZNS indexer, auto-creates the
+/// NEAR contract entry if needed, and returns a burner address to pay.
 
 #[derive(Deserialize)]
-pub struct CreateListingRequest {
+pub struct CreatePurchaseRequest {
     pub name: String,
-    pub seller_ua: String,
-    pub price_zat: u64,
+    pub buyer_ua: String,
 }
 
 #[derive(Serialize)]
-pub struct CreateListingResponse {
-    pub local_listing_id: i64,
-    pub name: String,
-    pub seller_ua: String,
+pub struct CreatePurchaseResponse {
+    pub local_purchase_id: i64,
+    pub contract_purchase_id: u64,
+    pub burner_taddr: String,
     pub price_zat: u64,
+    pub commission_zat: u64,
+    pub fee_zat: u64,
+    pub seller_receives_zat: u64,
+    pub expires_at: String,
 }
 
-async fn create_listing_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<CreateListingRequest>,
-) -> Result<Json<CreateListingResponse>, axum::http::StatusCode> {
-    // 1. Insert locally first (gives us a local ID for reference)
-    let local_id = state
-        .store
-        .insert_listing(
-            &body.name,
-            &body.seller_ua,
-            body.price_zat,
-            state.cfg.commission_bps as u64,
-            &state.cfg.treasury_ua,
-        )
+/// Resolve a name from the ZNS indexer.
+async fn resolve_name(indexer_url: &str, name: &str) -> Result<( String, u64 ), reqwest::Error> {
+    let resp: serde_json::Value = reqwest::Client::new()
+        .post(indexer_url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "resolve", "params": [name],
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let seller_ua = resp["result"]["address"].as_str().unwrap_or("").to_string();
+    let price = resp["result"]["listing"]["price"].as_u64().unwrap_or(0);
+    Ok((seller_ua, price))
+}
+
+/// Get or create the NEAR contract listing for a name.
+/// First checks local DB, then falls back to creating on-chain.
+async fn ensure_listing(
+    state: &AppState,
+    name: &str,
+) -> Result<Listing, axum::http::StatusCode> {
+    // 1. Check local DB first
+    if let Ok(Some(listing)) = state.store.get_listing_by_name(name) {
+        if listing.status == ListingStatus::Open {
+            return Ok(listing);
+        }
+        // If Sold/Cancelled, return conflict
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
+
+    // 2. Not in DB — resolve from indexer
+    let (seller_ua, price_zat) = resolve_name(&state.cfg.indexer_rpc, name)
+        .await
         .map_err(|e| {
-            tracing::error!("insert listing: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            tracing::error!("indexer resolve: {e}");
+            axum::http::StatusCode::BAD_GATEWAY
         })?;
 
-    // 2. Create on-chain via NEAR contract
+    if seller_ua.is_empty() || price_zat == 0 {
+        tracing::warn!("name not listed: {}", name);
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    // 3. Create on-chain via NEAR contract
     let args = serde_json::json!({
-        "name": body.name,
-        "seller_ua": body.seller_ua,
-        "price_zat": body.price_zat,
+        "name": name,
+        "seller_ua": seller_ua,
+        "price_zat": price_zat,
     });
     let deposit_yocto = 50_000_000_000_000_000_000_000u128; // 0.05 NEAR
     let gas = 50_000_000_000_000u64; // 50 Tgas
@@ -96,7 +129,15 @@ async fn create_listing_handler(
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?);
 
-    // 3. Record the on-chain ID locally
+    // 4. Store locally
+    let local_id = state
+        .store
+        .insert_listing(name, &seller_ua, price_zat, state.cfg.commission_bps as u64, &state.cfg.treasury_ua)
+        .map_err(|e| {
+            tracing::error!("insert listing: {e}");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
     state
         .store
         .set_contract_listing_id(local_id, contract_listing_id as i64)
@@ -105,49 +146,26 @@ async fn create_listing_handler(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    Ok(Json(CreateListingResponse {
-        local_listing_id: local_id,
-        name: body.name,
-        seller_ua: body.seller_ua,
-        price_zat: body.price_zat,
-    }))
-}
-
-// ─── POST /purchase ─────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct CreatePurchaseRequest {
-    pub local_listing_id: i64,
-    pub buyer_ua: String,
-}
-
-#[derive(Serialize)]
-pub struct CreatePurchaseResponse {
-    pub local_purchase_id: i64,
-    pub contract_purchase_id: u64,
-    pub burner_taddr: String,
-    pub price_zat: u64,
-    pub commission_zat: u64,
-    pub fee_zat: u64,
-    pub seller_receives_zat: u64,
-    pub expires_at: String,
+    // Return the newly created listing
+    state
+        .store
+        .get_listing_by_id(local_id)
+        .map_err(|e| {
+            tracing::error!("get listing after insert: {e}");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn create_purchase_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreatePurchaseRequest>,
 ) -> Result<Json<CreatePurchaseResponse>, axum::http::StatusCode> {
-    // 1. Resolve listing
-    let listing = state
-        .store
-        .get_listing_by_id(body.local_listing_id)
-        .map_err(|e| {
-            tracing::error!("get listing: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    // 1. Resolve or create the NEAR listing for this name
+    let listing = ensure_listing(&state, &body.name)
+        .await?;
 
-    if listing.status != crate::db::ListingStatus::Open {
+    if listing.status != ListingStatus::Open {
         return Err(axum::http::StatusCode::CONFLICT);
     }
 
@@ -193,7 +211,7 @@ async fn create_purchase_handler(
         })? as u32;
 
     // 5. Build BUY memo
-    let memo_str = state.memo_signer.sign_buy(&listing.name, &body.buyer_ua);
+    let memo_str = state.memo_signer.sign_buy(&body.name, &body.buyer_ua);
     let mut memo_bytes = [0u8; 512];
     let raw = memo_str.as_bytes();
     let len = raw.len().min(512);
@@ -250,7 +268,6 @@ async fn create_purchase_handler(
         "refund_bundle": refund_bundle,
     });
 
-    // Attach 0.1 NEAR for storage staking; contract refunds excess.
     let deposit_yocto = 100_000_000_000_000_000_000_000u128; // 0.1 NEAR
     let gas = 100_000_000_000_000u64; // 100 Tgas
 
@@ -304,11 +321,6 @@ async fn create_purchase_handler(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // 10. Update listing status locally to Sold so no one else can purchase
-    // (the contract already did this atomically, but our local cache needs to reflect it)
-    // Note: Store currently doesn't have an update_listing_status method.
-    // We'll add one if needed, but for now the contract is the source of truth.
-
     Ok(Json(CreatePurchaseResponse {
         local_purchase_id,
         contract_purchase_id,
@@ -325,7 +337,6 @@ async fn create_purchase_handler(
 
 pub async fn serve(bind: SocketAddr, state: Arc<AppState>) -> Result<()> {
     let app = Router::new()
-        .route("/listing", post(create_listing_handler))
         .route("/purchase", post(create_purchase_handler))
         .with_state(state);
 
