@@ -119,3 +119,14 @@ pub fn verify_sufficient_payment(
 ) -> bool {
     utxo_confirmation >= min_confirmations && utxo_value >= listed_price_zat + fee_reserve_zat
 }
+
+/// Build a 25-byte P2PKH scriptPubKey from a compressed secp256k1 pubkey.
+pub fn p2pkh_script(pubkey: &[u8; 33]) -> Vec<u8> {
+    let sha = Sha256::digest(pubkey);
+    let hash160: [u8; 20] = Ripemd160::digest(sha).into();
+    let mut script = Vec::with_capacity(25);
+    script.extend_from_slice(&[0x76, 0xa9, 0x14]);
+    script.extend_from_slice(&hash160);
+    script.extend_from_slice(&[0x88, 0xac]);
+    script
+}

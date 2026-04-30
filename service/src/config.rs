@@ -37,6 +37,10 @@ pub struct Config {
     )]
     pub mpc_contract: String,
 
+    /// ZNS marketplace contract on NEAR.
+    #[arg(long, env = "ZNS_CONTRACT")]
+    pub zns_contract: String,
+
     /// MPC master public key (hex, 66 bytes compressed secp256k1) used to derive
     /// transparent escrow addresses.  This MUST match the key managed by the
     /// MPC network for the NEAR account above.

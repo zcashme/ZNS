@@ -9,10 +9,14 @@ mod escrow;
 mod http;
 mod memo;
 mod near;
+mod payout;
 mod zcash;
 
 use config::Config;
 use db::Store;
+use memo::MemoSigner;
+use near::NearClient;
+use zcash::Watcher;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,9 +37,26 @@ async fn main() -> Result<()> {
 
     let store = Arc::new(Store::open(&cfg.sqlite_path).context("open store")?);
 
+    let near = NearClient::new(
+        &cfg.near_rpc,
+        &cfg.near_account,
+        &cfg.near_secret_key,
+        &cfg.mpc_contract,
+        &cfg.zns_contract,
+    )
+    .context("NEAR client init")?;
+
+    let watcher = Watcher::new(&cfg.lwd_url);
+
+    let memo_signer =
+        MemoSigner::from_hex(&cfg.admin_ed25519_key).context("admin ed25519 key")?;
+
     let http_state = Arc::new(http::AppState {
         cfg: cfg.clone(),
         store: store.clone(),
+        near,
+        watcher,
+        memo_signer,
     });
 
     let bind = cfg.bind_addr;

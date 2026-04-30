@@ -9,12 +9,13 @@ use near_primitives::{
 use serde::Deserialize;
 use std::str::FromStr;
 
-/// Minimal NEAR client used solely to call the MPC `v1.signer` contract.
-pub struct NearMpcClient {
+/// Generic NEAR client for calling both the ZNS contract and the MPC signer.
+pub struct NearClient {
     pub account: AccountId,
     client: JsonRpcClient,
     signer: Signer,
-    mpc_contract: AccountId,
+    pub mpc_contract: AccountId,
+    pub zns_contract: AccountId,
 }
 
 /// Response from v1.signer after a successful `sign` call.
@@ -38,8 +39,14 @@ pub struct ScalarHex {
     pub scalar: String,
 }
 
-impl NearMpcClient {
-    pub fn new(rpc_url: &str, account: &str, secret_key: &str, mpc_contract: &str) -> Result<Self> {
+impl NearClient {
+    pub fn new(
+        rpc_url: &str,
+        account: &str,
+        secret_key: &str,
+        mpc_contract: &str,
+        zns_contract: &str,
+    ) -> Result<Self> {
         let signer = near_crypto::InMemorySigner::from_secret_key(
             AccountId::from_str(account)?,
             near_crypto::SecretKey::from_str(secret_key)?,
@@ -50,12 +57,14 @@ impl NearMpcClient {
             client,
             signer,
             mpc_contract: mpc_contract.parse()?,
+            zns_contract: zns_contract.parse()?,
         })
     }
 
-    /// Call a mutable method on the MPC contract and return the execution outcome.
-    async fn call_mut(
+    /// Call a mutable method on any NEAR contract and return the execution outcome.
+    pub async fn call_mut(
         &self,
+        contract: &AccountId,
         method: &str,
         args: serde_json::Value,
         gas: u64,
@@ -75,7 +84,7 @@ impl NearMpcClient {
             signer_id: self.account.clone(),
             public_key: self.signer.public_key(),
             nonce,
-            receiver_id: self.mpc_contract.clone(),
+            receiver_id: contract.clone(),
             block_hash,
             actions: vec![Action::FunctionCall(Box::new(
                 near_primitives::transaction::FunctionCallAction {
@@ -116,14 +125,29 @@ impl NearMpcClient {
         }
     }
 
+    // ── ZNS contract helpers ──────────────────────────────────────────
+
+    /// Call a mutable method on the ZNS marketplace contract.
+    pub async fn call_zns_mut(
+        &self,
+        method: &str,
+        args: serde_json::Value,
+        gas: u64,
+        deposit: u128,
+    ) -> Result<near_primitives::views::FinalExecutionOutcomeView> {
+        self.call_mut(&self.zns_contract.clone(), method, args, gas, deposit)
+            .await
+    }
+
+    // ── MPC helpers ───────────────────────────────────────────────────
+
     /// Request the MPC network to sign a 32-byte sighash for the given derivation path.
-    ///
-    /// This blocks until the MPC nodes have collaboratively produced the signature.
     pub async fn request_sign(&self, path: &str, sighash: &[u8; 32]) -> Result<MpcSignature> {
         tracing::info!(path, "requesting MPC signature");
         let payload: Vec<u8> = sighash.to_vec();
         let outcome = self
             .call_mut(
+                &self.mpc_contract.clone(),
                 "sign",
                 serde_json::json!({
                     "request": {
@@ -132,8 +156,8 @@ impl NearMpcClient {
                         "key_version": 0,
                     }
                 }),
-                300_000_000_000_000, // 300 Tgas – MPC is expensive
-                100,                 // 100 yoctoNEAR (matches MPC localnet example)
+                300_000_000_000_000, // 300 Tgas
+                100,
             )
             .await?;
 
@@ -155,9 +179,9 @@ impl NearMpcClient {
         Ok(sig)
     }
 
-    /// Query the MPC contract for the master/derived public key associated with a path.
+    /// Query the MPC contract for the master public key.
     #[allow(dead_code)]
-    pub async fn query_public_key(&self, _path: &str) -> Result<Option<String>> {
+    pub async fn query_mpc_public_key(&self) -> Result<Option<String>> {
         let req = QueryRequest::CallFunction {
             account_id: self.mpc_contract.clone(),
             method_name: "public_key".to_string(),
@@ -179,4 +203,3 @@ impl NearMpcClient {
         }
     }
 }
-

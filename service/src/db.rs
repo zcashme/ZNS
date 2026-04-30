@@ -195,6 +195,14 @@ impl Store {
         rows.collect::<Result<_, _>>().context("list open listings")
     }
 
+    pub fn set_contract_listing_id(&self, id: i64, contract_id: i64) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE listings SET contract_listing_id = ?1 WHERE id = ?2",
+            params![contract_id, id],
+        )?;
+        Ok(())
+    }
+
     pub fn insert_purchase(
         &self,
         listing_id: i64,
