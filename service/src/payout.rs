@@ -27,8 +27,10 @@ use orchard::{
     keys::OutgoingViewingKey,
     value::NoteValue,
 };
-use rand::rngs::OsRng;
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use secp256k1::{PublicKey as SecpPubkey, Secp256k1};
+use sha2::{Digest, Sha256};
 use transparent::{
     builder::TransparentBuilder,
     bundle::{Bundle as TBundle, OutPoint, TxOut},
@@ -37,7 +39,7 @@ use zcash_address::ZcashAddress;
 use zcash_keys::address::{Address as ZAddress, UnifiedAddress};
 use zcash_primitives::transaction::{
     Authorized, TransactionData, TxVersion, Unauthorized,
-    fees::{self, zip317, FeeRule as _},
+    fees::{self, FeeRule as _, zip317},
     sighash::{SignableInput, signature_hash},
     txid::TxIdDigester,
 };
@@ -72,6 +74,7 @@ pub struct PayoutPlan {
     pub burner_pubkey: [u8; 33],
     target_height: BlockHeight,
     consensus_branch_id: BranchId,
+    proof_seed: [u8; 32],
     transparent_unauth: TBundle<transparent::builder::Unauthorized>,
     orchard_unproven: OrchardBundle<
         orchard::builder::InProgress<orchard::builder::Unproven, orchard::builder::Unauthorized>,
@@ -148,6 +151,32 @@ fn network_type(s: &str) -> Result<NetworkType> {
     }
 }
 
+fn deterministic_seed(input: &PayoutInputs<'_>, label: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(label);
+    hasher.update(input.network.as_bytes());
+    hasher.update(input.target_height.to_le_bytes());
+    hasher.update(input.utxo_outpoint.hash());
+    hasher.update(input.utxo_outpoint.n().to_le_bytes());
+    hasher.update(input.utxo_value_zats.to_le_bytes());
+    hasher.update((input.utxo_script_pubkey.len() as u64).to_le_bytes());
+    hasher.update(&input.utxo_script_pubkey);
+    hasher.update(input.burner_pubkey);
+    hasher.update(input.seller_ua.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(input.treasury_ua.as_bytes());
+    hasher.update([0u8]);
+    if let Some(buyer_ua) = input.buyer_ua {
+        hasher.update(buyer_ua.as_bytes());
+    }
+    hasher.update([0u8]);
+    hasher.update(input.seller_amount.to_le_bytes());
+    hasher.update(input.treasury_amount.to_le_bytes());
+    hasher.update(input.memo);
+    hasher.update(input.fee.unwrap_or_else(payout_fee).to_le_bytes());
+    hasher.finalize().into()
+}
+
 /// Phase 1 — build the unauthorized transaction and compute its sighash.
 pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
     let net = network_type(input.network)?;
@@ -220,7 +249,8 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
             )
             .map_err(|e| anyhow!("orchard add treasury output: {e:?}"))?;
     }
-    let mut rng = OsRng;
+    let proof_seed = deterministic_seed(&input, b"orchard-proof");
+    let mut rng = ChaCha20Rng::from_seed(deterministic_seed(&input, b"orchard-build"));
     let (orchard_unproven, _meta) = obuilder
         .build::<ZatBalance>(&mut rng)
         .map_err(|e| anyhow!("orchard build: {e:?}"))?
@@ -240,11 +270,8 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
 
     let txid_parts = td_unauth.digest(TxIdDigester);
 
-    let orchard_sighash = *signature_hash(
-        &td_unauth,
-        &SignableInput::Shielded,
-        &txid_parts,
-    ).as_ref();
+    let orchard_sighash =
+        *signature_hash(&td_unauth, &SignableInput::Shielded, &txid_parts).as_ref();
 
     let script_pk =
         transparent::address::Script(zcash_script::script::Code(input.utxo_script_pubkey));
@@ -268,6 +295,7 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
         burner_pubkey: input.burner_pubkey,
         target_height,
         consensus_branch_id: branch,
+        proof_seed,
         transparent_unauth,
         orchard_unproven,
     })
@@ -296,7 +324,7 @@ pub fn finalize_with_mpc(plan: PayoutPlan, mpc_sig_compact: &[u8; 64]) -> Result
         .map_err(|e| anyhow!("finalize transparent: {e:?}"))?;
 
     // ── prove + finalize orchard bundle binding signature ────────────────
-    let mut rng = OsRng;
+    let mut rng = ChaCha20Rng::from_seed(plan.proof_seed);
     let orchard_proven = plan
         .orchard_unproven
         .create_proof(orchard_proving_key(), &mut rng)
@@ -323,58 +351,13 @@ pub fn finalize_with_mpc(plan: PayoutPlan, mpc_sig_compact: &[u8; 64]) -> Result
     Ok(out)
 }
 
-/// Build raw bundle bytes with a **placeholder** outpoint for storage in the
-/// contract at `accept_listing` time.  The real outpoint is spliced in later
-/// during `submit_funding`.
-///
-/// Internally this builds an unsigned transaction, creates Orchard proofs,
-/// and finalizes with a dummy secp256k1 signature so that `zcash_primitives`
-/// can serialize the fully-shaped v5 transaction.
-pub fn build_bundle_bytes(
-    network: &str,
-    target_height: u32,
-    seller_ua: &str,
-    treasury_ua: &str,
-    buyer_ua: &str,
-    seller_amount: u64,
-    treasury_amount: u64,
-    fee: u64,
-    memo: [u8; 512],
-    burner_pubkey: [u8; 33],
-    script_pubkey: Vec<u8>,
-    is_refund: bool,
-) -> Result<Vec<u8>> {
-    let dummy_outpoint = transparent::bundle::OutPoint::new([0u8; 32], 0);
-
-    let plan = build_unsigned(PayoutInputs {
-        network,
-        target_height,
-        utxo_outpoint: dummy_outpoint,
-        utxo_value_zats: if is_refund {
-            seller_amount + fee
-        } else {
-            seller_amount + treasury_amount + fee
-        },
-        utxo_script_pubkey: script_pubkey,
-        burner_pubkey,
-        seller_ua,
-        treasury_ua,
-        buyer_ua: if is_refund { Some(buyer_ua) } else { None },
-        seller_amount,
-        treasury_amount,
-        memo,
-        fee: Some(fee),
-    })?;
-
-    // Dummy secp256k1 signature — any 64-byte compact valid signature works.
-    // The contract parser never validates signatures; it only needs the
-    // transaction shape to compute the sighash later.
+pub fn build_tx_bytes(input: PayoutInputs<'_>) -> Result<Vec<u8>> {
+    let plan = build_unsigned(input)?;
     let secp = Secp256k1::new();
-    let dummy_sk = secp256k1::SecretKey::new(&mut rand::rngs::OsRng);
+    let dummy_sk = secp256k1::SecretKey::from_slice(&[7u8; 32]).expect("static dummy secret key");
     let dummy_msg = secp256k1::Message::from_digest([0u8; 32]);
     let dummy_sig = secp.sign_ecdsa(&dummy_msg, &dummy_sk);
     let mut dummy_compact = [0u8; 64];
     dummy_compact.copy_from_slice(&dummy_sig.serialize_compact());
-
     finalize_with_mpc(plan, &dummy_compact)
 }

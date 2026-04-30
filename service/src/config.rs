@@ -28,10 +28,6 @@ pub struct Config {
     #[arg(long, env = "ZNS_CONTRACT")]
     pub zns_contract: String,
 
-    /// Zcash unified address receiving commission / treasury funds.
-    #[arg(long, env = "ZNS_TREASURY_UA")]
-    pub treasury_ua: String,
-
     /// Zcash network: mainnet or testnet.
     #[arg(long, env = "ZNS_ZCASH_NETWORK", default_value = "testnet")]
     pub zcash_network: String,
@@ -55,14 +51,6 @@ pub struct Config {
     /// Number of Zcash confirmations required before confirming payment.
     #[arg(long, env = "ZNS_MIN_CONFIRMATIONS", default_value = "6")]
     pub min_confirmations: u32,
-
-    /// Zcash block height after which a pending intent is treated as expired.
-    #[arg(long, env = "ZNS_INTENT_EXPIRY_ZEC_BLOCKS", default_value = "100")]
-    pub intent_expiry_zec_blocks: u64,
-
-    /// Commission basis points taken from each sale (e.g. 250 = 2.5%).
-    #[arg(long, env = "ZNS_COMMISSION_BPS", default_value = "250")]
-    pub commission_bps: u16,
 
     /// Bind address for the public HTTP API.
     #[arg(long, env = "ZNS_BIND_ADDR", default_value = "127.0.0.1:8080")]

@@ -52,7 +52,6 @@ struct ContractListingView {
 #[derive(Debug, Deserialize)]
 struct PurchaseAcceptedView {
     pub purchase_id: u64,
-    pub listing_id: u64,
     pub burner_taddr: String,
     pub burner_pubkey_hex: String,
     pub mpc_path: String,
@@ -260,8 +259,6 @@ async fn create_purchase_handler(
             &accepted.burner_taddr,
             &accepted.burner_pubkey_hex,
             &accepted.mpc_path,
-            &[],
-            &[],
             chrono::DateTime::parse_from_rfc3339(&expires_at)
                 .map_err(|e| {
                     tracing::error!("parse expires_at: {e}");

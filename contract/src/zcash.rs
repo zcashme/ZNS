@@ -11,11 +11,7 @@
 
 use blake2b_simd::Params;
 use k256::{
-    elliptic_curve::{
-        bigint::U256,
-        ops::Reduce,
-        sec1::FromEncodedPoint,
-    },
+    elliptic_curve::{bigint::U256, ops::Reduce, sec1::FromEncodedPoint},
     AffinePoint, EncodedPoint, FieldBytes, ProjectivePoint, PublicKey,
 };
 use ripemd::Ripemd160;

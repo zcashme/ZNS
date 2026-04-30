@@ -10,6 +10,7 @@ pub struct Store {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Listing {
     pub id: i64,
     pub contract_listing_id: Option<i64>,
@@ -30,6 +31,7 @@ pub enum ListingStatus {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Purchase {
     pub id: i64,
     pub contract_purchase_id: Option<i64>,
@@ -38,20 +40,19 @@ pub struct Purchase {
     pub burner_taddr: String,
     pub burner_pubkey_hex: String,
     pub mpc_path: String,
-    pub payout_bundle: Vec<u8>,
-    pub refund_bundle: Vec<u8>,
+    pub payout_tx: Vec<u8>,
+    pub refund_tx: Vec<u8>,
     pub status: PurchaseStatus,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub funding_txid: Option<String>,
     pub funding_vout: Option<i64>,
-    pub sighash: Option<String>,
-    pub payout_txid: Option<String>,
+    pub build_height: Option<i64>,
+    pub settlement_txid: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PurchaseStatus {
-    Draft, // local only, not yet on chain
     AwaitingPayment,
     PayoutAuthorized,
     Completed,
@@ -61,9 +62,8 @@ pub enum PurchaseStatus {
 }
 
 impl PurchaseStatus {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            PurchaseStatus::Draft => "draft",
             PurchaseStatus::AwaitingPayment => "awaiting_payment",
             PurchaseStatus::PayoutAuthorized => "payout_authorized",
             PurchaseStatus::Completed => "completed",
@@ -72,9 +72,9 @@ impl PurchaseStatus {
             PurchaseStatus::Expired => "expired",
         }
     }
+
     fn from_str(s: &str) -> Result<Self> {
         match s {
-            "draft" => Ok(PurchaseStatus::Draft),
             "awaiting_payment" => Ok(PurchaseStatus::AwaitingPayment),
             "payout_authorized" => Ok(PurchaseStatus::PayoutAuthorized),
             "completed" => Ok(PurchaseStatus::Completed),
@@ -94,6 +94,7 @@ impl ListingStatus {
             ListingStatus::Cancelled => "cancelled",
         }
     }
+
     fn from_str(s: &str) -> Result<Self> {
         match s {
             "open" => Ok(ListingStatus::Open),
@@ -110,43 +111,44 @@ impl Store {
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS listings (
-                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 contract_listing_id INTEGER,
-                name              TEXT NOT NULL,
-                seller_ua         TEXT NOT NULL,
-                price_zat         INTEGER NOT NULL,
-                commission_bps    INTEGER NOT NULL,
-                treasury_ua       TEXT NOT NULL,
-                status            TEXT NOT NULL,
-                created_at        TEXT NOT NULL
+                name                TEXT NOT NULL,
+                seller_ua           TEXT NOT NULL,
+                price_zat           INTEGER NOT NULL,
+                commission_bps      INTEGER NOT NULL,
+                treasury_ua         TEXT NOT NULL,
+                status              TEXT NOT NULL,
+                created_at          TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_listings_name ON listings(name);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_name_unique ON listings(name);
             CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);
 
             CREATE TABLE IF NOT EXISTS purchases (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
                 contract_purchase_id INTEGER,
-                listing_id          INTEGER NOT NULL REFERENCES listings(id),
-                buyer_ua            TEXT NOT NULL,
-                burner_taddr        TEXT NOT NULL UNIQUE,
-                burner_pubkey_hex   TEXT NOT NULL,
-                mpc_path            TEXT NOT NULL,
-                payout_bundle       BLOB NOT NULL,
-                refund_bundle       BLOB NOT NULL,
-                status              TEXT NOT NULL,
-                created_at          TEXT NOT NULL,
-                expires_at          TEXT NOT NULL,
-                funding_txid        TEXT,
-                funding_vout        INTEGER,
-                sighash             TEXT,
-                payout_txid        TEXT
+                listing_id           INTEGER NOT NULL REFERENCES listings(id),
+                buyer_ua             TEXT NOT NULL,
+                burner_taddr         TEXT NOT NULL UNIQUE,
+                burner_pubkey_hex    TEXT NOT NULL,
+                mpc_path             TEXT NOT NULL,
+                payout_bundle        BLOB NOT NULL,
+                refund_bundle        BLOB NOT NULL,
+                status               TEXT NOT NULL,
+                created_at           TEXT NOT NULL,
+                expires_at           TEXT NOT NULL,
+                funding_txid         TEXT,
+                funding_vout         INTEGER,
+                sighash              TEXT,
+                payout_txid          TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_purchases_status ON purchases(status);
             CREATE INDEX IF NOT EXISTS idx_purchases_burner ON purchases(burner_taddr);
             "#,
         )
         .context("create tables")?;
+        ensure_column(&conn, "purchases", "build_height", "INTEGER")?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -154,24 +156,6 @@ impl Store {
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn.lock().map_err(|e| anyhow::anyhow!("poison: {e}"))
-    }
-
-    pub fn insert_listing(
-        &self,
-        name: &str,
-        seller_ua: &str,
-        price_zat: u64,
-        commission_bps: u64,
-        treasury_ua: &str,
-    ) -> Result<i64> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.lock()?;
-        conn.execute(
-            "INSERT INTO listings (name, seller_ua, price_zat, commission_bps, treasury_ua, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![name, seller_ua, price_zat as i64, commission_bps as i64, treasury_ua, ListingStatus::Open.as_str(), now],
-        ).context("insert listing")?;
-        Ok(conn.last_insert_rowid())
     }
 
     pub fn get_listing_by_id(&self, id: i64) -> Result<Option<Listing>> {
@@ -184,36 +168,6 @@ impl Store {
         )
         .optional()
         .context("get listing")
-    }
-
-    pub fn get_listing_by_name(&self, name: &str) -> Result<Option<Listing>> {
-        let conn = self.lock()?;
-        conn.query_row(
-            "SELECT id, contract_listing_id, name, seller_ua, price_zat, commission_bps, treasury_ua, status, created_at
-             FROM listings WHERE name = ?1",
-            params![name],
-            |row| self.row_to_listing(row),
-        )
-        .optional()
-        .context("get listing by name")
-    }
-
-    pub fn list_open_listings(&self) -> Result<Vec<Listing>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, contract_listing_id, name, seller_ua, price_zat, commission_bps, treasury_ua, status, created_at
-             FROM listings WHERE status = 'open' ORDER BY created_at DESC"
-        )?;
-        let rows = stmt.query_map([], |row| self.row_to_listing(row))?;
-        rows.collect::<Result<_, _>>().context("list open listings")
-    }
-
-    pub fn set_contract_listing_id(&self, id: i64, contract_id: i64) -> Result<()> {
-        self.lock()?.execute(
-            "UPDATE listings SET contract_listing_id = ?1 WHERE id = ?2",
-            params![contract_id, id],
-        )?;
-        Ok(())
     }
 
     pub fn upsert_listing(
@@ -265,8 +219,6 @@ impl Store {
         burner_taddr: &str,
         burner_pubkey_hex: &str,
         mpc_path: &str,
-        payout_bundle: &[u8],
-        refund_bundle: &[u8],
         expires_at: DateTime<Utc>,
     ) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
@@ -275,8 +227,20 @@ impl Store {
         conn.execute(
             "INSERT INTO purchases (listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, payout_bundle, refund_bundle, status, created_at, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, payout_bundle, refund_bundle, PurchaseStatus::AwaitingPayment.as_str(), now, exp],
-        ).context("insert purchase")?;
+            params![
+                listing_id,
+                buyer_ua,
+                burner_taddr,
+                burner_pubkey_hex,
+                mpc_path,
+                Vec::<u8>::new(),
+                Vec::<u8>::new(),
+                PurchaseStatus::AwaitingPayment.as_str(),
+                now,
+                exp
+            ],
+        )
+        .context("insert purchase")?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -288,36 +252,68 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_purchase_by_id(&self, id: i64) -> Result<Option<Purchase>> {
-        let conn = self.lock()?;
-        conn.query_row(
-            "SELECT id, contract_purchase_id, listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path,
-                    payout_bundle, refund_bundle, status, created_at, expires_at,
-                    funding_txid, funding_vout, sighash, payout_txid
-             FROM purchases WHERE id = ?1",
-            params![id],
-            |row| self.row_to_purchase(row),
-        )
-        .optional()
-        .context("get purchase")
-    }
-
-    pub fn list_active_purchases(&self) -> Result<Vec<Purchase>> {
+    pub fn list_work_queue(&self) -> Result<Vec<Purchase>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT id, contract_purchase_id, listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path,
                     payout_bundle, refund_bundle, status, created_at, expires_at,
-                    funding_txid, funding_vout, sighash, payout_txid
+                    funding_txid, funding_vout, build_height, payout_txid
              FROM purchases
-             WHERE status IN ('draft','awaiting_payment','payout_authorized','refundable')
+             WHERE status IN ('awaiting_payment','payout_authorized','refundable')
+                OR (status IN ('completed','refunded') AND payout_txid IS NULL)
              ORDER BY created_at"
         )?;
         let rows = stmt.query_map([], |row| self.row_to_purchase(row))?;
-        rows.collect::<Result<_, _>>()
-            .context("list active purchases")
+        rows.collect::<Result<_, _>>().context("list work queue")
     }
 
-    // ─── Helpers ─────────────────────────────────────────────────────────
+    pub fn update_purchase_status(&self, id: i64, status: PurchaseStatus) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE purchases SET status = ?1 WHERE id = ?2",
+            params![status.as_str(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn store_funding(
+        &self,
+        id: i64,
+        funding_txid: &str,
+        funding_vout: u32,
+        build_height: u32,
+        payout_tx: &[u8],
+        refund_tx: &[u8],
+        status: PurchaseStatus,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE purchases
+             SET funding_txid = ?1,
+                 funding_vout = ?2,
+                 build_height = ?3,
+                 payout_bundle = ?4,
+                 refund_bundle = ?5,
+                 status = ?6
+             WHERE id = ?7",
+            params![
+                funding_txid,
+                funding_vout as i64,
+                build_height as i64,
+                payout_tx,
+                refund_tx,
+                status.as_str(),
+                id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_settlement_txid(&self, id: i64, txid: &str, status: PurchaseStatus) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE purchases SET payout_txid = ?1, status = ?2 WHERE id = ?3",
+            params![txid, status.as_str(), id],
+        )?;
+        Ok(())
+    }
 
     fn row_to_listing(&self, row: &rusqlite::Row) -> rusqlite::Result<Listing> {
         let status_str: String = row.get(7)?;
@@ -372,15 +368,28 @@ impl Store {
             burner_taddr: row.get(4)?,
             burner_pubkey_hex: row.get(5)?,
             mpc_path: row.get(6)?,
-            payout_bundle: row.get(7)?,
-            refund_bundle: row.get(8)?,
+            payout_tx: row.get(7)?,
+            refund_tx: row.get(8)?,
             status,
             created_at,
             expires_at,
             funding_txid: row.get(12)?,
             funding_vout: row.get(13)?,
-            sighash: row.get(14)?,
-            payout_txid: row.get(15)?,
+            build_height: row.get(14)?,
+            settlement_txid: row.get(15)?,
         })
     }
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, ty: &str) -> Result<()> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|existing| existing == column) {
+        let alter = format!("ALTER TABLE {table} ADD COLUMN {column} {ty}");
+        conn.execute(&alter, []).context("add column")?;
+    }
+    Ok(())
 }
