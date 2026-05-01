@@ -428,13 +428,34 @@ impl ZnsContract {
         self.listing_to_view(&listing)
     }
 
-    pub fn cancel_listing(&mut self, id: u64) {
-        self.assert_owner();
+    pub fn cancel_listing(
+        &mut self,
+        id: u64,
+        nonce: u64,
+        signature_hex: String,
+        user_pubkey_hex: Option<String>,
+    ) {
         let mut listing = self.listings.get(&id).expect("not found").clone();
         assert!(
             matches!(listing.status, ListingStatus::Open),
             "listing not open"
         );
+
+        let pubkey: [u8; 32] = if let Some(pk_hex) = user_pubkey_hex {
+            hex::decode(&pk_hex)
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .unwrap_or_else(|| env::panic_str("user_pubkey must be 64 hex chars (32 bytes)"))
+        } else {
+            self.admin_pubkey
+        };
+
+        let payload = format!("DELIST:{}:{nonce}", listing.name);
+        assert!(
+            ed25519_verify_hex(&signature_hex, &payload, &pubkey),
+            "cancel signature invalid"
+        );
+
         listing.status = ListingStatus::Cancelled;
         self.listings.insert(id, listing);
         emit_event("listing_cancelled", serde_json::json!({ "id": id }));
