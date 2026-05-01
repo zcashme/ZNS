@@ -215,7 +215,6 @@ pub struct SubmittedFundingView {
 #[borsh(crate = "near_sdk::borsh")]
 pub struct ZnsContract {
     pub owner: AccountId,
-    pub relayer: AccountId,
     pub mpc_contract: AccountId,
     pub mpc_root_pubkey: String,
     pub treasury_ua: String,
@@ -238,7 +237,6 @@ impl ZnsContract {
     #[init]
     pub fn new(
         owner: AccountId,
-        relayer: AccountId,
         mpc_contract: AccountId,
         mpc_root_pubkey: String,
         treasury_ua: String,
@@ -267,7 +265,6 @@ impl ZnsContract {
             .unwrap_or_else(|| env::panic_str("admin_pubkey must be 64 hex chars (32 bytes)"));
         Self {
             owner,
-            relayer,
             mpc_contract,
             mpc_root_pubkey,
             treasury_ua,
@@ -284,11 +281,6 @@ impl ZnsContract {
             purchases: LookupMap::new(b"P"),
             used_paths: LookupMap::new(b"p"),
         }
-    }
-
-    pub fn set_relayer(&mut self, account: AccountId) {
-        self.assert_owner();
-        self.relayer = account;
     }
 
     pub fn set_mpc_contract(&mut self, account: AccountId) {
@@ -860,7 +852,6 @@ impl ZnsContract {
     pub fn get_config(&self) -> serde_json::Value {
         serde_json::json!({
             "owner": self.owner,
-            "relayer": self.relayer,
             "mpc_contract": self.mpc_contract,
             "mpc_root_pubkey": self.mpc_root_pubkey,
             "treasury_ua": self.treasury_ua,
@@ -879,10 +870,6 @@ impl ZnsContract {
 impl ZnsContract {
     fn assert_owner(&self) {
         assert_eq!(env::predecessor_account_id(), self.owner, "owner only");
-    }
-
-    fn assert_relayer(&self) {
-        assert_eq!(env::predecessor_account_id(), self.relayer, "relayer only");
     }
 
     fn refund_unused_storage(&self, storage_before: u64) {
