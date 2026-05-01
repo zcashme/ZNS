@@ -21,12 +21,10 @@ mod zcash;
 use zcash::{compute_sighash_all, derive_burner, parse_tx, sha256, validate_burner_script};
 
 const SIGN_GAS: Gas = Gas::from_tgas(250);
-const CALLBACK_GAS: Gas = Gas::from_tgas(10);
+const CALLBACK_GAS: Gas = Gas::from_tgas(3);
 const MPC_DEPOSIT: NearToken = NearToken::from_yoctonear(100);
 
 const MAX_COMMISSION_BPS: u64 = 1_000; // 10%
-const MAX_EXPIRY_SECONDS: u64 = 30 * 86_400;
-const MIN_EXPIRY_SECONDS: u64 = 60;
 const MAX_UA_LEN: usize = 512;
 const MAX_NAME_LEN: usize = 256;
 const MAX_PATH_LEN: usize = 128;
@@ -82,14 +80,6 @@ trait ExtSelf {
     );
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
-#[borsh(crate = "near_sdk::borsh")]
-pub enum ListingStatus {
-    Open,
-    Sold,
-    Cancelled,
-}
-
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct Listing {
@@ -99,7 +89,7 @@ pub struct Listing {
     pub price_zat: u64,
     pub commission_bps: u64,
     pub treasury_ua: String,
-    pub status: ListingStatus,
+    pub winning_purchase_id: Option<u64>,
     pub created_at_ns: u64,
     pub listing_nonce: u64,
 }
@@ -112,7 +102,7 @@ pub struct ListingView {
     pub price_zat: u64,
     pub commission_bps: u64,
     pub treasury_ua: String,
-    pub status: String,
+    pub winning_purchase_id: Option<u64>,
     pub created_at_ns: u64,
     pub listing_nonce: u64,
 }
@@ -147,7 +137,6 @@ pub struct Purchase {
     pub mpc_path: String,
     pub status: PurchaseStatus,
     pub created_at_ns: u64,
-    pub expires_at_ns: u64,
     pub funding_outpoint: Option<([u8; 32], u32)>,
     pub utxo_value_zats: Option<u64>,
     pub payout_tx: Option<Vec<u8>>,
@@ -178,7 +167,6 @@ pub struct PurchaseView {
     pub mpc_path: String,
     pub status: String,
     pub created_at_ns: u64,
-    pub expires_at_ns: u64,
     pub funding_outpoint_txid_hex: Option<String>,
     pub funding_vout: Option<u32>,
     pub utxo_value_zats: Option<u64>,
@@ -203,7 +191,6 @@ pub struct PurchaseAcceptedView {
     pub payout_fee_zat: u64,
     pub seller_receives_zat: u64,
     pub refund_receives_zat: u64,
-    pub expires_at_ns: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -226,7 +213,6 @@ pub struct ZnsContract {
     pub treasury_ua: String,
     pub commission_bps: u64,
     pub payout_fee_zat: u64,
-    pub default_expiry_seconds: u64,
     pub mainnet: bool,
     pub consensus_branch_id: u32,
     pub admin_pubkey: [u8; 32],
@@ -248,7 +234,6 @@ impl ZnsContract {
         treasury_ua: String,
         commission_bps: u64,
         payout_fee_zat: u64,
-        default_expiry_seconds: u64,
         mainnet: bool,
         consensus_branch_id: u32,
         admin_pubkey_b64: String,
@@ -257,10 +242,6 @@ impl ZnsContract {
         assert!(
             commission_bps <= MAX_COMMISSION_BPS,
             "commission_bps too high"
-        );
-        assert!(
-            (MIN_EXPIRY_SECONDS..=MAX_EXPIRY_SECONDS).contains(&default_expiry_seconds),
-            "expiry out of range"
         );
         validate_unified_address(&treasury_ua, mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("treasury_ua invalid: {e}")));
@@ -274,7 +255,6 @@ impl ZnsContract {
             treasury_ua,
             commission_bps,
             payout_fee_zat,
-            default_expiry_seconds,
             mainnet,
             consensus_branch_id,
             admin_pubkey,
@@ -321,15 +301,6 @@ impl ZnsContract {
         self.assert_owner();
         assert!(fee > 0, "payout_fee_zat must be > 0");
         self.payout_fee_zat = fee;
-    }
-
-    pub fn set_default_expiry_seconds(&mut self, secs: u64) {
-        self.assert_owner();
-        assert!(
-            (MIN_EXPIRY_SECONDS..=MAX_EXPIRY_SECONDS).contains(&secs),
-            "expiry out of range"
-        );
-        self.default_expiry_seconds = secs;
     }
 
     pub fn set_consensus_branch_id(&mut self, branch_id: u32) {
@@ -382,10 +353,6 @@ impl ZnsContract {
                 .get(existing_id)
                 .expect("listing index out of sync");
             assert!(
-                !matches!(existing.status, ListingStatus::Open),
-                "listing already open for name"
-            );
-            assert!(
                 nonce > existing.listing_nonce,
                 "listing nonce must increase for replacement"
             );
@@ -402,7 +369,7 @@ impl ZnsContract {
             price_zat,
             commission_bps: self.commission_bps,
             treasury_ua: self.treasury_ua.clone(),
-            status: ListingStatus::Open,
+            winning_purchase_id: None,
             created_at_ns: now,
             listing_nonce: nonce,
         };
@@ -435,10 +402,10 @@ impl ZnsContract {
         signature_b64: String,
         user_pubkey_b64: Option<String>,
     ) {
-        let mut listing = self.listings.get(&id).expect("not found").clone();
+        let listing = self.listings.get(&id).expect("not found").clone();
         assert!(
-            matches!(listing.status, ListingStatus::Open),
-            "listing not open"
+            listing.winning_purchase_id.is_none(),
+            "listing already has a winner"
         );
 
         let pubkey: [u8; 32] = if let Some(pk_b64) = user_pubkey_b64 {
@@ -454,8 +421,8 @@ impl ZnsContract {
             "cancel signature invalid"
         );
 
-        listing.status = ListingStatus::Cancelled;
-        self.listings.insert(id, listing);
+        self.listings.remove(&id);
+        self.listing_ids_by_name.remove(&listing.name);
         emit_event("listing_cancelled", serde_json::json!({ "id": id }));
     }
 
@@ -474,10 +441,6 @@ impl ZnsContract {
             .get(&listing_id)
             .expect("listing not found")
             .clone();
-        assert!(
-            matches!(listing.status, ListingStatus::Open),
-            "listing not open"
-        );
 
         validate_unified_address(&buyer_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("buyer_ua invalid: {e}")));
@@ -523,8 +486,6 @@ impl ZnsContract {
         let id = self.next_purchase_id;
         self.next_purchase_id += 1;
         let now = env::block_timestamp();
-        let expires_at_ns =
-            now.saturating_add(self.default_expiry_seconds.saturating_mul(1_000_000_000));
         let required_memo = required_buy_memo(listing_id, id, &listing.name, &buyer_ua);
 
         let purchase = Purchase {
@@ -544,7 +505,6 @@ impl ZnsContract {
             mpc_path: mpc_path.clone(),
             status: PurchaseStatus::AwaitingPayment,
             created_at_ns: now,
-            expires_at_ns,
             funding_outpoint: None,
             utxo_value_zats: None,
             payout_tx: None,
@@ -558,10 +518,6 @@ impl ZnsContract {
         };
         self.purchases.insert(id, purchase);
         self.used_paths.insert(mpc_path.clone(), id);
-
-        let mut updated_listing = listing.clone();
-        updated_listing.status = ListingStatus::Sold;
-        self.listings.insert(listing_id, updated_listing);
 
         self.refund_unused_storage(storage_before);
 
@@ -581,7 +537,6 @@ impl ZnsContract {
                 "payout_fee_zat": self.payout_fee_zat,
                 "seller_receives_zat": seller_receives_zat,
                 "refund_receives_zat": refund_receives_zat,
-                "expires_at_ns": expires_at_ns,
             }),
         );
 
@@ -599,7 +554,6 @@ impl ZnsContract {
             payout_fee_zat: self.payout_fee_zat,
             seller_receives_zat,
             refund_receives_zat,
-            expires_at_ns,
         }
     }
 
@@ -661,11 +615,23 @@ impl ZnsContract {
             compute_sighash_all(&payout_parsed, utxo_value_zats, &utxo_script_pubkey);
         let refund_sighash =
             compute_sighash_all(&refund_parsed, utxo_value_zats, &utxo_script_pubkey);
-        let now = env::block_timestamp();
-        let status = if now >= purchase.expires_at_ns {
-            PurchaseStatus::Refundable
+
+        // First funding wins: check if listing already has a winner
+        let status = if let Some(listing) = self.listings.get(&purchase.listing_id) {
+            if let Some(winner_id) = listing.winning_purchase_id {
+                if winner_id == purchase_id {
+                    PurchaseStatus::PayoutAuthorized
+                } else {
+                    PurchaseStatus::Refundable
+                }
+            } else {
+                let mut updated_listing = listing.clone();
+                updated_listing.winning_purchase_id = Some(purchase_id);
+                self.listings.insert(purchase.listing_id, updated_listing);
+                PurchaseStatus::PayoutAuthorized
+            }
         } else {
-            PurchaseStatus::PayoutAuthorized
+            PurchaseStatus::Refundable
         };
 
         let payout_tx_hash = sha256(&payout_tx);
@@ -734,21 +700,31 @@ impl ZnsContract {
             .get(&purchase_id)
             .expect("purchase not found")
             .clone();
-        assert!(
-            env::block_timestamp() >= purchase.expires_at_ns,
-            "purchase not expired"
-        );
-        purchase.status = if purchase.funding_outpoint.is_some() {
-            PurchaseStatus::Refundable
-        } else {
+
+        let status = if purchase.funding_outpoint.is_none() {
+            // Unfunded purchase: anyone may mark as expired (buyer changed their mind,
+            // or cleanup of abandoned purchase after listing was cancelled).
             PurchaseStatus::Expired
+        } else {
+            // Funded purchase: only allow if this purchase is NOT the winner.
+            let listing = self
+                .listings
+                .get(&purchase.listing_id)
+                .expect("listing not found");
+            assert!(
+                listing.winning_purchase_id != Some(purchase_id),
+                "cannot abort winning purchase"
+            );
+            PurchaseStatus::Refundable
         };
+
+        purchase.status = status.clone();
         self.purchases.insert(purchase_id, purchase.clone());
         emit_event(
             "refund_authorized",
             serde_json::json!({
                 "purchase_id": purchase_id,
-                "status": purchase_status_str(&purchase.status),
+                "status": purchase_status_str(&status),
             }),
         );
     }
@@ -875,7 +851,6 @@ impl ZnsContract {
             "treasury_ua": self.treasury_ua,
             "commission_bps": self.commission_bps,
             "payout_fee_zat": self.payout_fee_zat,
-            "default_expiry_seconds": self.default_expiry_seconds,
             "mainnet": self.mainnet,
             "consensus_branch_id": self.consensus_branch_id,
             "admin_pubkey_b64": base64::encode(self.admin_pubkey),
@@ -941,7 +916,7 @@ impl ZnsContract {
             price_zat: listing.price_zat,
             commission_bps: listing.commission_bps,
             treasury_ua: listing.treasury_ua.clone(),
-            status: listing_status_str(&listing.status).to_string(),
+            winning_purchase_id: listing.winning_purchase_id,
             created_at_ns: listing.created_at_ns,
             listing_nonce: listing.listing_nonce,
         }
@@ -965,7 +940,6 @@ impl ZnsContract {
             mpc_path: purchase.mpc_path.clone(),
             status: purchase_status_str(&purchase.status).to_string(),
             created_at_ns: purchase.created_at_ns,
-            expires_at_ns: purchase.expires_at_ns,
             funding_outpoint_txid_hex: purchase
                 .funding_outpoint
                 .as_ref()
@@ -1071,14 +1045,6 @@ fn validate_unified_address(ua: &str, mainnet: bool) -> Result<(), &'static str>
         return Err("no receivers");
     }
     Ok(())
-}
-
-fn listing_status_str(s: &ListingStatus) -> &'static str {
-    match s {
-        ListingStatus::Open => "Open",
-        ListingStatus::Sold => "Sold",
-        ListingStatus::Cancelled => "Cancelled",
-    }
 }
 
 fn purchase_status_str(s: &PurchaseStatus) -> &'static str {
