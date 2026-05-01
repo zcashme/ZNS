@@ -15,9 +15,9 @@ use crate::{
 
 const SUBMIT_FUNDING_GAS: u64 = 150_000_000_000_000;
 const SIGN_REQUEST_GAS: u64 = 300_000_000_000_000;
-const SIMPLE_CALL_GAS: u64 = 50_000_000_000_000;
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct ContractPurchaseView {
     pub id: u64,
     pub required_memo: String,
@@ -201,8 +201,6 @@ async fn build_and_submit_funding(
         &utxo.txid,
         utxo.vout,
         build_height,
-        &payout_tx,
-        &refund_tx,
         new_status,
     )?;
 

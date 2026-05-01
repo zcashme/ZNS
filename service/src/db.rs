@@ -35,8 +35,6 @@ pub struct Purchase {
     pub mpc_path: String,
     pub buyer_signature_b64: Option<String>,
     pub buyer_pubkey_b64: Option<String>,
-    pub payout_tx: Vec<u8>,
-    pub refund_tx: Vec<u8>,
     pub status: PurchaseStatus,
     pub created_at: DateTime<Utc>,
     pub funding_txid: Option<String>,
@@ -109,8 +107,6 @@ impl Store {
                 mpc_path             TEXT NOT NULL,
                 buyer_signature_b64  TEXT,
                 buyer_pubkey_b64     TEXT,
-                payout_bundle        BLOB NOT NULL,
-                refund_bundle        BLOB NOT NULL,
                 status               TEXT NOT NULL,
                 created_at           TEXT NOT NULL,
                 funding_txid         TEXT,
@@ -202,7 +198,7 @@ impl Store {
         let now = Utc::now().to_rfc3339();
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO purchases (listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, buyer_signature_b64, buyer_pubkey_b64, payout_bundle, refund_bundle, status, created_at)
+            "INSERT INTO purchases (listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, buyer_signature_b64, buyer_pubkey_b64, status, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 listing_id,
@@ -212,8 +208,6 @@ impl Store {
                 mpc_path,
                 buyer_signature_b64,
                 buyer_pubkey_b64,
-                Vec::<u8>::new(),
-                Vec::<u8>::new(),
                 PurchaseStatus::AwaitingPayment.as_str(),
                 now,
             ],
@@ -236,7 +230,7 @@ impl Store {
             "SELECT
                 id, contract_purchase_id, listing_id, buyer_ua, burner_taddr,
                 burner_pubkey_hex, mpc_path, buyer_signature_b64, buyer_pubkey_b64,
-                payout_bundle, refund_bundle, status, created_at,
+                status, created_at,
                 funding_txid, funding_vout, build_height, payout_txid
              FROM purchases
              WHERE status IN ('awaiting_payment','payout_authorized','refundable')
@@ -261,8 +255,6 @@ impl Store {
         funding_txid: &str,
         funding_vout: u32,
         build_height: u32,
-        payout_tx: &[u8],
-        refund_tx: &[u8],
         status: PurchaseStatus,
     ) -> Result<()> {
         self.lock()?.execute(
@@ -270,16 +262,12 @@ impl Store {
              SET funding_txid = ?1,
                  funding_vout = ?2,
                  build_height = ?3,
-                 payout_bundle = ?4,
-                 refund_bundle = ?5,
-                 status = ?6
-             WHERE id = ?7",
+                 status = ?4
+             WHERE id = ?5",
             params![
                 funding_txid,
                 funding_vout as i64,
                 build_height as i64,
-                payout_tx,
-                refund_tx,
                 status.as_str(),
                 id
             ],
@@ -338,14 +326,12 @@ impl Store {
             mpc_path: row.get(6)?,
             buyer_signature_b64: row.get(7)?,
             buyer_pubkey_b64: row.get(8)?,
-            payout_tx: row.get(9)?,
-            refund_tx: row.get(10)?,
             status,
             created_at,
-            funding_txid: row.get(13)?,
-            funding_vout: row.get(14)?,
-            build_height: row.get(15)?,
-            settlement_txid: row.get(16)?,
+            funding_txid: row.get(11)?,
+            funding_vout: row.get(12)?,
+            build_height: row.get(13)?,
+            settlement_txid: row.get(14)?,
         })
     }
 }
