@@ -1,13 +1,41 @@
 //! ZNS non-custodial marketplace escrow contract.
 //!
-//! The contract is the authority for:
-//!   * listing terms (seller, treasury, price, commission, fee)
-//!   * the deterministic burner address derived from MPC root key + path
-//!   * the required BUY memo commitment for a purchase
-//!   * the exact funded payout/refund transaction bytes and sighashes that may be signed
+//! ## Architecture
 //!
-//! The relayer service becomes only a transaction builder and submitter.
-//! The MPC is only a signer invoked by this contract.
+//! The contract is the authority for:
+//!
+//! * **Listing terms** — seller, treasury, price, commission, fee
+//! * **Deterministic burner address** — derived from MPC root key + path
+//! * **Required BUY memo commitment** — bound to a specific purchase
+//! * **Payout / refund tx bytes and sighashes** — the contract validates and stores
+//!   them so the MPC can sign them later
+//!
+//! ## Separation of concerns
+//!
+//! | Role      | Responsibility                                      |
+//! |-----------|-----------------------------------------------------|
+//! | Relayer   | Transaction builder and submitter (off-chain)       |
+//! | Contract  | State machine, validation, event emission           |
+//! | MPC       | Signer (stateless, invoked by this contract)        |
+//!
+//! ## Purchase state machine
+//!
+//! ```text
+//!   [create_listing] → [accept_listing] → AwaitingPayment
+//!                                              |
+//!                                      [submit_funding]
+//!                                              |
+//!                        ┌─────────────────────┤
+//!                        ▼                     ▼
+//!                 PayoutAuthorized         Refundable
+//!                        |                     |
+//!            [request_payout_signature]  [request_refund_signature]
+//!                        |                     |
+//!                        ▼                     ▼
+//!                    Completed              Refunded
+//!
+//!   (Unfunded purchases can be marked Expired at any time)
+//! ```
 
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::LookupMap;
@@ -20,31 +48,45 @@ use serde::{Deserialize, Serialize};
 mod zcash;
 use zcash::{compute_sighash_all, derive_burner, parse_tx, sha256, validate_burner_script};
 
+// ───────────────────────────────────────────────────────────────────────────
+// Constants
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Gas budget for the MPC sign cross-contract call.
 const SIGN_GAS: Gas = Gas::from_tgas(250);
+/// Gas reserved for the `mpc_sign_callback` on return.
 const CALLBACK_GAS: Gas = Gas::from_tgas(3);
+/// Deposit attached to every MPC call (small, just for anti-spam).
 const MPC_DEPOSIT: NearToken = NearToken::from_yoctonear(100);
 
-const MAX_COMMISSION_BPS: u64 = 1_000; // 10%
-const MAX_UA_LEN: usize = 512;
-const MAX_NAME_LEN: usize = 256;
-const MAX_PATH_LEN: usize = 128;
-const MAX_TX_BYTES: usize = 20_000;
+const MAX_COMMISSION_BPS: u64 = 1_000; // 10 %
+const MAX_UA_LEN: usize = 512; // max length of a Zcash Unified Address
+const MAX_NAME_LEN: usize = 256; // max listing name length
+const MAX_PATH_LEN: usize = 128; // max MPC derivation path length
+const MAX_TX_BYTES: usize = 20_000; // max raw tx size
 
 const EVENT_STANDARD: &str = "zns";
 const EVENT_VERSION: &str = "1.0.0";
 
+// ───────────────────────────────────────────────────────────────────────────
+// MPC primitive types
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A point on the secp256k1 curve, serialized as `{ "affine_point": "..." }`.
 #[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct AffinePoint {
     pub affine_point: String,
 }
 
+/// A scalar value on secp256k1, serialized as `{ "scalar": "..." }`.
 #[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct ScalarHex {
     pub scalar: String,
 }
 
+/// An MPC ECDSA signature over secp256k1.
 #[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct MpcSignature {
@@ -53,24 +95,40 @@ pub struct MpcSignature {
     pub recovery_id: u8,
 }
 
-#[derive(Serialize, Deserialize)]
+// ───────────────────────────────────────────────────────────────────────────
+// MPC cross-contract call types
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Outer wrapper sent to the MPC contract's `sign` method.
+#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
 pub struct SignRequestArgs {
     pub request: SignPayload,
 }
 
-#[derive(Serialize, Deserialize)]
+/// The actual signing payload: 32-byte hash + derivation path.
+#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
 pub struct SignPayload {
-    pub payload: Vec<u8>,
-    pub path: String,
-    pub key_version: u32,
+    pub payload: Vec<u8>, // 32-byte sighash
+    pub path: String,     // MPC derivation path, e.g. "zns,listing-42,purchase-7"
+    pub key_version: u32, // always 0
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Cross-contract call interface definitions
+// ───────────────────────────────────────────────────────────────────────────
+
+/// MPC contract interface — only `sign` is used.
 #[ext_contract(ext_mpc)]
+#[allow(dead_code)]
 trait ExtMpc {
     fn sign(&self, request: SignRequestArgs) -> MpcSignature;
 }
 
+/// Self-callback interface — the MPC response lands here.
 #[ext_contract(ext_self)]
+#[allow(dead_code)]
 trait ExtSelf {
     fn mpc_sign_callback(
         &mut self,
@@ -80,19 +138,76 @@ trait ExtSelf {
     );
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Domain types (on-chain storage format)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// An on-chain listing for a name sale.
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct Listing {
     pub id: u64,
     pub name: String,
-    pub seller_ua: String,
-    pub price_zat: u64,
+    pub seller_ua: String, // seller's Zcash Unified Address
+    pub price_zat: u64,    // price in zatoshis (1 ZEC = 10^8 zat)
     pub commission_bps: u64,
     pub treasury_ua: String,
-    pub winning_purchase_id: Option<u64>,
+    pub winning_purchase_id: Option<u64>, // set once the first funding is submitted
     pub created_at_ns: u64,
-    pub listing_nonce: u64,
+    pub listing_nonce: u64, // monotonically increases for replacement listings
 }
+
+/// A purchase intent: buyer commits to fund the burner with an exact UTXO.
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct Purchase {
+    pub id: u64,
+    pub listing_id: u64,
+    pub buyer_ua: String,
+    pub required_memo: String, // the exact memo the buyer must include on-chain
+    pub buyer_signature_b64: Option<String>,
+    pub buyer_pubkey_b64: Option<String>,
+    pub price_zat: u64,
+    pub commission_zat: u64,
+    pub payout_fee_zat: u64,    // Zcash tx fee for the payout
+    pub seller_receives_zat: u64, // net amount the seller ultimately receives
+    pub refund_receives_zat: u64, // net amount refunded to the buyer
+    pub burner_taddr: String,   // derived transparent address (Zcash)
+    pub burner_pubkey: [u8; 33],  // compressed secp256k1 public key
+    pub mpc_path: String,       // derivation path used for this burner key
+    pub status: PurchaseStatus,
+    pub created_at_ns: u64,
+    pub funding_outpoint: Option<([u8; 32], u32)>, // (txid, vout) of the funding UTXO
+    pub utxo_value_zats: Option<u64>,
+    pub payout_tx_hash: Option<[u8; 32]>,
+    pub refund_tx_hash: Option<[u8; 32]>,
+    pub payout_sighash: Option<[u8; 32]>, // sighash to be signed by MPC
+    pub refund_sighash: Option<[u8; 32]>,
+    pub payout_signature: Option<MpcSignature>,
+    pub refund_signature: Option<MpcSignature>,
+}
+
+/// The lifecycle of a purchase.
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
+#[borsh(crate = "near_sdk::borsh")]
+pub enum PurchaseStatus {
+    /// Buyer has accepted the listing but not yet funded.
+    AwaitingPayment,
+    /// Funding submitted; this purchase is the winner (first to fund).
+    PayoutAuthorized,
+    /// MPC signed the payout; seller can claim.
+    Completed,
+    /// Funding submitted but this purchase was NOT first (or listing was cancelled).
+    Refundable,
+    /// MPC signed the refund; buyer can reclaim.
+    Refunded,
+    /// Unfunded purchase that timed out or was cleaned up.
+    Expired,
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// View types (serialized as JSON for RPC responses)
+// ───────────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ListingView {
@@ -105,48 +220,6 @@ pub struct ListingView {
     pub winning_purchase_id: Option<u64>,
     pub created_at_ns: u64,
     pub listing_nonce: u64,
-}
-
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
-#[borsh(crate = "near_sdk::borsh")]
-pub enum PurchaseStatus {
-    AwaitingPayment,
-    PayoutAuthorized,
-    Completed,
-    Refundable,
-    Refunded,
-    Expired,
-}
-
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
-#[borsh(crate = "near_sdk::borsh")]
-pub struct Purchase {
-    pub id: u64,
-    pub listing_id: u64,
-    pub buyer_ua: String,
-    pub required_memo: String,
-    pub buyer_signature_b64: Option<String>,
-    pub buyer_pubkey_b64: Option<String>,
-    pub price_zat: u64,
-    pub commission_zat: u64,
-    pub payout_fee_zat: u64,
-    pub seller_receives_zat: u64,
-    pub refund_receives_zat: u64,
-    pub burner_taddr: String,
-    pub burner_pubkey: [u8; 33],
-    pub mpc_path: String,
-    pub status: PurchaseStatus,
-    pub created_at_ns: u64,
-    pub funding_outpoint: Option<([u8; 32], u32)>,
-    pub utxo_value_zats: Option<u64>,
-    pub payout_tx: Option<Vec<u8>>,
-    pub refund_tx: Option<Vec<u8>>,
-    pub payout_tx_hash: Option<[u8; 32]>,
-    pub refund_tx_hash: Option<[u8; 32]>,
-    pub payout_sighash: Option<[u8; 32]>,
-    pub refund_sighash: Option<[u8; 32]>,
-    pub payout_signature: Option<MpcSignature>,
-    pub refund_signature: Option<MpcSignature>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -176,6 +249,8 @@ pub struct PurchaseView {
     pub refund_sighash_hex: Option<String>,
 }
 
+/// Returned by `accept_listing` — contains everything the buyer needs
+/// to construct the funding tx.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PurchaseAcceptedView {
     pub purchase_id: u64,
@@ -193,6 +268,8 @@ pub struct PurchaseAcceptedView {
     pub refund_receives_zat: u64,
 }
 
+/// Returned by `submit_funding` — contains the sighashes the relayer
+/// can pass to the MPC for signing.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SubmittedFundingView {
     pub purchase_id: u64,
@@ -203,29 +280,42 @@ pub struct SubmittedFundingView {
     pub status: String,
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Contract state
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The top-level contract struct.  All methods operate on this state.
 #[near_bindgen(contract_state)]
 #[derive(BorshSerialize, BorshDeserialize, PanicOnDefault)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct ZnsContract {
     pub owner: AccountId,
-    pub mpc_contract: AccountId,
-    pub mpc_root_pubkey: String,
-    pub treasury_ua: String,
+    pub mpc_contract: AccountId,   // the MPC signer contract address
+    pub mpc_root_pubkey: String,   // secp256k1 base58 root key, e.g. "secp256k1:..."
+    pub treasury_ua: String,       // treasury Zcash Unified Address
     pub commission_bps: u64,
-    pub payout_fee_zat: u64,
-    pub mainnet: bool,
-    pub consensus_branch_id: u32,
-    pub admin_pubkey: [u8; 32],
+    pub payout_fee_zat: u64,       // Zcash tx fee deducted from the payout
+    pub mainnet: bool,             // true = Zcash mainnet, false = testnet
+    pub consensus_branch_id: u32,  // NU5 consensus branch id
+    pub admin_pubkey: [u8; 32],    // fallback ed25519 key when user_pubkey_b64 is omitted
     pub next_listing_id: u64,
     pub next_purchase_id: u64,
     pub listings: LookupMap<u64, Listing>,
     pub listing_ids_by_name: LookupMap<String, u64>,
     pub purchases: LookupMap<u64, Purchase>,
-    pub used_paths: LookupMap<String, u64>,
+    pub used_paths: LookupMap<String, u64>, // path → purchase_id, prevents path reuse
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Contract implementation — public entry points
+// ───────────────────────────────────────────────────────────────────────────
 
 #[near_bindgen]
 impl ZnsContract {
+
+    // ── Constructor ──────────────────────────────────────────────────────
+
+    /// Initialize the contract.  May only be called once.
     #[init]
     pub fn new(
         owner: AccountId,
@@ -258,7 +348,7 @@ impl ZnsContract {
             mainnet,
             consensus_branch_id,
             admin_pubkey,
-            next_listing_id: 1,
+            next_listing_id: 1,     // ids start at 1, leaving 0 as sentinel
             next_purchase_id: 1,
             listings: LookupMap::new(b"L"),
             listing_ids_by_name: LookupMap::new(b"N"),
@@ -267,16 +357,21 @@ impl ZnsContract {
         }
     }
 
+    // ── Admin setters ────────────────────────────────────────────────────
+
+    /// Update the MPC contract address.
     pub fn set_mpc_contract(&mut self, account: AccountId) {
         self.assert_owner();
         self.mpc_contract = account;
     }
 
+    /// Update the MPC root public key (secp256k1).
     pub fn set_mpc_root_pubkey(&mut self, pubkey: String) {
         self.assert_owner();
         self.mpc_root_pubkey = pubkey;
     }
 
+    /// Update the treasury Unified Address (validated against current network).
     pub fn set_treasury_ua(&mut self, ua: String) {
         self.assert_owner();
         validate_unified_address(&ua, self.mainnet)
@@ -284,6 +379,7 @@ impl ZnsContract {
         self.treasury_ua = ua;
     }
 
+    /// Update the fallback admin ed25519 public key.
     pub fn set_admin_pubkey(&mut self, pubkey_b64: String) {
         self.assert_owner();
         let pk = decode_pubkey_b64(&pubkey_b64)
@@ -291,28 +387,39 @@ impl ZnsContract {
         self.admin_pubkey = pk;
     }
 
+    /// Update the default commission (basis points, max 10 %).
     pub fn set_commission_bps(&mut self, bps: u64) {
         self.assert_owner();
         assert!(bps <= MAX_COMMISSION_BPS, "commission_bps too high");
         self.commission_bps = bps;
     }
 
+    /// Update the Zcash transaction fee deducted from payouts.
     pub fn set_payout_fee_zat(&mut self, fee: u64) {
         self.assert_owner();
         assert!(fee > 0, "payout_fee_zat must be > 0");
         self.payout_fee_zat = fee;
     }
 
+    /// Update the Zcash NU5 consensus branch id.
     pub fn set_consensus_branch_id(&mut self, branch_id: u32) {
         self.assert_owner();
         self.consensus_branch_id = branch_id;
     }
 
+    /// Transfer contract ownership to another account.
     pub fn transfer_ownership(&mut self, new_owner: AccountId) {
         self.assert_owner();
         self.owner = new_owner;
     }
 
+    // ── Listing lifecycle ────────────────────────────────────────────────
+
+    /// Create or replace a listing.
+    ///
+    /// Must be signed with an ed25519 key (either the admin key or a
+    /// user-provided key).  Replacing an existing listing requires a
+    /// higher `nonce`.
     #[payable]
     pub fn create_listing(
         &mut self,
@@ -323,6 +430,7 @@ impl ZnsContract {
         signature_b64: String,
         user_pubkey_b64: Option<String>,
     ) -> ListingView {
+        // Validate field lengths.
         assert!(
             !name.is_empty() && name.len() <= MAX_NAME_LEN,
             "name length"
@@ -334,6 +442,7 @@ impl ZnsContract {
             "price_zat must exceed payout fee"
         );
 
+        // Determine which ed25519 key to verify against.
         let pubkey: [u8; 32] = if let Some(pk_b64) = user_pubkey_b64 {
             decode_pubkey_b64(&pk_b64)
                 .unwrap_or_else(|e| env::panic_str(&format!("user_pubkey invalid: {e}")))
@@ -341,12 +450,14 @@ impl ZnsContract {
             self.admin_pubkey
         };
 
+        // Construct the signed payload and verify the ed25519 signature.
         let payload = format!("LIST:{name}:{price_zat}:{nonce}");
         assert!(
             ed25519_verify_b64(&signature_b64, &payload, &pubkey),
             "listing signature invalid"
         );
 
+        // If the name already exists, enforce nonce ordering for replacement.
         if let Some(existing_id) = self.listing_ids_by_name.get(&name) {
             let existing = self
                 .listings
@@ -358,6 +469,7 @@ impl ZnsContract {
             );
         }
 
+        // Track storage before mutation so we can refund excess deposit.
         let storage_before = env::storage_usage();
         let id = self.next_listing_id;
         self.next_listing_id += 1;
@@ -395,6 +507,10 @@ impl ZnsContract {
         self.listing_to_view(&listing)
     }
 
+    /// Cancel a listing that has no winner yet.
+    ///
+    /// Must be signed by the same key that created the listing
+    /// (admin key or user-provided key).
     pub fn cancel_listing(
         &mut self,
         id: u64,
@@ -403,6 +519,8 @@ impl ZnsContract {
         user_pubkey_b64: Option<String>,
     ) {
         let listing = self.listings.get(&id).expect("not found").clone();
+
+        // Only cancellable if no purchase has won yet.
         assert!(
             listing.winning_purchase_id.is_none(),
             "listing already has a winner"
@@ -426,6 +544,13 @@ impl ZnsContract {
         emit_event("listing_cancelled", serde_json::json!({ "id": id }));
     }
 
+    // ── Purchase lifecycle ───────────────────────────────────────────────
+
+    /// Accept a listing, creating a purchase record.
+    ///
+    /// Derives a unique burner address from `mpc_root_pubkey + mpc_path`.
+    /// The buyer must later fund that address with **exactly** `price_zat`
+    /// and include `required_memo` in the Zcash memo field.
     #[payable]
     pub fn accept_listing(
         &mut self,
@@ -445,6 +570,7 @@ impl ZnsContract {
         validate_unified_address(&buyer_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("buyer_ua invalid: {e}")));
 
+        // Buyer signature is optional — if provided, verify it.
         if let (Some(ref sig), Some(ref pk_b64)) = (&buyer_signature_b64, &buyer_pubkey_b64) {
             let pubkey = decode_pubkey_b64(pk_b64)
                 .unwrap_or_else(|e| env::panic_str(&format!("buyer_pubkey invalid: {e}")));
@@ -454,6 +580,8 @@ impl ZnsContract {
                 "buyer signature invalid"
             );
         }
+
+        // Enforce path uniqueness: each MPC path may only be used once.
         assert!(
             !mpc_path.is_empty() && mpc_path.len() <= MAX_PATH_LEN,
             "mpc_path length"
@@ -463,6 +591,7 @@ impl ZnsContract {
             "mpc_path already used"
         );
 
+        // Derive a deterministic burner key + t-address from the MPC root.
         let (burner_taddr, burner_pubkey) = derive_burner(
             &self.mpc_root_pubkey,
             env::current_account_id().as_str(),
@@ -471,6 +600,7 @@ impl ZnsContract {
         )
         .unwrap_or_else(|e| env::panic_str(&format!("burner derivation failed: {e}")));
 
+        // Compute payout breakdown.
         let commission_zat = listing.price_zat.saturating_mul(listing.commission_bps) / 10_000;
         let seller_receives_zat = listing
             .price_zat
@@ -486,6 +616,9 @@ impl ZnsContract {
         let id = self.next_purchase_id;
         self.next_purchase_id += 1;
         let now = env::block_timestamp();
+
+        // The required memo is a commitment binding listing_id, purchase_id,
+        // name, and buyer_ua — ensures the buyer can't redirect a payment.
         let required_memo = required_buy_memo(listing_id, id, &listing.name, &buyer_ua);
 
         let purchase = Purchase {
@@ -507,8 +640,6 @@ impl ZnsContract {
             created_at_ns: now,
             funding_outpoint: None,
             utxo_value_zats: None,
-            payout_tx: None,
-            refund_tx: None,
             payout_tx_hash: None,
             refund_tx_hash: None,
             payout_sighash: None,
@@ -557,6 +688,12 @@ impl ZnsContract {
         }
     }
 
+    /// Submit the funding UTXO details together with pre-built payout and
+    /// refund transactions.
+    ///
+    /// The contract parses both txs, verifies they spend the same outpoint,
+    /// computes the ZIP-244 sighashes, and determines whether this purchase
+    /// is the first-to-fund winner or a refundable runner-up.
     pub fn submit_funding(
         &mut self,
         purchase_id: u64,
@@ -570,16 +707,24 @@ impl ZnsContract {
             .get(&purchase_id)
             .expect("purchase not found")
             .clone();
+
+        // Can only fund while awaiting payment.
         assert!(
             matches!(purchase.status, PurchaseStatus::AwaitingPayment),
             "purchase not awaiting payment"
         );
+
+        // The UTXO value must exactly match the listed price.
         assert!(
             utxo_value_zats == purchase.price_zat,
             "utxo value must equal listed price"
         );
+
+        // Verify the scriptPubKey commits to this purchase's burner pubkey.
         validate_burner_script(&utxo_script_pubkey, &purchase.burner_pubkey)
             .unwrap_or_else(|e| env::panic_str(&format!("burner script invalid: {e}")));
+
+        // Sanity-check tx sizes.
         assert!(
             !payout_tx.is_empty() && payout_tx.len() <= MAX_TX_BYTES,
             "payout_tx size"
@@ -589,11 +734,13 @@ impl ZnsContract {
             "refund_tx size"
         );
 
+        // Parse both transactions.
         let payout_parsed = parse_tx(&payout_tx)
             .unwrap_or_else(|e| env::panic_str(&format!("payout_tx invalid: {e}")));
         let refund_parsed = parse_tx(&refund_tx)
             .unwrap_or_else(|e| env::panic_str(&format!("refund_tx invalid: {e}")));
 
+        // Both txs must target the same consensus branch.
         assert_eq!(
             payout_parsed.consensus_branch_id, self.consensus_branch_id,
             "payout_tx wrong consensus branch id"
@@ -602,6 +749,8 @@ impl ZnsContract {
             refund_parsed.consensus_branch_id, self.consensus_branch_id,
             "refund_tx wrong consensus branch id"
         );
+
+        // Both txs must spend the same outpoint (the funding UTXO).
         assert_eq!(
             payout_parsed.tx_in.prevout_txid, refund_parsed.tx_in.prevout_txid,
             "payout/refund txid mismatch"
@@ -611,31 +760,38 @@ impl ZnsContract {
             "payout/refund vout mismatch"
         );
 
+        // Compute ZIP-244 sighashes for both txs.
         let payout_sighash =
             compute_sighash_all(&payout_parsed, utxo_value_zats, &utxo_script_pubkey);
         let refund_sighash =
             compute_sighash_all(&refund_parsed, utxo_value_zats, &utxo_script_pubkey);
 
-        // First funding wins: check if listing already has a winner
+        // First-to-fund wins: atomically check and set the listing's winner.
         let status = if let Some(listing) = self.listings.get(&purchase.listing_id) {
             if let Some(winner_id) = listing.winning_purchase_id {
                 if winner_id == purchase_id {
+                    // This purchase was already the winner (re-submission).
                     PurchaseStatus::PayoutAuthorized
                 } else {
+                    // Another purchase already funded first.
                     PurchaseStatus::Refundable
                 }
             } else {
+                // No winner yet — claim it atomically.
                 let mut updated_listing = listing.clone();
                 updated_listing.winning_purchase_id = Some(purchase_id);
                 self.listings.insert(purchase.listing_id, updated_listing);
                 PurchaseStatus::PayoutAuthorized
             }
         } else {
+            // Listing has been removed.
             PurchaseStatus::Refundable
         };
 
         let payout_tx_hash = sha256(&payout_tx);
         let refund_tx_hash = sha256(&refund_tx);
+
+        // Persist funding details.
         purchase.funding_outpoint = Some((
             payout_parsed.tx_in.prevout_txid,
             payout_parsed.tx_in.prevout_vout,
@@ -643,8 +799,6 @@ impl ZnsContract {
         purchase.utxo_value_zats = Some(utxo_value_zats);
         purchase.payout_tx_hash = Some(payout_tx_hash);
         purchase.refund_tx_hash = Some(refund_tx_hash);
-        purchase.payout_tx = Some(payout_tx);
-        purchase.refund_tx = Some(refund_tx);
         purchase.payout_sighash = Some(payout_sighash);
         purchase.refund_sighash = Some(refund_sighash);
         purchase.status = status.clone();
@@ -673,6 +827,13 @@ impl ZnsContract {
         }
     }
 
+    // ── MPC signing flow ─────────────────────────────────────────────────
+
+    /// Request the MPC to sign the payout transaction.
+    ///
+    /// Only valid for purchases in `PayoutAuthorized` state.
+    /// Returns a cross-contract `Promise` that will callback into
+    /// `mpc_sign_callback`.
     pub fn request_payout_signature(&mut self, purchase_id: u64) -> Promise {
         let purchase = self
             .purchases
@@ -694,6 +855,10 @@ impl ZnsContract {
         self.request_signature(purchase_id, purchase.mpc_path, sighash, true)
     }
 
+    /// Mark a purchase as refundable (if funded) or expired (if unfunded).
+    ///
+    /// * Unfunded purchases: anyone can call to expire them.
+    /// * Funded purchases: only allowed if this purchase is NOT the winner.
     pub fn authorize_refund(&mut self, purchase_id: u64) {
         let mut purchase = self
             .purchases
@@ -702,11 +867,8 @@ impl ZnsContract {
             .clone();
 
         let status = if purchase.funding_outpoint.is_none() {
-            // Unfunded purchase: anyone may mark as expired (buyer changed their mind,
-            // or cleanup of abandoned purchase after listing was cancelled).
             PurchaseStatus::Expired
         } else {
-            // Funded purchase: only allow if this purchase is NOT the winner.
             let listing = self
                 .listings
                 .get(&purchase.listing_id)
@@ -729,6 +891,9 @@ impl ZnsContract {
         );
     }
 
+    /// Request the MPC to sign the refund transaction.
+    ///
+    /// Only valid for purchases in `Refundable` state.
     pub fn request_refund_signature(&mut self, purchase_id: u64) -> Promise {
         let purchase = self
             .purchases
@@ -750,6 +915,13 @@ impl ZnsContract {
         self.request_signature(purchase_id, purchase.mpc_path, sighash, false)
     }
 
+    // ── MPC callback (private) ───────────────────────────────────────────
+
+    /// Called by the MPC contract after signing completes (or fails).
+    ///
+    /// On success: stores the signature and transitions the purchase to
+    /// `Completed` (payout) or `Refunded` (refund).
+    /// On failure: emits a `signature_failed` event — the caller may retry.
     #[private]
     pub fn mpc_sign_callback(
         &mut self,
@@ -797,29 +969,17 @@ impl ZnsContract {
         }
     }
 
-    pub fn prune_terminal(&mut self, purchase_id: u64) {
-        self.assert_owner();
-        let mut purchase = self
-            .purchases
-            .get(&purchase_id)
-            .expect("purchase not found")
-            .clone();
-        assert!(
-            matches!(
-                purchase.status,
-                PurchaseStatus::Completed | PurchaseStatus::Refunded | PurchaseStatus::Expired
-            ),
-            "purchase not terminal"
-        );
-        purchase.payout_tx = None;
-        purchase.refund_tx = None;
-        self.purchases.insert(purchase_id, purchase);
-    }
+    // ── Housekeeping ─────────────────────────────────────────────────────
 
+
+    // ── Read-only queries ────────────────────────────────────────────────
+
+    /// Look up a listing by numeric id.
     pub fn get_listing(&self, id: u64) -> Option<ListingView> {
         self.listings.get(&id).map(|l| self.listing_to_view(l))
     }
 
+    /// Look up a listing by name.
     pub fn get_listing_by_name(&self, name: String) -> Option<ListingView> {
         self.listing_ids_by_name
             .get(&name)
@@ -827,22 +987,26 @@ impl ZnsContract {
             .map(|l| self.listing_to_view(l))
     }
 
+    /// Look up a purchase by numeric id.
     pub fn get_purchase(&self, id: u64) -> Option<PurchaseView> {
         self.purchases.get(&id).map(|p| self.purchase_to_view(p))
     }
 
+    /// Retrieve the stored payout signature (if the MPC already signed).
     pub fn get_payout_signature(&self, purchase_id: u64) -> Option<MpcSignature> {
         self.purchases
             .get(&purchase_id)
             .and_then(|p| p.payout_signature.clone())
     }
 
+    /// Retrieve the stored refund signature (if the MPC already signed).
     pub fn get_refund_signature(&self, purchase_id: u64) -> Option<MpcSignature> {
         self.purchases
             .get(&purchase_id)
             .and_then(|p| p.refund_signature.clone())
     }
 
+    /// Return all contract configuration as a JSON object.
     pub fn get_config(&self) -> serde_json::Value {
         serde_json::json!({
             "owner": self.owner,
@@ -860,11 +1024,21 @@ impl ZnsContract {
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Private helpers (not exposed as contract methods)
+// ───────────────────────────────────────────────────────────────────────────
+
 impl ZnsContract {
+    /// Panics if the predecessor is not the contract owner.
     fn assert_owner(&self) {
         assert_eq!(env::predecessor_account_id(), self.owner, "owner only");
     }
 
+    /// Refunds any excess storage deposit to the caller.
+    ///
+    /// Computes the difference between attached deposit and actual storage
+    /// cost, then transfers the remainder back.  Panics if the deposit is
+    /// insufficient.
     fn refund_unused_storage(&self, storage_before: u64) {
         let storage_used = env::storage_usage().saturating_sub(storage_before) as u128;
         let cost_yocto = env::storage_byte_cost()
@@ -884,6 +1058,8 @@ impl ZnsContract {
         }
     }
 
+    /// Build a cross-contract Promise that calls the MPC's `sign` method
+    /// and chains a callback to `mpc_sign_callback` on this contract.
     fn request_signature(
         &self,
         purchase_id: u64,
@@ -908,6 +1084,7 @@ impl ZnsContract {
             )
     }
 
+    /// Convert a `Listing` into its JSON-friendly `ListingView`.
     fn listing_to_view(&self, listing: &Listing) -> ListingView {
         ListingView {
             id: listing.id,
@@ -922,6 +1099,7 @@ impl ZnsContract {
         }
     }
 
+    /// Convert a `Purchase` into its JSON-friendly `PurchaseView`.
     fn purchase_to_view(&self, purchase: &Purchase) -> PurchaseView {
         PurchaseView {
             id: purchase.id,
@@ -954,6 +1132,12 @@ impl ZnsContract {
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Standalone utility functions
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Emit an NEP-297 structured event.  All events use standard `"zns"` and
+/// version `"1.0.0"`.
 fn emit_event(event: &str, data: serde_json::Value) {
     let payload = serde_json::json!({
         "standard": EVENT_STANDARD,
@@ -964,6 +1148,12 @@ fn emit_event(event: &str, data: serde_json::Value) {
     env::log_str(&format!("EVENT_JSON:{}", payload));
 }
 
+/// Build the ZNS:BUY memo commitment.
+///
+/// The buyer must include this exact memo in the Zcash tx that funds the
+/// burner address.  It contains a SHA-256 commitment over `(listing_id,
+/// purchase_id, name, buyer_ua)` so the contract can verify the payment
+/// was intended for this specific purchase.
 fn required_buy_memo(listing_id: u64, purchase_id: u64, name: &str, buyer_ua: &str) -> String {
     let commitment = sha256(format!("{listing_id}:{purchase_id}:{name}:{buyer_ua}").as_bytes());
     format!(
@@ -972,6 +1162,7 @@ fn required_buy_memo(listing_id: u64, purchase_id: u64, name: &str, buyer_ua: &s
     )
 }
 
+/// Decode a base64-encoded ed25519 public key (32 bytes).
 fn decode_pubkey_b64(b64: &str) -> Result<[u8; 32], &'static str> {
     let bytes = base64::decode(b64).map_err(|_| "invalid base64 pubkey")?;
     if bytes.len() != 32 {
@@ -982,6 +1173,8 @@ fn decode_pubkey_b64(b64: &str) -> Result<[u8; 32], &'static str> {
     Ok(out)
 }
 
+/// Verify an ed25519 signature (base64-encoded, 64 bytes) against `data`
+/// and a 32-byte public key.  Uses the host's `ed25519_verify`.
 fn ed25519_verify_b64(signature_b64: &str, data: &str, pubkey: &[u8; 32]) -> bool {
     let Ok(sig_bytes) = base64::decode(signature_b64) else {
         return false;
@@ -994,6 +1187,13 @@ fn ed25519_verify_b64(signature_b64: &str, data: &str, pubkey: &[u8; 32]) -> boo
     env::ed25519_verify(&sig_array, data.as_bytes(), pubkey)
 }
 
+/// Validate a Zcash Unified Address (Bech32m encoding).
+///
+/// Checks:
+///  1. Length within `MAX_UA_LEN`.
+///  2. Valid Bech32m checksum.
+///  3. HRP matches `"u"` (mainnet) or `"utest"` (testnet).
+///  4. At least one receiver with a known typecode and correct payload length.
 fn validate_unified_address(ua: &str, mainnet: bool) -> Result<(), &'static str> {
     if ua.is_empty() || ua.len() > MAX_UA_LEN {
         return Err("UA length invalid");
@@ -1025,6 +1225,7 @@ fn validate_unified_address(ua: &str, mainnet: bool) -> Result<(), &'static str>
         if offset + len > data.len() {
             return Err("truncated receiver payload");
         }
+        // Validate receiver lengths per Zcash spec.
         match typecode {
             0x00 | 0x01 => {
                 if len != 20 {
@@ -1036,7 +1237,7 @@ fn validate_unified_address(ua: &str, mainnet: bool) -> Result<(), &'static str>
                     return Err("invalid shielded receiver length");
                 }
             }
-            _ => {}
+            _ => {} // Unknown typecodes are tolerated but not counted.
         }
         offset += len;
         count += 1;
@@ -1047,6 +1248,7 @@ fn validate_unified_address(ua: &str, mainnet: bool) -> Result<(), &'static str>
     Ok(())
 }
 
+/// Human-readable string for a `PurchaseStatus`.
 fn purchase_status_str(s: &PurchaseStatus) -> &'static str {
     match s {
         PurchaseStatus::AwaitingPayment => "AwaitingPayment",
@@ -1058,10 +1260,16 @@ fn purchase_status_str(s: &PurchaseStatus) -> &'static str {
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Tests
+// ───────────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Build a Bech32m-encoded Unified Address from a list of receiver tuples
+    /// `(typecode, payload)`.
     fn make_ua(hrp: &str, receivers: &[(u8, &[u8])]) -> String {
         let hrp = bech32::Hrp::parse(hrp).unwrap();
         let mut data = vec![];

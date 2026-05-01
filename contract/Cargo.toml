@@ -18,7 +18,7 @@ bs58 = { version = "0.5", default-features = false, features = ["check", "alloc"
 bech32 = { version = "0.11", default-features = false, features = ["alloc"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 k256 = { version = "0.13", default-features = false, features = ["arithmetic", "alloc"] }
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+base64 = { version = "0.20", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 near-sdk = { version = "5.8.0", features = ["unit-testing"] }
