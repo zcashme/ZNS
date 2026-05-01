@@ -29,7 +29,6 @@ struct ContractPurchaseView {
     pub seller_receives_zat: u64,
     pub refund_receives_zat: u64,
     pub status: String,
-    pub expires_at_ns: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,19 +122,7 @@ async fn handle_awaiting_payment(
         return Ok(());
     }
 
-    if is_expired(contract_purchase.expires_at_ns) {
-        call_contract_method(
-            state,
-            "authorize_refund",
-            json!({ "purchase_id": contract_purchase.id }),
-            SIMPLE_CALL_GAS,
-            0,
-        )
-        .await?;
-        state
-            .store
-            .update_purchase_status(purchase.id, PurchaseStatus::Expired)?;
-    }
+    // No expiry check -- purchases remain AwaitingPayment until funded or manually cancelled.
 
     Ok(())
 }
@@ -218,6 +205,13 @@ async fn build_and_submit_funding(
         &refund_tx,
         new_status,
     )?;
+
+
+    // If this purchase lost the race, immediately request refund signature.
+    if submitted.status == "Refundable" {
+        request_signature(state, contract_purchase.id, false).await?;
+        maybe_broadcast_signed(state, purchase, contract_purchase, false).await?;
+    }
 
     Ok(())
 }
@@ -504,6 +498,3 @@ fn signature_to_compact(sig: &MpcSignature) -> Result<[u8; 64]> {
     Ok(compact)
 }
 
-fn is_expired(expires_at_ns: u64) -> bool {
-    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64 >= expires_at_ns
-}

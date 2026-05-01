@@ -87,7 +87,7 @@ async fn sync_once(state: &Arc<AppState>, client: &reqwest::Client) -> Result<()
                 continue;
             };
 
-            if listing.status != "Open" {
+            if listing.winning_purchase_id.is_none() {
                 continue;
             }
 

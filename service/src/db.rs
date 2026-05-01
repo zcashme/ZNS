@@ -19,15 +19,8 @@ pub struct Listing {
     pub price_zat: u64,
     pub commission_bps: u64,
     pub treasury_ua: String,
-    pub status: ListingStatus,
+    pub winning_purchase_id: Option<i64>,
     pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ListingStatus {
-    Open,
-    Sold,
-    Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +39,6 @@ pub struct Purchase {
     pub refund_tx: Vec<u8>,
     pub status: PurchaseStatus,
     pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
     pub funding_txid: Option<String>,
     pub funding_vout: Option<i64>,
     pub build_height: Option<i64>,
@@ -88,25 +80,6 @@ impl PurchaseStatus {
     }
 }
 
-impl ListingStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            ListingStatus::Open => "open",
-            ListingStatus::Sold => "sold",
-            ListingStatus::Cancelled => "cancelled",
-        }
-    }
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "open" => Ok(ListingStatus::Open),
-            "sold" => Ok(ListingStatus::Sold),
-            "cancelled" => Ok(ListingStatus::Cancelled),
-            _ => bail!("unknown listing status: {}", s),
-        }
-    }
-}
-
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path).context("open SQLite")?;
@@ -120,12 +93,11 @@ impl Store {
                 price_zat           INTEGER NOT NULL,
                 commission_bps      INTEGER NOT NULL,
                 treasury_ua         TEXT NOT NULL,
-                status              TEXT NOT NULL,
+                winning_purchase_id INTEGER,
                 created_at          TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_listings_name ON listings(name);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_name_unique ON listings(name);
-            CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);
 
             CREATE TABLE IF NOT EXISTS purchases (
                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,10 +113,9 @@ impl Store {
                 refund_bundle        BLOB NOT NULL,
                 status               TEXT NOT NULL,
                 created_at           TEXT NOT NULL,
-                expires_at           TEXT NOT NULL,
                 funding_txid         TEXT,
                 funding_vout         INTEGER,
-                sighash              TEXT,
+                build_height         INTEGER,
                 payout_txid          TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_purchases_status ON purchases(status);
@@ -167,7 +138,7 @@ impl Store {
     pub fn get_listing_by_id(&self, id: i64) -> Result<Option<Listing>> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT id, contract_listing_id, name, seller_ua, price_zat, commission_bps, treasury_ua, status, created_at
+            "SELECT id, contract_listing_id, name, seller_ua, price_zat, commission_bps, treasury_ua, winning_purchase_id, created_at
              FROM listings WHERE id = ?1",
             params![id],
             |row| self.row_to_listing(row),
@@ -184,12 +155,12 @@ impl Store {
         price_zat: u64,
         commission_bps: u64,
         treasury_ua: &str,
-        status: ListingStatus,
+        winning_purchase_id: Option<i64>,
     ) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO listings (contract_listing_id, name, seller_ua, price_zat, commission_bps, treasury_ua, status, created_at)
+            "INSERT INTO listings (contract_listing_id, name, seller_ua, price_zat, commission_bps, treasury_ua, winning_purchase_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(name) DO UPDATE SET
                  contract_listing_id = excluded.contract_listing_id,
@@ -197,7 +168,7 @@ impl Store {
                  price_zat = excluded.price_zat,
                  commission_bps = excluded.commission_bps,
                  treasury_ua = excluded.treasury_ua,
-                 status = excluded.status",
+                 winning_purchase_id = excluded.winning_purchase_id",
             params![
                 contract_listing_id,
                 name,
@@ -205,7 +176,7 @@ impl Store {
                 price_zat as i64,
                 commission_bps as i64,
                 treasury_ua,
-                status.as_str(),
+                winning_purchase_id,
                 now
             ],
         )
@@ -227,14 +198,12 @@ impl Store {
         mpc_path: &str,
         buyer_signature_b64: Option<&str>,
         buyer_pubkey_b64: Option<&str>,
-        expires_at: DateTime<Utc>,
     ) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
-        let exp = expires_at.to_rfc3339();
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO purchases (listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, buyer_signature_b64, buyer_pubkey_b64, payout_bundle, refund_bundle, status, created_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO purchases (listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, buyer_signature_b64, buyer_pubkey_b64, payout_bundle, refund_bundle, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 listing_id,
                 buyer_ua,
@@ -247,17 +216,16 @@ impl Store {
                 Vec::<u8>::new(),
                 PurchaseStatus::AwaitingPayment.as_str(),
                 now,
-                exp
             ],
         )
         .context("insert purchase")?;
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn set_contract_purchase_id(&self, id: i64, contract_id: i64) -> Result<()> {
+    pub fn set_contract_purchase_id(&self, local_id: i64, contract_id: i64) -> Result<()> {
         self.lock()?.execute(
             "UPDATE purchases SET contract_purchase_id = ?1 WHERE id = ?2",
-            params![contract_id, id],
+            params![contract_id, local_id],
         )?;
         Ok(())
     }
@@ -265,10 +233,11 @@ impl Store {
     pub fn list_work_queue(&self) -> Result<Vec<Purchase>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, contract_purchase_id, listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path,
-                    buyer_signature_b64, buyer_pubkey_b64,
-                    payout_bundle, refund_bundle, status, created_at, expires_at,
-                    funding_txid, funding_vout, build_height, payout_txid
+            "SELECT
+                id, contract_purchase_id, listing_id, buyer_ua, burner_taddr,
+                burner_pubkey_hex, mpc_path, buyer_signature_b64, buyer_pubkey_b64,
+                payout_bundle, refund_bundle, status, created_at,
+                funding_txid, funding_vout, build_height, payout_txid
              FROM purchases
              WHERE status IN ('awaiting_payment','payout_authorized','refundable')
                 OR (status IN ('completed','refunded') AND payout_txid IS NULL)
@@ -327,15 +296,7 @@ impl Store {
     }
 
     fn row_to_listing(&self, row: &rusqlite::Row) -> rusqlite::Result<Listing> {
-        let status_str: String = row.get(7)?;
         let created_at_str: String = row.get(8)?;
-        let status = ListingStatus::from_str(&status_str).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                7,
-                rusqlite::types::Type::Text,
-                e.to_string().into(),
-            )
-        })?;
         let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
         })?;
@@ -347,28 +308,24 @@ impl Store {
             price_zat: row.get::<_, i64>(4)? as u64,
             commission_bps: row.get::<_, i64>(5)? as u64,
             treasury_ua: row.get(6)?,
-            status,
+            winning_purchase_id: row.get(7)?,
             created_at,
         })
     }
 
     fn row_to_purchase(&self, row: &rusqlite::Row) -> rusqlite::Result<Purchase> {
-        let status_str: String = row.get(9)?;
-        let created_at_str: String = row.get(10)?;
-        let expires_at_str: String = row.get(11)?;
+        let status_str: String = row.get(11)?;
+        let created_at_str: String = row.get(12)?;
 
         let status = PurchaseStatus::from_str(&status_str).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(
-                9,
+                11,
                 rusqlite::types::Type::Text,
                 e.to_string().into(),
             )
         })?;
         let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e))
-        })?;
-        let expires_at = expires_at_str.parse::<DateTime<Utc>>().map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
         Ok(Purchase {
@@ -385,11 +342,10 @@ impl Store {
             refund_tx: row.get(10)?,
             status,
             created_at,
-            expires_at,
-            funding_txid: row.get(14)?,
-            funding_vout: row.get(15)?,
-            build_height: row.get(16)?,
-            settlement_txid: row.get(17)?,
+            funding_txid: row.get(13)?,
+            funding_vout: row.get(14)?,
+            build_height: row.get(15)?,
+            settlement_txid: row.get(16)?,
         })
     }
 }

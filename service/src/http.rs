@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::db::{ListingStatus, Store};
+use crate::db::Store;
 use crate::near::NearClient;
 use crate::zcash::Watcher;
 
@@ -37,7 +37,6 @@ pub struct CreatePurchaseResponse {
     pub fee_zat: u64,
     pub seller_receives_zat: u64,
     pub refund_receives_zat: u64,
-    pub expires_at: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -48,7 +47,7 @@ pub struct ContractListingView {
     pub price_zat: u64,
     pub commission_bps: u64,
     pub treasury_ua: String,
-    pub status: String,
+    pub winning_purchase_id: Option<u64>,
     pub created_at_ns: u64,
     pub listing_nonce: u64,
 }
@@ -67,7 +66,6 @@ struct PurchaseAcceptedView {
     pub payout_fee_zat: u64,
     pub seller_receives_zat: u64,
     pub refund_receives_zat: u64,
-    pub expires_at_ns: u64,
 }
 
 struct ResolvedListing {
@@ -94,15 +92,6 @@ async fn resolve_name(indexer_url: &str, name: &str) -> Result<(String, u64, u64
     Ok((seller_ua, price, nonce, signature))
 }
 
-fn listing_status_from_contract(status: &str) -> ListingStatus {
-    match status {
-        "Open" => ListingStatus::Open,
-        "Sold" => ListingStatus::Sold,
-        "Cancelled" => ListingStatus::Cancelled,
-        _ => ListingStatus::Cancelled,
-    }
-}
-
 fn cache_listing(
     state: &AppState,
     listing: &ContractListingView,
@@ -116,7 +105,7 @@ fn cache_listing(
             listing.price_zat,
             listing.commission_bps,
             &listing.treasury_ua,
-            listing_status_from_contract(&listing.status),
+            listing.winning_purchase_id.map(|v| v as i64),
         )
         .map_err(|e| {
             tracing::error!("upsert listing: {e}");
@@ -142,13 +131,10 @@ async fn ensure_listing(
 
     if let Some(listing) = on_chain {
         let local_id = cache_listing(state, &listing)?;
-        if listing.status == "Open" {
-            return Ok(ResolvedListing {
-                local_id,
-                contract: listing,
-            });
-        }
-        return Err(axum::http::StatusCode::CONFLICT);
+        return Ok(ResolvedListing {
+            local_id,
+            contract: listing,
+        });
     }
 
     let (seller_ua, price_zat, nonce, signature) = resolve_name(&state.cfg.indexer_rpc, name)
@@ -171,8 +157,8 @@ async fn ensure_listing(
         "signature_b64": signature,
         "user_pubkey_b64": null,
     });
-    let deposit_yocto = 50_000_000_000_000_000_000_000u128;
-    let gas = 50_000_000_000_000u64;
+    let deposit_yocto = 100_000_000_000_000_000_000_000u128;
+    let gas = 100_000_000_000_000u64;
 
     let outcome = state
         .near
@@ -206,20 +192,11 @@ async fn ensure_listing(
     })
 }
 
-fn ns_to_rfc3339(ts_ns: u64) -> Result<String, axum::http::StatusCode> {
-    let ts = chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(ts_ns as i64);
-    Ok(ts.to_rfc3339())
-}
-
 async fn create_purchase_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreatePurchaseRequest>,
 ) -> Result<Json<CreatePurchaseResponse>, axum::http::StatusCode> {
     let listing = ensure_listing(&state, &body.name).await?;
-
-    if listing.contract.status != "Open" {
-        return Err(axum::http::StatusCode::CONFLICT);
-    }
 
     let path = format!(
         "zns-purchase-{}-{}",
@@ -229,7 +206,10 @@ async fn create_purchase_handler(
 
     if let (Some(sig), Some(pk)) = (&body.buyer_signature_b64, &body.buyer_pubkey_b64) {
         if !crate::memo::verify_buy_signature(&listing.contract.name, &body.buyer_ua, sig, pk) {
-            tracing::warn!("buyer signature verification failed for {}", listing.contract.name);
+            tracing::warn!(
+                "buyer signature verification failed for {}",
+                listing.contract.name
+            );
             return Err(axum::http::StatusCode::UNAUTHORIZED);
         }
     }
@@ -270,7 +250,6 @@ async fn create_purchase_handler(
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let expires_at = ns_to_rfc3339(accepted.expires_at_ns)?;
     let local_purchase_id = state
         .store
         .insert_purchase(
@@ -281,12 +260,6 @@ async fn create_purchase_handler(
             &accepted.mpc_path,
             accepted.buyer_signature_b64.as_deref(),
             accepted.buyer_pubkey_b64.as_deref(),
-            chrono::DateTime::parse_from_rfc3339(&expires_at)
-                .map_err(|e| {
-                    tracing::error!("parse expires_at: {e}");
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
-                })?
-                .with_timezone(&chrono::Utc),
         )
         .map_err(|e| {
             tracing::error!("insert purchase: {e}");
@@ -311,7 +284,6 @@ async fn create_purchase_handler(
         fee_zat: accepted.payout_fee_zat,
         seller_receives_zat: accepted.seller_receives_zat,
         refund_receives_zat: accepted.refund_receives_zat,
-        expires_at,
     }))
 }
 
