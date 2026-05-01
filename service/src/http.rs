@@ -38,7 +38,7 @@ pub struct CreatePurchaseResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-struct ContractListingView {
+pub struct ContractListingView {
     pub id: u64,
     pub name: String,
     pub seller_ua: String,
@@ -47,6 +47,7 @@ struct ContractListingView {
     pub treasury_ua: String,
     pub status: String,
     pub created_at_ns: u64,
+    pub listing_nonce: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,7 +70,7 @@ struct ResolvedListing {
     contract: ContractListingView,
 }
 
-async fn resolve_name(indexer_url: &str, name: &str) -> Result<(String, u64), reqwest::Error> {
+async fn resolve_name(indexer_url: &str, name: &str) -> Result<(String, u64, u64, String), reqwest::Error> {
     let resp: serde_json::Value = reqwest::Client::new()
         .post(indexer_url)
         .json(&serde_json::json!({
@@ -83,7 +84,9 @@ async fn resolve_name(indexer_url: &str, name: &str) -> Result<(String, u64), re
 
     let seller_ua = resp["result"]["address"].as_str().unwrap_or("").to_string();
     let price = resp["result"]["listing"]["price"].as_u64().unwrap_or(0);
-    Ok((seller_ua, price))
+    let nonce = resp["result"]["listing"]["nonce"].as_u64().unwrap_or(0);
+    let signature = resp["result"]["listing"]["signature"].as_str().unwrap_or("").to_string();
+    Ok((seller_ua, price, nonce, signature))
 }
 
 fn listing_status_from_contract(status: &str) -> ListingStatus {
@@ -143,14 +146,14 @@ async fn ensure_listing(
         return Err(axum::http::StatusCode::CONFLICT);
     }
 
-    let (seller_ua, price_zat) = resolve_name(&state.cfg.indexer_rpc, name)
+    let (seller_ua, price_zat, nonce, signature) = resolve_name(&state.cfg.indexer_rpc, name)
         .await
         .map_err(|e| {
             tracing::error!("indexer resolve: {e}");
             axum::http::StatusCode::BAD_GATEWAY
         })?;
 
-    if seller_ua.is_empty() || price_zat == 0 {
+    if seller_ua.is_empty() || price_zat == 0 || signature.is_empty() {
         tracing::warn!("name not listed: {}", name);
         return Err(axum::http::StatusCode::NOT_FOUND);
     }
@@ -159,6 +162,9 @@ async fn ensure_listing(
         "name": name,
         "seller_ua": seller_ua,
         "price_zat": price_zat,
+        "nonce": nonce,
+        "signature_hex": signature,
+        "user_pubkey_hex": null,
     });
     let deposit_yocto = 50_000_000_000_000_000_000_000u128;
     let gas = 50_000_000_000_000u64;

@@ -23,6 +23,8 @@ struct RegistrationItem {
 #[derive(Debug, Deserialize)]
 struct ListingItem {
     price: u64,
+    nonce: u64,
+    signature: String,
 }
 
 pub async fn run_worker(state: Arc<AppState>) {
@@ -85,6 +87,9 @@ async fn sync_once(state: &Arc<AppState>, client: &reqwest::Client) -> Result<()
                                 "name": item.name,
                                 "seller_ua": item.address,
                                 "price_zat": listing.price,
+                                "nonce": listing.nonce,
+                                "signature_hex": listing.signature,
+                                "user_pubkey_hex": null,
                             }),
                             gas,
                             deposit_yocto,

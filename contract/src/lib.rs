@@ -101,6 +101,7 @@ pub struct Listing {
     pub treasury_ua: String,
     pub status: ListingStatus,
     pub created_at_ns: u64,
+    pub listing_nonce: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -113,6 +114,7 @@ pub struct ListingView {
     pub treasury_ua: String,
     pub status: String,
     pub created_at_ns: u64,
+    pub listing_nonce: u64,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
@@ -222,6 +224,7 @@ pub struct ZnsContract {
     pub default_expiry_seconds: u64,
     pub mainnet: bool,
     pub consensus_branch_id: u32,
+    pub admin_pubkey: [u8; 32],
     pub next_listing_id: u64,
     pub next_purchase_id: u64,
     pub listings: LookupMap<u64, Listing>,
@@ -244,6 +247,7 @@ impl ZnsContract {
         default_expiry_seconds: u64,
         mainnet: bool,
         consensus_branch_id: u32,
+        admin_pubkey_hex: String,
     ) -> Self {
         assert!(!env::state_exists(), "already initialized");
         assert!(
@@ -257,6 +261,10 @@ impl ZnsContract {
         validate_unified_address(&treasury_ua, mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("treasury_ua invalid: {e}")));
         assert!(payout_fee_zat > 0, "payout_fee_zat must be > 0");
+        let admin_pubkey = hex::decode(&admin_pubkey_hex)
+            .ok()
+            .and_then(|v| v.try_into().ok())
+            .unwrap_or_else(|| env::panic_str("admin_pubkey must be 64 hex chars (32 bytes)"));
         Self {
             owner,
             relayer,
@@ -268,6 +276,7 @@ impl ZnsContract {
             default_expiry_seconds,
             mainnet,
             consensus_branch_id,
+            admin_pubkey,
             next_listing_id: 1,
             next_purchase_id: 1,
             listings: LookupMap::new(b"L"),
@@ -297,6 +306,15 @@ impl ZnsContract {
         validate_unified_address(&ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("treasury_ua invalid: {e}")));
         self.treasury_ua = ua;
+    }
+
+    pub fn set_admin_pubkey(&mut self, pubkey_hex: String) {
+        self.assert_owner();
+        let pk = hex::decode(&pubkey_hex)
+            .ok()
+            .and_then(|v| v.try_into().ok())
+            .unwrap_or_else(|| env::panic_str("admin_pubkey must be 64 hex chars (32 bytes)"));
+        self.admin_pubkey = pk;
     }
 
     pub fn set_commission_bps(&mut self, bps: u64) {
@@ -336,8 +354,10 @@ impl ZnsContract {
         name: String,
         seller_ua: String,
         price_zat: u64,
+        nonce: u64,
+        signature_hex: String,
+        user_pubkey_hex: Option<String>,
     ) -> ListingView {
-        self.assert_relayer();
         assert!(
             !name.is_empty() && name.len() <= MAX_NAME_LEN,
             "name length"
@@ -349,6 +369,21 @@ impl ZnsContract {
             "price_zat must exceed payout fee"
         );
 
+        let pubkey: [u8; 32] = if let Some(pk_hex) = user_pubkey_hex {
+            hex::decode(&pk_hex)
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .unwrap_or_else(|| env::panic_str("user_pubkey must be 64 hex chars (32 bytes)"))
+        } else {
+            self.admin_pubkey
+        };
+
+        let payload = format!("LIST:{name}:{price_zat}:{nonce}");
+        assert!(
+            ed25519_verify_hex(&signature_hex, &payload, &pubkey),
+            "listing signature invalid"
+        );
+
         if let Some(existing_id) = self.listing_ids_by_name.get(&name) {
             let existing = self
                 .listings
@@ -357,6 +392,10 @@ impl ZnsContract {
             assert!(
                 !matches!(existing.status, ListingStatus::Open),
                 "listing already open for name"
+            );
+            assert!(
+                nonce > existing.listing_nonce,
+                "listing nonce must increase for replacement"
             );
         }
 
@@ -373,6 +412,7 @@ impl ZnsContract {
             treasury_ua: self.treasury_ua.clone(),
             status: ListingStatus::Open,
             created_at_ns: now,
+            listing_nonce: nonce,
         };
         self.listings.insert(id, listing.clone());
         self.listing_ids_by_name.insert(name.clone(), id);
@@ -390,6 +430,7 @@ impl ZnsContract {
                 "treasury_ua": self.treasury_ua,
                 "payout_fee_zat": self.payout_fee_zat,
                 "created_at_ns": now,
+                "listing_nonce": nonce,
             }),
         );
         self.listing_to_view(&listing)
@@ -828,6 +869,7 @@ impl ZnsContract {
             "default_expiry_seconds": self.default_expiry_seconds,
             "mainnet": self.mainnet,
             "consensus_branch_id": self.consensus_branch_id,
+            "admin_pubkey_hex": hex::encode(self.admin_pubkey),
             "next_listing_id": self.next_listing_id,
             "next_purchase_id": self.next_purchase_id,
         })
@@ -896,6 +938,7 @@ impl ZnsContract {
             treasury_ua: listing.treasury_ua.clone(),
             status: listing_status_str(&listing.status).to_string(),
             created_at_ns: listing.created_at_ns,
+            listing_nonce: listing.listing_nonce,
         }
     }
 
@@ -946,6 +989,18 @@ fn required_buy_memo(listing_id: u64, purchase_id: u64, name: &str, buyer_ua: &s
         "ZNS:BUY:{listing_id}:{purchase_id}:{}",
         hex::encode(commitment)
     )
+}
+
+fn ed25519_verify_hex(signature_hex: &str, data: &str, pubkey: &[u8; 32]) -> bool {
+    let Ok(sig_bytes) = hex::decode(signature_hex) else {
+        return false;
+    };
+    if sig_bytes.len() != 64 {
+        return false;
+    }
+    let mut sig_array = [0u8; 64];
+    sig_array.copy_from_slice(&sig_bytes);
+    env::ed25519_verify(&sig_array, data.as_bytes(), pubkey)
 }
 
 fn validate_unified_address(ua: &str, mainnet: bool) -> Result<(), &'static str> {
