@@ -56,6 +56,10 @@ pub struct Config {
     #[arg(long, env = "ZNS_BIND_ADDR", default_value = "127.0.0.1:8080")]
     pub bind_addr: SocketAddr,
 
+    /// Admin Ed25519 secret key (hex) for signing BUY memos when buyer does not.
+    #[arg(long, env = "ZNS_ADMIN_ED25519_KEY")]
+    pub admin_ed25519_key: Option<String>,
+
     /// Path to the local SQLite database.
     #[arg(long, env = "ZNS_SQLITE_PATH", default_value = "zns_intents.db")]
     pub sqlite_path: String,

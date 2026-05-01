@@ -21,6 +21,8 @@ const SIMPLE_CALL_GAS: u64 = 50_000_000_000_000;
 struct ContractPurchaseView {
     pub id: u64,
     pub required_memo: String,
+    pub buyer_signature_b64: Option<String>,
+    pub buyer_pubkey_b64: Option<String>,
     pub price_zat: u64,
     pub commission_zat: u64,
     pub payout_fee_zat: u64,
@@ -164,7 +166,14 @@ async fn build_and_submit_funding(
         buyer_ua: None,
         seller_amount: contract_purchase.seller_receives_zat,
         treasury_amount: contract_purchase.commission_zat,
-        memo: fixed_memo(&contract_purchase.required_memo),
+        memo: build_buy_memo(
+            &state,
+            &listing.name,
+            &purchase.buyer_ua,
+            &purchase.buyer_signature_b64,
+            &purchase.buyer_pubkey_b64,
+            &contract_purchase.required_memo,
+        ),
         fee: Some(contract_purchase.payout_fee_zat),
     })?;
 
@@ -266,7 +275,14 @@ async fn maybe_broadcast_signed(
             0
         },
         memo: if payout_path {
-            fixed_memo(&contract_purchase.required_memo)
+            build_buy_memo(
+                &state,
+                &listing.name,
+                &purchase.buyer_ua,
+                &purchase.buyer_signature_b64,
+                &purchase.buyer_pubkey_b64,
+                &contract_purchase.required_memo,
+            )
         } else {
             [0u8; 512]
         },
@@ -418,6 +434,31 @@ fn fixed_memo(memo: &str) -> [u8; 512] {
     let len = raw.len().min(512);
     bytes[..len].copy_from_slice(&raw[..len]);
     bytes
+}
+
+/// Build the BUY memo for the treasury Orchard output.
+///
+/// Priority:
+/// 1. Buyer-signed memo if buyer_signature_b64 & buyer_pubkey_b64 are present.
+/// 2. Admin-signed memo if the service has a memo_signer configured.
+/// 3. Contract required_memo fallback (indexer won't parse as BUY action).
+fn build_buy_memo(
+    state: &AppState,
+    listing_name: &str,
+    buyer_ua: &str,
+    buyer_signature_b64: &Option<String>,
+    buyer_pubkey_b64: &Option<String>,
+    required_memo: &str,
+) -> [u8; 512] {
+    if let (Some(sig), Some(pk)) = (buyer_signature_b64, buyer_pubkey_b64) {
+        let memo = format!("ZNS:BUY:{listing_name}:{buyer_ua}:{sig}:{pk}");
+        return fixed_memo(&memo);
+    }
+    if let Some(ref signer) = state.memo_signer {
+        let memo = signer.sign_buy(listing_name, buyer_ua);
+        return fixed_memo(&memo);
+    }
+    fixed_memo(required_memo)
 }
 
 fn decode_pubkey(hex_key: &str) -> Result<[u8; 33]> {

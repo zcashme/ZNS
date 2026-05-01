@@ -15,12 +15,15 @@ pub struct AppState {
     pub store: Arc<Store>,
     pub near: NearClient,
     pub watcher: Watcher,
+    pub memo_signer: Option<crate::memo::MemoSigner>,
 }
 
 #[derive(Deserialize)]
 pub struct CreatePurchaseRequest {
     pub name: String,
     pub buyer_ua: String,
+    pub buyer_signature_b64: Option<String>,
+    pub buyer_pubkey_b64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -57,6 +60,8 @@ struct PurchaseAcceptedView {
     pub burner_pubkey_hex: String,
     pub mpc_path: String,
     pub required_memo: String,
+    pub buyer_signature_b64: Option<String>,
+    pub buyer_pubkey_b64: Option<String>,
     pub price_zat: u64,
     pub commission_zat: u64,
     pub payout_fee_zat: u64,
@@ -222,10 +227,19 @@ async fn create_purchase_handler(
         listing.contract.id
     );
 
+    if let (Some(sig), Some(pk)) = (&body.buyer_signature_b64, &body.buyer_pubkey_b64) {
+        if !crate::memo::verify_buy_signature(&listing.contract.name, &body.buyer_ua, sig, pk) {
+            tracing::warn!("buyer signature verification failed for {}", listing.contract.name);
+            return Err(axum::http::StatusCode::UNAUTHORIZED);
+        }
+    }
+
     let args = serde_json::json!({
         "listing_id": listing.contract.id,
         "buyer_ua": body.buyer_ua,
         "mpc_path": path,
+        "buyer_signature_b64": body.buyer_signature_b64,
+        "buyer_pubkey_b64": body.buyer_pubkey_b64,
     });
     let deposit_yocto = 100_000_000_000_000_000_000_000u128;
     let gas = 100_000_000_000_000u64;
@@ -265,6 +279,8 @@ async fn create_purchase_handler(
             &accepted.burner_taddr,
             &accepted.burner_pubkey_hex,
             &accepted.mpc_path,
+            accepted.buyer_signature_b64.as_deref(),
+            accepted.buyer_pubkey_b64.as_deref(),
             chrono::DateTime::parse_from_rfc3339(&expires_at)
                 .map_err(|e| {
                     tracing::error!("parse expires_at: {e}");

@@ -21,7 +21,7 @@ mod zcash;
 use zcash::{compute_sighash_all, derive_burner, parse_tx, sha256, validate_burner_script};
 
 const SIGN_GAS: Gas = Gas::from_tgas(250);
-const CALLBACK_GAS: Gas = Gas::from_tgas(50);
+const CALLBACK_GAS: Gas = Gas::from_tgas(10);
 const MPC_DEPOSIT: NearToken = NearToken::from_yoctonear(100);
 
 const MAX_COMMISSION_BPS: u64 = 1_000; // 10%
@@ -135,6 +135,8 @@ pub struct Purchase {
     pub listing_id: u64,
     pub buyer_ua: String,
     pub required_memo: String,
+    pub buyer_signature_b64: Option<String>,
+    pub buyer_pubkey_b64: Option<String>,
     pub price_zat: u64,
     pub commission_zat: u64,
     pub payout_fee_zat: u64,
@@ -164,6 +166,8 @@ pub struct PurchaseView {
     pub listing_id: u64,
     pub buyer_ua: String,
     pub required_memo: String,
+    pub buyer_signature_b64: Option<String>,
+    pub buyer_pubkey_b64: Option<String>,
     pub price_zat: u64,
     pub commission_zat: u64,
     pub payout_fee_zat: u64,
@@ -192,6 +196,8 @@ pub struct PurchaseAcceptedView {
     pub burner_pubkey_hex: String,
     pub mpc_path: String,
     pub required_memo: String,
+    pub buyer_signature_b64: Option<String>,
+    pub buyer_pubkey_b64: Option<String>,
     pub price_zat: u64,
     pub commission_zat: u64,
     pub payout_fee_zat: u64,
@@ -459,6 +465,8 @@ impl ZnsContract {
         listing_id: u64,
         buyer_ua: String,
         mpc_path: String,
+        buyer_signature_b64: Option<String>,
+        buyer_pubkey_b64: Option<String>,
     ) -> PurchaseAcceptedView {
 
         let listing = self
@@ -473,6 +481,16 @@ impl ZnsContract {
 
         validate_unified_address(&buyer_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("buyer_ua invalid: {e}")));
+
+        if let (Some(ref sig), Some(ref pk_b64)) = (&buyer_signature_b64, &buyer_pubkey_b64) {
+            let pubkey = decode_pubkey_b64(pk_b64)
+                .unwrap_or_else(|e| env::panic_str(&format!("buyer_pubkey invalid: {e}")));
+            let payload = format!("BUY:{}:{buyer_ua}", listing.name);
+            assert!(
+                ed25519_verify_b64(sig, &payload, &pubkey),
+                "buyer signature invalid"
+            );
+        }
         assert!(
             !mpc_path.is_empty() && mpc_path.len() <= MAX_PATH_LEN,
             "mpc_path length"
@@ -514,6 +532,8 @@ impl ZnsContract {
             listing_id,
             buyer_ua: buyer_ua.clone(),
             required_memo: required_memo.clone(),
+            buyer_signature_b64: buyer_signature_b64.clone(),
+            buyer_pubkey_b64: buyer_pubkey_b64.clone(),
             price_zat: listing.price_zat,
             commission_zat,
             payout_fee_zat: self.payout_fee_zat,
@@ -554,6 +574,8 @@ impl ZnsContract {
                 "burner_taddr": burner_taddr,
                 "mpc_path": mpc_path,
                 "required_memo": required_memo,
+                "buyer_signature_b64": buyer_signature_b64,
+                "buyer_pubkey_b64": buyer_pubkey_b64,
                 "price_zat": listing.price_zat,
                 "commission_zat": commission_zat,
                 "payout_fee_zat": self.payout_fee_zat,
@@ -570,6 +592,8 @@ impl ZnsContract {
             burner_pubkey_hex: hex::encode(burner_pubkey),
             mpc_path,
             required_memo,
+            buyer_signature_b64,
+            buyer_pubkey_b64,
             price_zat: listing.price_zat,
             commission_zat,
             payout_fee_zat: self.payout_fee_zat,
@@ -644,13 +668,15 @@ impl ZnsContract {
             PurchaseStatus::PayoutAuthorized
         };
 
+        let payout_tx_hash = sha256(&payout_tx);
+        let refund_tx_hash = sha256(&refund_tx);
         purchase.funding_outpoint = Some((
             payout_parsed.tx_in.prevout_txid,
             payout_parsed.tx_in.prevout_vout,
         ));
         purchase.utxo_value_zats = Some(utxo_value_zats);
-        purchase.payout_tx_hash = Some(sha256(&payout_tx));
-        purchase.refund_tx_hash = Some(sha256(&refund_tx));
+        purchase.payout_tx_hash = Some(payout_tx_hash);
+        purchase.refund_tx_hash = Some(refund_tx_hash);
         purchase.payout_tx = Some(payout_tx);
         purchase.refund_tx = Some(refund_tx);
         purchase.payout_sighash = Some(payout_sighash);
@@ -665,42 +691,18 @@ impl ZnsContract {
                 "utxo_txid": hex::encode(payout_parsed.tx_in.prevout_txid),
                 "utxo_vout": payout_parsed.tx_in.prevout_vout,
                 "utxo_value_zats": utxo_value_zats,
-                "payout_tx_hash": hex::encode(sha256(&self.purchases.get(&purchase_id).unwrap().payout_tx.as_ref().unwrap())),
-                "refund_tx_hash": hex::encode(sha256(&self.purchases.get(&purchase_id).unwrap().refund_tx.as_ref().unwrap())),
+                "payout_tx_hash": hex::encode(payout_tx_hash),
+                "refund_tx_hash": hex::encode(refund_tx_hash),
                 "status": purchase_status_str(&status),
             }),
         );
 
         SubmittedFundingView {
             purchase_id,
-            payout_tx_hash_hex: hex::encode(
-                self.purchases
-                    .get(&purchase_id)
-                    .unwrap()
-                    .payout_tx_hash
-                    .unwrap(),
-            ),
-            refund_tx_hash_hex: hex::encode(
-                self.purchases
-                    .get(&purchase_id)
-                    .unwrap()
-                    .refund_tx_hash
-                    .unwrap(),
-            ),
-            payout_sighash_hex: hex::encode(
-                self.purchases
-                    .get(&purchase_id)
-                    .unwrap()
-                    .payout_sighash
-                    .unwrap(),
-            ),
-            refund_sighash_hex: hex::encode(
-                self.purchases
-                    .get(&purchase_id)
-                    .unwrap()
-                    .refund_sighash
-                    .unwrap(),
-            ),
+            payout_tx_hash_hex: hex::encode(payout_tx_hash),
+            refund_tx_hash_hex: hex::encode(refund_tx_hash),
+            payout_sighash_hex: hex::encode(payout_sighash),
+            refund_sighash_hex: hex::encode(refund_sighash),
             status: purchase_status_str(&status).to_string(),
         }
     }
@@ -779,6 +781,7 @@ impl ZnsContract {
         purchase_id: u64,
         is_payout: bool,
     ) {
+        let gas_start = env::used_gas();
         let mut purchase = self
             .purchases
             .get(&purchase_id)
@@ -800,6 +803,7 @@ impl ZnsContract {
                         "purchase_id": purchase_id,
                         "kind": if is_payout { "payout" } else { "refund" },
                         "status": purchase_status_str(&purchase.status),
+                        "callback_gas_used": (env::used_gas().as_gas() - gas_start.as_gas()),
                     }),
                 );
             }
@@ -810,6 +814,7 @@ impl ZnsContract {
                         "purchase_id": purchase_id,
                         "kind": if is_payout { "payout" } else { "refund" },
                         "error": format!("{:?}", err),
+                        "callback_gas_used": (env::used_gas().as_gas() - gas_start.as_gas()),
                     }),
                 );
             }
@@ -948,6 +953,8 @@ impl ZnsContract {
             listing_id: purchase.listing_id,
             buyer_ua: purchase.buyer_ua.clone(),
             required_memo: purchase.required_memo.clone(),
+            buyer_signature_b64: purchase.buyer_signature_b64.clone(),
+            buyer_pubkey_b64: purchase.buyer_pubkey_b64.clone(),
             price_zat: purchase.price_zat,
             commission_zat: purchase.commission_zat,
             payout_fee_zat: purchase.payout_fee_zat,

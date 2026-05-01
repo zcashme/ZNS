@@ -40,6 +40,8 @@ pub struct Purchase {
     pub burner_taddr: String,
     pub burner_pubkey_hex: String,
     pub mpc_path: String,
+    pub buyer_signature_b64: Option<String>,
+    pub buyer_pubkey_b64: Option<String>,
     pub payout_tx: Vec<u8>,
     pub refund_tx: Vec<u8>,
     pub status: PurchaseStatus,
@@ -133,6 +135,8 @@ impl Store {
                 burner_taddr         TEXT NOT NULL UNIQUE,
                 burner_pubkey_hex    TEXT NOT NULL,
                 mpc_path             TEXT NOT NULL,
+                buyer_signature_b64  TEXT,
+                buyer_pubkey_b64     TEXT,
                 payout_bundle        BLOB NOT NULL,
                 refund_bundle        BLOB NOT NULL,
                 status               TEXT NOT NULL,
@@ -149,6 +153,8 @@ impl Store {
         )
         .context("create tables")?;
         ensure_column(&conn, "purchases", "build_height", "INTEGER")?;
+        ensure_column(&conn, "purchases", "buyer_signature_b64", "TEXT")?;
+        ensure_column(&conn, "purchases", "buyer_pubkey_b64", "TEXT")?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -219,20 +225,24 @@ impl Store {
         burner_taddr: &str,
         burner_pubkey_hex: &str,
         mpc_path: &str,
+        buyer_signature_b64: Option<&str>,
+        buyer_pubkey_b64: Option<&str>,
         expires_at: DateTime<Utc>,
     ) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
         let exp = expires_at.to_rfc3339();
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO purchases (listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, payout_bundle, refund_bundle, status, created_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO purchases (listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path, buyer_signature_b64, buyer_pubkey_b64, payout_bundle, refund_bundle, status, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 listing_id,
                 buyer_ua,
                 burner_taddr,
                 burner_pubkey_hex,
                 mpc_path,
+                buyer_signature_b64,
+                buyer_pubkey_b64,
                 Vec::<u8>::new(),
                 Vec::<u8>::new(),
                 PurchaseStatus::AwaitingPayment.as_str(),
@@ -256,6 +266,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT id, contract_purchase_id, listing_id, buyer_ua, burner_taddr, burner_pubkey_hex, mpc_path,
+                    buyer_signature_b64, buyer_pubkey_b64,
                     payout_bundle, refund_bundle, status, created_at, expires_at,
                     funding_txid, funding_vout, build_height, payout_txid
              FROM purchases
@@ -368,15 +379,17 @@ impl Store {
             burner_taddr: row.get(4)?,
             burner_pubkey_hex: row.get(5)?,
             mpc_path: row.get(6)?,
-            payout_tx: row.get(7)?,
-            refund_tx: row.get(8)?,
+            buyer_signature_b64: row.get(7)?,
+            buyer_pubkey_b64: row.get(8)?,
+            payout_tx: row.get(9)?,
+            refund_tx: row.get(10)?,
             status,
             created_at,
             expires_at,
-            funding_txid: row.get(12)?,
-            funding_vout: row.get(13)?,
-            build_height: row.get(14)?,
-            settlement_txid: row.get(15)?,
+            funding_txid: row.get(14)?,
+            funding_vout: row.get(15)?,
+            build_height: row.get(16)?,
+            settlement_txid: row.get(17)?,
         })
     }
 }

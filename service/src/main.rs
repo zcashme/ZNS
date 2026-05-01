@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 
 mod config;
 mod db;
+mod memo;
 mod delists;
 mod funding;
 mod http;
@@ -47,11 +48,15 @@ async fn main() -> Result<()> {
 
     let watcher = Watcher::new(&cfg.lwd_url);
 
+    let memo_signer = cfg.admin_ed25519_key.as_ref().and_then(|k|
+        memo::MemoSigner::from_hex(k).ok());
+
     let http_state = Arc::new(http::AppState {
         cfg: cfg.clone(),
         store: store.clone(),
         near,
         watcher,
+        memo_signer,
     });
 
     tokio::spawn(funding::run_worker(http_state.clone()));
