@@ -163,8 +163,8 @@ async fn ensure_listing(
         "seller_ua": seller_ua,
         "price_zat": price_zat,
         "nonce": nonce,
-        "signature_hex": signature,
-        "user_pubkey_hex": null,
+        "signature_b64": signature,
+        "user_pubkey_b64": null,
     });
     let deposit_yocto = 50_000_000_000_000_000_000_000u128;
     let gas = 50_000_000_000_000u64;

@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 
 mod config;
 mod db;
+mod delists;
 mod funding;
 mod http;
 mod listings;
@@ -55,6 +56,7 @@ async fn main() -> Result<()> {
 
     tokio::spawn(funding::run_worker(http_state.clone()));
     tokio::spawn(listings::run_worker(http_state.clone()));
+    tokio::spawn(delists::run_worker(http_state.clone()));
 
     let bind = cfg.bind_addr;
     http::serve(bind, http_state).await.context("http server")?;

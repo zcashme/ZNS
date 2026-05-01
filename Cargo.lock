@@ -6489,6 +6489,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 name = "zns-contract"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bech32",
  "blake2b_simd",
  "bs58 0.5.1",

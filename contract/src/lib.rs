@@ -245,7 +245,7 @@ impl ZnsContract {
         default_expiry_seconds: u64,
         mainnet: bool,
         consensus_branch_id: u32,
-        admin_pubkey_hex: String,
+        admin_pubkey_b64: String,
     ) -> Self {
         assert!(!env::state_exists(), "already initialized");
         assert!(
@@ -259,10 +259,8 @@ impl ZnsContract {
         validate_unified_address(&treasury_ua, mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("treasury_ua invalid: {e}")));
         assert!(payout_fee_zat > 0, "payout_fee_zat must be > 0");
-        let admin_pubkey = hex::decode(&admin_pubkey_hex)
-            .ok()
-            .and_then(|v| v.try_into().ok())
-            .unwrap_or_else(|| env::panic_str("admin_pubkey must be 64 hex chars (32 bytes)"));
+        let admin_pubkey = decode_pubkey_b64(&admin_pubkey_b64)
+            .unwrap_or_else(|e| env::panic_str(&format!("admin_pubkey invalid: {e}")));
         Self {
             owner,
             mpc_contract,
@@ -300,12 +298,10 @@ impl ZnsContract {
         self.treasury_ua = ua;
     }
 
-    pub fn set_admin_pubkey(&mut self, pubkey_hex: String) {
+    pub fn set_admin_pubkey(&mut self, pubkey_b64: String) {
         self.assert_owner();
-        let pk = hex::decode(&pubkey_hex)
-            .ok()
-            .and_then(|v| v.try_into().ok())
-            .unwrap_or_else(|| env::panic_str("admin_pubkey must be 64 hex chars (32 bytes)"));
+        let pk = decode_pubkey_b64(&pubkey_b64)
+            .unwrap_or_else(|e| env::panic_str(&format!("admin_pubkey invalid: {e}")));
         self.admin_pubkey = pk;
     }
 
@@ -347,8 +343,8 @@ impl ZnsContract {
         seller_ua: String,
         price_zat: u64,
         nonce: u64,
-        signature_hex: String,
-        user_pubkey_hex: Option<String>,
+        signature_b64: String,
+        user_pubkey_b64: Option<String>,
     ) -> ListingView {
         assert!(
             !name.is_empty() && name.len() <= MAX_NAME_LEN,
@@ -361,18 +357,16 @@ impl ZnsContract {
             "price_zat must exceed payout fee"
         );
 
-        let pubkey: [u8; 32] = if let Some(pk_hex) = user_pubkey_hex {
-            hex::decode(&pk_hex)
-                .ok()
-                .and_then(|v| v.try_into().ok())
-                .unwrap_or_else(|| env::panic_str("user_pubkey must be 64 hex chars (32 bytes)"))
+        let pubkey: [u8; 32] = if let Some(pk_b64) = user_pubkey_b64 {
+            decode_pubkey_b64(&pk_b64)
+                .unwrap_or_else(|e| env::panic_str(&format!("user_pubkey invalid: {e}")))
         } else {
             self.admin_pubkey
         };
 
         let payload = format!("LIST:{name}:{price_zat}:{nonce}");
         assert!(
-            ed25519_verify_hex(&signature_hex, &payload, &pubkey),
+            ed25519_verify_b64(&signature_b64, &payload, &pubkey),
             "listing signature invalid"
         );
 
@@ -432,8 +426,8 @@ impl ZnsContract {
         &mut self,
         id: u64,
         nonce: u64,
-        signature_hex: String,
-        user_pubkey_hex: Option<String>,
+        signature_b64: String,
+        user_pubkey_b64: Option<String>,
     ) {
         let mut listing = self.listings.get(&id).expect("not found").clone();
         assert!(
@@ -441,18 +435,16 @@ impl ZnsContract {
             "listing not open"
         );
 
-        let pubkey: [u8; 32] = if let Some(pk_hex) = user_pubkey_hex {
-            hex::decode(&pk_hex)
-                .ok()
-                .and_then(|v| v.try_into().ok())
-                .unwrap_or_else(|| env::panic_str("user_pubkey must be 64 hex chars (32 bytes)"))
+        let pubkey: [u8; 32] = if let Some(pk_b64) = user_pubkey_b64 {
+            decode_pubkey_b64(&pk_b64)
+                .unwrap_or_else(|e| env::panic_str(&format!("user_pubkey invalid: {e}")))
         } else {
             self.admin_pubkey
         };
 
         let payload = format!("DELIST:{}:{nonce}", listing.name);
         assert!(
-            ed25519_verify_hex(&signature_hex, &payload, &pubkey),
+            ed25519_verify_b64(&signature_b64, &payload, &pubkey),
             "cancel signature invalid"
         );
 
@@ -881,7 +873,7 @@ impl ZnsContract {
             "default_expiry_seconds": self.default_expiry_seconds,
             "mainnet": self.mainnet,
             "consensus_branch_id": self.consensus_branch_id,
-            "admin_pubkey_hex": hex::encode(self.admin_pubkey),
+            "admin_pubkey_b64": base64::encode(self.admin_pubkey),
             "next_listing_id": self.next_listing_id,
             "next_purchase_id": self.next_purchase_id,
         })
@@ -999,8 +991,18 @@ fn required_buy_memo(listing_id: u64, purchase_id: u64, name: &str, buyer_ua: &s
     )
 }
 
-fn ed25519_verify_hex(signature_hex: &str, data: &str, pubkey: &[u8; 32]) -> bool {
-    let Ok(sig_bytes) = hex::decode(signature_hex) else {
+fn decode_pubkey_b64(b64: &str) -> Result<[u8; 32], &'static str> {
+    let bytes = base64::decode(b64).map_err(|_| "invalid base64 pubkey")?;
+    if bytes.len() != 32 {
+        return Err("pubkey must be 32 bytes");
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn ed25519_verify_b64(signature_b64: &str, data: &str, pubkey: &[u8; 32]) -> bool {
+    let Ok(sig_bytes) = base64::decode(signature_b64) else {
         return false;
     };
     if sig_bytes.len() != 64 {
