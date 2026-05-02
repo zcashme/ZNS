@@ -39,13 +39,11 @@
 //! Refunds for wrong-amount or losing-race UTXOs are deferred — those UTXOs
 //! sit at the burner address until a future `request_refund` flow is added.
 
-use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::LookupMap;
 use near_sdk::{
-    env, ext_contract, near_bindgen, AccountId, Gas, NearToken, PanicOnDefault, Promise,
+    env, ext_contract, near, near_bindgen, AccountId, Gas, NearToken, PanicOnDefault, Promise,
     PromiseError,
 };
-use serde::{Deserialize, Serialize};
 
 mod zcash;
 use zcash::{compute_sighash_all, derive_burner, parse_tx, sha256, validate_burner_script};
@@ -71,34 +69,32 @@ const EVENT_VERSION: &str = "1.0.0";
 // MPC primitive types
 // ───────────────────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug)]
-#[borsh(crate = "near_sdk::borsh")]
+#[derive(Clone, Debug)]
+#[near(serializers = [json, borsh])]
 pub struct AffinePoint {
     pub affine_point: String,
 }
 
-#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug)]
-#[borsh(crate = "near_sdk::borsh")]
+#[derive(Clone, Debug)]
+#[near(serializers = [json, borsh])]
 pub struct ScalarHex {
     pub scalar: String,
 }
 
-#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize, Clone, Debug)]
-#[borsh(crate = "near_sdk::borsh")]
+#[derive(Clone, Debug)]
+#[near(serializers = [json, borsh])]
 pub struct MpcSignature {
     pub big_r: AffinePoint,
     pub s: ScalarHex,
     pub recovery_id: u8,
 }
 
-#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
-#[borsh(crate = "near_sdk::borsh")]
+#[near(serializers = [json, borsh])]
 pub struct SignRequestArgs {
     pub request: SignPayload,
 }
 
-#[derive(Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
-#[borsh(crate = "near_sdk::borsh")]
+#[near(serializers = [json, borsh])]
 pub struct SignPayload {
     pub payload: Vec<u8>,
     pub path: String,
@@ -135,8 +131,8 @@ trait ExtSelf {
 /// from `mpc_root_pubkey + zns-<name>-<listing_nonce>`. After
 /// `submit_funding` succeeds, the listing is locked to a single buyer's
 /// payout and cannot be re-funded.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
-#[borsh(crate = "near_sdk::borsh")]
+#[derive(Clone, Debug)]
+#[near(serializers = [borsh])]
 pub struct Listing {
     pub id: u64,
     pub name: String,
@@ -168,7 +164,8 @@ pub struct Listing {
 // View types (JSON-friendly)
 // ───────────────────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Clone, Debug)]
+#[near(serializers = [json])]
 pub struct ListingView {
     pub id: u64,
     pub name: String,
@@ -197,7 +194,8 @@ pub struct ListingView {
 
 /// Returned by `submit_funding` once the relayer has attached buyer info
 /// and a built payout tx. Contains the sighash the MPC will sign.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Clone, Debug)]
+#[near(serializers = [json])]
 pub struct SubmittedFundingView {
     pub listing_id: u64,
     pub payout_tx_hash_hex: String,
@@ -209,8 +207,8 @@ pub struct SubmittedFundingView {
 // ───────────────────────────────────────────────────────────────────────────
 
 #[near_bindgen(contract_state)]
-#[derive(BorshSerialize, BorshDeserialize, PanicOnDefault)]
-#[borsh(crate = "near_sdk::borsh")]
+#[derive(PanicOnDefault)]
+#[near(serializers = [borsh])]
 pub struct ZnsContract {
     pub owner: AccountId,
     pub mpc_contract: AccountId,
