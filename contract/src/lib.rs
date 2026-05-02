@@ -59,7 +59,7 @@ const MPC_DEPOSIT: NearToken = NearToken::from_yoctonear(100);
 const MAX_COMMISSION_BPS: u64 = 1_000; // 10 %
 const MAX_UA_LEN: usize = 512;
 const MAX_NAME_LEN: usize = 256;
-const MAX_PATH_LEN: usize = 128;
+const MAX_PATH_LEN: usize = 384;
 const MAX_TX_BYTES: usize = 20_000;
 
 const EVENT_STANDARD: &str = "zns";
@@ -158,6 +158,10 @@ pub struct Listing {
     pub payout_tx_hash: Option<[u8; 32]>,
     pub payout_sighash: Option<[u8; 32]>,
     pub payout_signature: Option<MpcSignature>,
+
+    // Per-buyer burner path + key (set by submit_funding, used by MPC).
+    pub buyer_mpc_path: Option<String>,
+    pub buyer_burner_pubkey: Option<[u8; 33]>,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -187,9 +191,23 @@ pub struct ListingView {
     pub utxo_value_zats: Option<u64>,
     pub payout_tx_hash_hex: Option<String>,
     pub payout_sighash_hex: Option<String>,
+    pub buyer_mpc_path: Option<String>,
+    pub buyer_burner_pubkey_hex: Option<String>,
+    pub listing_mpc_path: String,
     pub payout_fee_zat: u64,
     pub commission_zat: u64,
     pub seller_receives_zat: u64,
+}
+
+/// Returned by `get_buyer_burner` — a per-buyer t-addr derived from
+/// `name + nonce + buyer_pubkey`. Each buyer gets a unique burner; no one
+/// else can spend a UTXO that lands there.
+#[derive(Clone, Debug)]
+#[near(serializers = [json])]
+pub struct BuyerBurnerView {
+    pub burner_taddr: String,
+    pub burner_pubkey_hex: String,
+    pub mpc_path: String,
 }
 
 /// Returned by `submit_funding` once the relayer has attached buyer info
@@ -245,7 +263,10 @@ impl ZnsContract {
         admin_pubkey_b64: String,
     ) -> Self {
         assert!(!env::state_exists(), "already initialized");
-        assert!(commission_bps <= MAX_COMMISSION_BPS, "commission_bps too high");
+        assert!(
+            commission_bps <= MAX_COMMISSION_BPS,
+            "commission_bps too high"
+        );
         validate_unified_address(&treasury_ua, mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("treasury_ua invalid: {e}")));
         assert!(payout_fee_zat > 0, "payout_fee_zat must be > 0");
@@ -332,10 +353,16 @@ impl ZnsContract {
         signature_b64: String,
         user_pubkey_b64: Option<String>,
     ) -> ListingView {
-        assert!(!name.is_empty() && name.len() <= MAX_NAME_LEN, "name length");
+        assert!(
+            !name.is_empty() && name.len() <= MAX_NAME_LEN,
+            "name length"
+        );
         validate_unified_address(&seller_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("seller_ua invalid: {e}")));
-        assert!(price_zat > self.payout_fee_zat, "price_zat must exceed payout fee");
+        assert!(
+            price_zat > self.payout_fee_zat,
+            "price_zat must exceed payout fee"
+        );
 
         let pubkey: [u8; 32] = if let Some(pk_b64) = user_pubkey_b64 {
             decode_pubkey_b64(&pk_b64)
@@ -362,10 +389,7 @@ impl ZnsContract {
                 nonce > existing.listing_nonce,
                 "listing nonce must increase for replacement"
             );
-            assert!(
-                !existing.funded,
-                "cannot replace a funded listing"
-            );
+            assert!(!existing.funded, "cannot replace a funded listing");
             // Remove the stale listing entry before inserting the new one.
             self.listings.remove(&existing_id);
         }
@@ -409,6 +433,8 @@ impl ZnsContract {
             payout_tx_hash: None,
             payout_sighash: None,
             payout_signature: None,
+            buyer_mpc_path: None,
+            buyer_burner_pubkey: None,
         };
         self.listings.insert(id, listing.clone());
         self.listing_ids_by_name.insert(name.clone(), id);
@@ -469,22 +495,22 @@ impl ZnsContract {
     /// Submit a funding UTXO + pre-built payout transaction, locking the
     /// listing to a specific buyer.
     ///
-    /// The relayer is the only caller in the normal flow — it watches the
-    /// listing's t-addr off-chain, attaches the buyer registration it
-    /// holds in its DB, builds the payout tx, and submits everything here.
+    /// The relayer is the only caller in this path — the admin signature
+    /// over `BUY:<name>:<buyer_ua>` gates access. The contract:
     ///
-    /// `buyer_signature_b64` + `buyer_pubkey_b64` are optional. When the
-    /// buyer provided their own (sovereign) signature, it is verified
-    /// inline. When omitted, the relayer's admin key signs the memo
-    /// off-chain — the contract trusts the relayer in that path.
+    ///   1. Verifies the admin-signed `BUY:<name>:<buyer_ua>` against
+    ///      `self.admin_pubkey`.
+    ///   2. Derives the per-buyer burner from `name + nonce + buyer_pubkey_b64`.
+    ///   3. Verifies the UTXO scriptPubKey commits to that burner.
+    ///   4. If a sovereign signature is supplied, verifies it over
+    ///      `BUY:<name>:<buyer_ua>` against `buyer_pubkey_b64`.
+    ///   5. Requires `utxo_value_zats == price_zat` (exact).
+    ///   6. Parses the payout tx, validates structure + value balance.
+    ///   7. Computes the sighash, stores everything, marks listing funded.
     ///
-    /// The contract:
-    ///   1. Verifies the listing is open (not yet funded).
-    ///   2. Verifies the UTXO scriptPubKey commits to the listing's burner.
-    ///   3. If a sovereign signature is supplied, verifies it over `BUY:<name>:<ua>`.
-    ///   4. Requires `utxo_value_zats == price_zat` (exact).
-    ///   5. Parses the payout tx, validates structure + value balance.
-    ///   6. Computes the sighash, stores everything, marks listing funded.
+    /// Per-buyer burners make it impossible for a third party to spend
+    /// another buyer's UTXO — the burner derivation path includes the
+    /// buyer's pubkey, so every UTXO is cryptographically bound to one buyer.
     pub fn submit_funding(
         &mut self,
         listing_id: u64,
@@ -492,8 +518,9 @@ impl ZnsContract {
         utxo_script_pubkey: Vec<u8>,
         payout_tx: Vec<u8>,
         buyer_ua: String,
+        buyer_pubkey_b64: String,
+        admin_signature_b64: String,
         buyer_signature_b64: Option<String>,
-        buyer_pubkey_b64: Option<String>,
     ) -> SubmittedFundingView {
         let mut listing = self
             .listings
@@ -511,12 +538,16 @@ impl ZnsContract {
         validate_unified_address(&buyer_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("buyer_ua invalid: {e}")));
 
-        // Sovereign override: if both fields are supplied, the buyer signed
-        // the BUY payload themselves and we verify on chain. Otherwise the
-        // admin-signed memo path applies and the contract takes no stance.
-        if let (Some(sig), Some(pk_b64)) = (&buyer_signature_b64, &buyer_pubkey_b64) {
-            let buyer_pubkey = decode_pubkey_b64(pk_b64)
-                .unwrap_or_else(|e| env::panic_str(&format!("buyer_pubkey invalid: {e}")));
+        let buyer_pubkey = decode_pubkey_b64(&buyer_pubkey_b64)
+            .unwrap_or_else(|e| env::panic_str(&format!("buyer_pubkey invalid: {e}")));
+
+        let admin_payload = format!("BUY:{}:{buyer_ua}", listing.name);
+        assert!(
+            ed25519_verify_b64(&admin_signature_b64, &admin_payload, &self.admin_pubkey),
+            "admin signature invalid"
+        );
+
+        if let Some(sig) = &buyer_signature_b64 {
             let buyer_payload = format!("BUY:{}:{buyer_ua}", listing.name);
             assert!(
                 ed25519_verify_b64(sig, &buyer_payload, &buyer_pubkey),
@@ -524,8 +555,25 @@ impl ZnsContract {
             );
         }
 
-        // Verify the scriptPubKey commits to this listing's burner pubkey.
-        validate_burner_script(&utxo_script_pubkey, &listing.burner_pubkey)
+        let buyer_mpc_path = build_buyer_path(
+            &listing.name,
+            listing.listing_nonce,
+            &buyer_pubkey_b64,
+        );
+        assert!(
+            !buyer_mpc_path.is_empty() && buyer_mpc_path.len() <= MAX_PATH_LEN,
+            "buyer mpc_path length"
+        );
+
+        let (_burner_taddr, burner_pubkey) = derive_burner(
+            &self.mpc_root_pubkey,
+            env::current_account_id().as_str(),
+            &buyer_mpc_path,
+            self.mainnet,
+        )
+        .unwrap_or_else(|e| env::panic_str(&format!("buyer burner derivation failed: {e}")));
+
+        validate_burner_script(&utxo_script_pubkey, &burner_pubkey)
             .unwrap_or_else(|e| env::panic_str(&format!("burner script invalid: {e}")));
 
         assert!(
@@ -539,7 +587,6 @@ impl ZnsContract {
             "payout_tx wrong consensus branch id"
         );
 
-        // Payout pays seller + treasury — exactly 2 Orchard actions.
         let payout_orchard = payout_parsed
             .orchard
             .as_ref()
@@ -566,11 +613,13 @@ impl ZnsContract {
         listing.funded = true;
         listing.buyer_ua = Some(buyer_ua.clone());
         listing.buyer_signature_b64 = buyer_signature_b64;
-        listing.buyer_pubkey_b64 = buyer_pubkey_b64;
+        listing.buyer_pubkey_b64 = Some(buyer_pubkey_b64);
         listing.funding_outpoint = Some(funding_outpoint);
         listing.utxo_value_zats = Some(utxo_value_zats);
         listing.payout_tx_hash = Some(payout_tx_hash);
         listing.payout_sighash = Some(payout_sighash);
+        listing.buyer_mpc_path = Some(buyer_mpc_path.clone());
+        listing.buyer_burner_pubkey = Some(burner_pubkey);
         self.listings.insert(listing_id, listing);
 
         emit_event(
@@ -583,6 +632,7 @@ impl ZnsContract {
                 "utxo_value_zats": utxo_value_zats,
                 "payout_tx_hash": hex::encode(payout_tx_hash),
                 "payout_sighash": hex::encode(payout_sighash),
+                "buyer_mpc_path": buyer_mpc_path,
             }),
         );
 
@@ -608,14 +658,20 @@ impl ZnsContract {
             "payout already signed"
         );
         let sighash = listing.payout_sighash.expect("payout_sighash missing");
+        let mpc_path = listing
+            .buyer_mpc_path
+            .as_ref()
+            .expect("buyer_mpc_path missing")
+            .clone();
         emit_event(
             "payout_signature_requested",
             serde_json::json!({
                 "listing_id": listing_id,
                 "payout_sighash": hex::encode(sighash),
+                "mpc_path": mpc_path,
             }),
         );
-        self.request_signature(listing_id, listing.mpc_path, sighash)
+        self.request_signature(listing_id, mpc_path, sighash)
     }
 
     #[private]
@@ -656,6 +712,43 @@ impl ZnsContract {
     }
 
     // ── Read-only queries ────────────────────────────────────────────────
+
+    pub fn get_buyer_burner(
+        &self,
+        name: String,
+        buyer_pubkey_b64: String,
+    ) -> BuyerBurnerView {
+        let existing = self
+            .listing_ids_by_name
+            .get(&name)
+            .and_then(|id| self.listings.get(id));
+        let Some(listing) = existing else {
+            env::panic_str("listing not found");
+        };
+        if listing.funded {
+            env::panic_str("listing already funded");
+        }
+        decode_pubkey_b64(&buyer_pubkey_b64)
+            .unwrap_or_else(|e| env::panic_str(&format!("buyer_pubkey invalid: {e}")));
+        let buyer_mpc_path = build_buyer_path(
+            &listing.name,
+            listing.listing_nonce,
+            &buyer_pubkey_b64,
+        );
+        assert!(buyer_mpc_path.len() <= MAX_PATH_LEN, "buyer mpc_path length");
+        let (burner_taddr, burner_pubkey) = derive_burner(
+            &self.mpc_root_pubkey,
+            env::current_account_id().as_str(),
+            &buyer_mpc_path,
+            self.mainnet,
+        )
+        .unwrap_or_else(|e| env::panic_str(&format!("buyer burner derivation failed: {e}")));
+        BuyerBurnerView {
+            burner_taddr,
+            burner_pubkey_hex: hex::encode(burner_pubkey),
+            mpc_path: buyer_mpc_path,
+        }
+    }
 
     pub fn get_listing(&self, id: u64) -> Option<ListingView> {
         self.listings.get(&id).map(|l| self.listing_to_view(l))
@@ -718,12 +811,7 @@ impl ZnsContract {
         }
     }
 
-    fn request_signature(
-        &self,
-        listing_id: u64,
-        mpc_path: String,
-        sighash: [u8; 32],
-    ) -> Promise {
+    fn request_signature(&self, listing_id: u64, mpc_path: String, sighash: [u8; 32]) -> Promise {
         ext_mpc::ext(self.mpc_contract.clone())
             .with_static_gas(SIGN_GAS)
             .with_attached_deposit(MPC_DEPOSIT)
@@ -742,8 +830,7 @@ impl ZnsContract {
     }
 
     fn listing_to_view(&self, listing: &Listing) -> ListingView {
-        let commission_zat =
-            listing.price_zat.saturating_mul(listing.commission_bps) / 10_000;
+        let commission_zat = listing.price_zat.saturating_mul(listing.commission_bps) / 10_000;
         let seller_receives_zat = listing
             .price_zat
             .saturating_sub(commission_zat)
@@ -775,6 +862,9 @@ impl ZnsContract {
             payout_fee_zat: self.payout_fee_zat,
             commission_zat,
             seller_receives_zat,
+            buyer_mpc_path: listing.buyer_mpc_path.clone(),
+            buyer_burner_pubkey_hex: listing.buyer_burner_pubkey.map(hex::encode),
+            listing_mpc_path: listing.mpc_path.clone(),
         }
     }
 }
@@ -799,6 +889,10 @@ fn emit_event(event: &str, data: serde_json::Value) {
 /// replacement listing for the same name must use a strictly higher nonce.
 fn build_listing_path(name: &str, nonce: u64) -> String {
     format!("zns-{name}-{nonce}")
+}
+
+fn build_buyer_path(name: &str, nonce: u64, buyer_pubkey_b64: &str) -> String {
+    format!("zns-{name}-{nonce}-{buyer_pubkey_b64}")
 }
 
 fn decode_pubkey_b64(b64: &str) -> Result<[u8; 32], &'static str> {
