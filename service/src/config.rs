@@ -56,7 +56,8 @@ pub struct Config {
     #[arg(long, env = "ZNS_BIND_ADDR", default_value = "127.0.0.1:8080")]
     pub bind_addr: SocketAddr,
 
-    /// Admin Ed25519 secret key (hex) for signing BUY memos when buyer does not.
+    /// Admin Ed25519 secret key (hex) used to sign BUY memos on behalf of
+    /// buyers who do not provide their own sovereign signature.
     #[arg(long, env = "ZNS_ADMIN_ED25519_KEY")]
     pub admin_ed25519_key: Option<String>,
 

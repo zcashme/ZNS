@@ -1,3 +1,18 @@
+//! Background worker that drives every active buyer registration through to
+//! a settled payout.
+//!
+//! For each registration in the local DB:
+//!
+//!   * **AwaitingPayment** — poll the listing's burner t-addr; when an
+//!     exact-amount UTXO with enough confirmations lands, build the payout
+//!     tx, call `submit_funding` on chain, then `request_payout_signature`.
+//!   * **Submitted**       — poll `get_payout_signature`; once available,
+//!     finalize the tx and broadcast via lightwalletd.
+//!   * **Completed**       — terminal.
+//!
+//! Refunds for wrong-amount or losing-race UTXOs are out of scope here and
+//! sit at the burner address until a future flow handles them.
+
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
@@ -7,34 +22,14 @@ use serde_json::json;
 use zcash_transparent as transparent;
 
 use crate::{
-    db::{Purchase, PurchaseStatus},
-    http::AppState,
+    db::{BuyerRegistration, Listing, RegistrationStatus},
+    http::{AppState, ContractListingView},
     payout::{self, PayoutInputs},
     zcash::EscrowUtxo,
 };
 
 const SUBMIT_FUNDING_GAS: u64 = 150_000_000_000_000;
 const SIGN_REQUEST_GAS: u64 = 300_000_000_000_000;
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-struct ContractPurchaseView {
-    pub id: u64,
-    pub required_memo: String,
-    pub buyer_signature_b64: Option<String>,
-    pub buyer_pubkey_b64: Option<String>,
-    pub price_zat: u64,
-    pub commission_zat: u64,
-    pub payout_fee_zat: u64,
-    pub seller_receives_zat: u64,
-    pub refund_receives_zat: u64,
-    pub status: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SubmittedFundingView {
-    pub status: String,
-}
 
 #[derive(Debug, Deserialize)]
 struct MpcSignature {
@@ -55,123 +50,78 @@ struct ScalarHex {
 pub async fn run_worker(state: Arc<AppState>) {
     let interval = Duration::from_secs(state.cfg.poll_interval_secs.max(1));
     loop {
-        match state.store.list_work_queue() {
-            Ok(purchases) => {
-                for purchase in purchases {
-                    if let Err(e) = process_purchase(&state, purchase).await {
-                        tracing::error!(error = %e, "funding worker failed for purchase");
+        match state.store.list_active_registrations() {
+            Ok(registrations) => {
+                for reg in registrations {
+                    if let Err(e) = process_registration(&state, reg).await {
+                        tracing::error!(error = %e, "funding worker failed for registration");
                     }
                 }
             }
-            Err(e) => tracing::error!(error = %e, "load work queue failed"),
+            Err(e) => tracing::error!(error = %e, "load active registrations failed"),
         }
         tokio::time::sleep(interval).await;
     }
 }
 
-async fn process_purchase(state: &Arc<AppState>, purchase: Purchase) -> Result<()> {
-    let contract_purchase_id = purchase
-        .contract_purchase_id
-        .context("purchase missing contract_purchase_id")? as u64;
-    let contract_purchase = fetch_contract_purchase(state, contract_purchase_id)
+async fn process_registration(state: &Arc<AppState>, reg: BuyerRegistration) -> Result<()> {
+    let listing = state
+        .store
+        .get_listing_by_id(reg.listing_id)?
+        .context("listing not found for registration")?;
+    let contract_listing = fetch_contract_listing(state, listing.contract_listing_id)
         .await?
-        .context("contract purchase not found")?;
+        .context("contract listing not found")?;
 
-    let contract_status = parse_contract_status(&contract_purchase.status)?;
-    if purchase.status != contract_status {
+    if contract_listing.funded != listing.funded {
         state
             .store
-            .update_purchase_status(purchase.id, contract_status.clone())?;
+            .set_listing_funded(listing.contract_listing_id, contract_listing.funded)?;
     }
 
-    match contract_status {
-        PurchaseStatus::AwaitingPayment => {
-            handle_awaiting_payment(state, &purchase, &contract_purchase).await?
+    match reg.status {
+        RegistrationStatus::AwaitingPayment => {
+            handle_awaiting_payment(state, &reg, &listing, &contract_listing).await
         }
-        PurchaseStatus::PayoutAuthorized => {
-            request_signature(state, contract_purchase_id, true).await?;
-            maybe_broadcast_signed(state, &purchase, &contract_purchase, true).await?;
+        RegistrationStatus::Submitted => {
+            drive_payout(state, &reg, &listing, &contract_listing).await
         }
-        PurchaseStatus::Completed => {
-            maybe_broadcast_signed(state, &purchase, &contract_purchase, true).await?;
-        }
-        PurchaseStatus::Refundable => {
-            request_signature(state, contract_purchase_id, false).await?;
-            maybe_broadcast_signed(state, &purchase, &contract_purchase, false).await?;
-        }
-        PurchaseStatus::Refunded => {
-            maybe_broadcast_signed(state, &purchase, &contract_purchase, false).await?;
-        }
-        PurchaseStatus::Expired => {
-            state
-                .store
-                .update_purchase_status(purchase.id, PurchaseStatus::Expired)?;
-        }
+        RegistrationStatus::Completed => Ok(()),
     }
-
-    Ok(())
 }
 
 async fn handle_awaiting_payment(
     state: &Arc<AppState>,
-    purchase: &Purchase,
-    contract_purchase: &ContractPurchaseView,
+    reg: &BuyerRegistration,
+    listing: &Listing,
+    contract_listing: &ContractListingView,
 ) -> Result<()> {
-    if let Some(utxo) = find_matching_funding_utxo(state, purchase, contract_purchase).await? {
-        build_and_submit_funding(state, purchase, contract_purchase, &utxo).await?;
+    if contract_listing.funded {
+        // Listing was funded by someone else — our registration is moot.
         return Ok(());
     }
 
-    // No expiry check -- purchases remain AwaitingPayment until funded or manually cancelled.
+    let Some(utxo) = find_exact_funding_utxo(state, listing, contract_listing).await? else {
+        return Ok(());
+    };
 
+    submit_funding(state, reg, listing, contract_listing, &utxo).await?;
+    request_payout_signature(state, listing.contract_listing_id).await?;
     Ok(())
 }
 
-async fn build_and_submit_funding(
+async fn submit_funding(
     state: &Arc<AppState>,
-    purchase: &Purchase,
-    contract_purchase: &ContractPurchaseView,
+    reg: &BuyerRegistration,
+    listing: &Listing,
+    contract_listing: &ContractListingView,
     utxo: &EscrowUtxo,
 ) -> Result<()> {
-    let listing = state
-        .store
-        .get_listing_by_id(purchase.listing_id)?
-        .context("listing not found for purchase")?;
     let build_height = state.watcher.latest_height().await? as u32;
-    let burner_pubkey = decode_pubkey(&purchase.burner_pubkey_hex)?;
+    let burner_pubkey = decode_pubkey(&listing.burner_pubkey_hex)?;
     let outpoint = transparent::bundle::OutPoint::new(txid_le(&utxo.txid)?, utxo.vout);
 
-    let is_exact = utxo.value_zats == contract_purchase.price_zat;
-    let refund_amount = utxo.value_zats.saturating_sub(contract_purchase.payout_fee_zat);
-
-    let payout_tx_opt = if is_exact {
-        Some(payout::build_tx_bytes(PayoutInputs {
-            network: &state.cfg.zcash_network,
-            target_height: build_height,
-            utxo_outpoint: outpoint.clone(),
-            utxo_value_zats: utxo.value_zats,
-            utxo_script_pubkey: utxo.script.clone(),
-            burner_pubkey,
-            seller_ua: &listing.seller_ua,
-            treasury_ua: &listing.treasury_ua,
-            buyer_ua: None,
-            seller_amount: contract_purchase.seller_receives_zat,
-            treasury_amount: contract_purchase.commission_zat,
-            memo: build_buy_memo(
-                &state,
-                &listing.name,
-                &purchase.buyer_ua,
-                &purchase.buyer_signature_b64,
-                &purchase.buyer_pubkey_b64,
-                &contract_purchase.required_memo,
-            ),
-            fee: Some(contract_purchase.payout_fee_zat),
-        })?)
-    } else {
-        None
-    };
-
-    let refund_tx = payout::build_tx_bytes(PayoutInputs {
+    let payout_tx = payout::build_tx_bytes(PayoutInputs {
         network: &state.cfg.zcash_network,
         target_height: build_height,
         utxo_outpoint: outpoint,
@@ -180,73 +130,81 @@ async fn build_and_submit_funding(
         burner_pubkey,
         seller_ua: &listing.seller_ua,
         treasury_ua: &listing.treasury_ua,
-        buyer_ua: Some(&purchase.buyer_ua),
-        seller_amount: refund_amount,
-        treasury_amount: 0,
-        memo: [0u8; 512],
-        fee: Some(contract_purchase.payout_fee_zat),
+        buyer_ua: None,
+        seller_amount: contract_listing.seller_receives_zat,
+        treasury_amount: contract_listing.commission_zat,
+        memo: build_buy_memo(
+            &listing.name,
+            &reg.buyer_ua,
+            &reg.buyer_signature_b64,
+            &reg.buyer_pubkey_b64,
+        ),
+        fee: Some(contract_listing.payout_fee_zat),
     })?;
 
-    let submitted: SubmittedFundingView = call_contract_method_with_result(
+    // Sovereign signatures are flagged in the DB so the contract can verify
+    // them on chain. Admin-signed credentials are kept off-chain (the memo
+    // still carries them so indexers can re-verify).
+    let (sovereign_sig, sovereign_pk) = if reg.is_sovereign {
+        (Some(reg.buyer_signature_b64.as_str()), Some(reg.buyer_pubkey_b64.as_str()))
+    } else {
+        (None, None)
+    };
+
+    call_contract_method(
         state,
         "submit_funding",
         json!({
-            "purchase_id": contract_purchase.id,
+            "listing_id": contract_listing.id,
             "utxo_value_zats": utxo.value_zats,
             "utxo_script_pubkey": utxo.script,
-            "payout_tx": payout_tx_opt,
-            "refund_tx": refund_tx,
+            "payout_tx": payout_tx,
+            "buyer_ua": reg.buyer_ua,
+            "buyer_signature_b64": sovereign_sig,
+            "buyer_pubkey_b64": sovereign_pk,
         }),
         SUBMIT_FUNDING_GAS,
         0,
     )
     .await?;
 
-    let new_status = parse_contract_status(&submitted.status)?;
-    state.store.store_funding(
-        purchase.id,
+    state.store.mark_registration_submitted(
+        reg.id,
         &utxo.txid,
         utxo.vout,
         build_height,
-        new_status,
     )?;
-
-
-    // If this purchase lost the race, immediately request refund signature.
-    if submitted.status == "Refundable" {
-        request_signature(state, contract_purchase.id, false).await?;
-        maybe_broadcast_signed(state, purchase, contract_purchase, false).await?;
-    }
+    state
+        .store
+        .set_listing_funded(listing.contract_listing_id, true)?;
 
     Ok(())
 }
 
-async fn maybe_broadcast_signed(
+async fn drive_payout(
     state: &Arc<AppState>,
-    purchase: &Purchase,
-    contract_purchase: &ContractPurchaseView,
-    payout_path: bool,
+    reg: &BuyerRegistration,
+    listing: &Listing,
+    contract_listing: &ContractListingView,
 ) -> Result<()> {
-    if purchase.settlement_txid.is_some() {
+    if reg.payout_txid.is_some() {
         return Ok(());
     }
 
-    let sig = fetch_signature(state, contract_purchase.id, payout_path).await?;
+    let sig = fetch_payout_signature(state, listing.contract_listing_id).await?;
     let Some(sig) = sig else {
+        // Signature not yet available — re-request to nudge the MPC.
+        request_payout_signature(state, listing.contract_listing_id).await?;
         return Ok(());
     };
 
-    let listing = state
-        .store
-        .get_listing_by_id(purchase.listing_id)?
-        .context("listing not found for purchase")?;
-    let utxo = find_stored_utxo(state, purchase, contract_purchase.price_zat)
+    let utxo = find_stored_utxo(state, reg, listing, contract_listing.price_zat)
         .await?
         .context("stored funding utxo not found")?;
-    let build_height = purchase
+    let build_height = reg
         .build_height
-        .context("purchase missing build_height")? as u32;
-    let burner_pubkey = decode_pubkey(&purchase.burner_pubkey_hex)?;
+        .context("registration missing build_height")? as u32;
+    let burner_pubkey = decode_pubkey(&listing.burner_pubkey_hex)?;
     let outpoint = transparent::bundle::OutPoint::new(txid_le(&utxo.txid)?, utxo.vout);
 
     let plan = payout::build_unsigned(PayoutInputs {
@@ -258,131 +216,87 @@ async fn maybe_broadcast_signed(
         burner_pubkey,
         seller_ua: &listing.seller_ua,
         treasury_ua: &listing.treasury_ua,
-        buyer_ua: if payout_path {
-            None
-        } else {
-            Some(&purchase.buyer_ua)
-        },
-        seller_amount: if payout_path {
-            contract_purchase.seller_receives_zat
-        } else {
-            contract_purchase.refund_receives_zat
-        },
-        treasury_amount: if payout_path {
-            contract_purchase.commission_zat
-        } else {
-            0
-        },
-        memo: if payout_path {
-            build_buy_memo(
-                &state,
-                &listing.name,
-                &purchase.buyer_ua,
-                &purchase.buyer_signature_b64,
-                &purchase.buyer_pubkey_b64,
-                &contract_purchase.required_memo,
-            )
-        } else {
-            [0u8; 512]
-        },
-        fee: Some(contract_purchase.payout_fee_zat),
+        buyer_ua: None,
+        seller_amount: contract_listing.seller_receives_zat,
+        treasury_amount: contract_listing.commission_zat,
+        memo: build_buy_memo(
+            &listing.name,
+            &reg.buyer_ua,
+            &reg.buyer_signature_b64,
+            &reg.buyer_pubkey_b64,
+        ),
+        fee: Some(contract_listing.payout_fee_zat),
     })?;
 
     let final_tx = payout::finalize_with_mpc(plan, &signature_to_compact(&sig)?)?;
     let txid = state.watcher.send_tx(&final_tx).await?;
-    state.store.set_settlement_txid(
-        purchase.id,
-        &txid,
-        if payout_path {
-            PurchaseStatus::Completed
-        } else {
-            PurchaseStatus::Refunded
-        },
-    )?;
+    state.store.mark_registration_completed(reg.id, &txid)?;
     Ok(())
 }
 
-async fn find_matching_funding_utxo(
+async fn find_exact_funding_utxo(
     state: &Arc<AppState>,
-    purchase: &Purchase,
-    contract_purchase: &ContractPurchaseView,
+    listing: &Listing,
+    contract_listing: &ContractListingView,
 ) -> Result<Option<EscrowUtxo>> {
-    let mut utxos = state.watcher.get_utxos(&purchase.burner_taddr).await?;
+    let mut utxos = state.watcher.get_utxos(&listing.burner_taddr).await?;
     utxos.retain(|u| {
-        u.value_zats > contract_purchase.payout_fee_zat
+        u.value_zats == contract_listing.price_zat
             && u.confirmations >= state.cfg.min_confirmations
     });
-    // Prioritize exact-match UTXOs, then sort by confirmations.
-    utxos.sort_by_key(|u| {
-        (
-            std::cmp::Reverse(u.value_zats == contract_purchase.price_zat),
-            std::cmp::Reverse(u.confirmations),
-        )
-    });
+    utxos.sort_by_key(|u| std::cmp::Reverse(u.confirmations));
     Ok(utxos.into_iter().next())
 }
 
 async fn find_stored_utxo(
     state: &Arc<AppState>,
-    purchase: &Purchase,
+    reg: &BuyerRegistration,
+    listing: &Listing,
     wanted_value: u64,
 ) -> Result<Option<EscrowUtxo>> {
-    let Some(funding_txid) = purchase.funding_txid.as_ref() else {
+    let Some(funding_txid) = reg.funding_txid.as_ref() else {
         return Ok(None);
     };
-    let Some(funding_vout) = purchase.funding_vout else {
+    let Some(funding_vout) = reg.funding_vout else {
         return Ok(None);
     };
 
-    let utxos = state.watcher.get_utxos(&purchase.burner_taddr).await?;
+    let utxos = state.watcher.get_utxos(&listing.burner_taddr).await?;
     Ok(utxos.into_iter().find(|u| {
         u.txid == *funding_txid && u.vout == funding_vout as u32 && u.value_zats == wanted_value
     }))
 }
 
-async fn fetch_contract_purchase(
+async fn fetch_contract_listing(
     state: &Arc<AppState>,
-    purchase_id: u64,
-) -> Result<Option<ContractPurchaseView>> {
+    contract_listing_id: i64,
+) -> Result<Option<ContractListingView>> {
     state
         .near
-        .view_zns("get_purchase", json!({ "id": purchase_id }))
+        .view_zns("get_listing", json!({ "id": contract_listing_id }))
         .await
-        .context("view get_purchase")
+        .context("view get_listing")
 }
 
-async fn fetch_signature(
+async fn fetch_payout_signature(
     state: &Arc<AppState>,
-    purchase_id: u64,
-    payout_path: bool,
+    contract_listing_id: i64,
 ) -> Result<Option<MpcSignature>> {
     state
         .near
         .view_zns(
-            if payout_path {
-                "get_payout_signature"
-            } else {
-                "get_refund_signature"
-            },
-            json!({ "purchase_id": purchase_id }),
+            "get_payout_signature",
+            json!({ "listing_id": contract_listing_id }),
         )
         .await
-        .context("view signature")
+        .context("view payout signature")
 }
 
-async fn request_signature(
-    state: &Arc<AppState>,
-    purchase_id: u64,
-    payout_path: bool,
-) -> Result<()> {
+async fn request_payout_signature(state: &Arc<AppState>, contract_listing_id: i64) -> Result<()> {
     call_contract_method(
         state,
-        if payout_path {
-            "request_payout_signature"
-        } else {
-            "request_refund_signature"
-        },
-        json!({ "purchase_id": purchase_id }),
+        "request_payout_signature",
+        json!({ "listing_id": contract_listing_id }),
         SIGN_REQUEST_GAS,
         0,
     )
@@ -404,66 +318,26 @@ async fn call_contract_method(
     }
 }
 
-async fn call_contract_method_with_result<T: for<'de> Deserialize<'de>>(
-    state: &Arc<AppState>,
-    method: &str,
-    args: serde_json::Value,
-    gas: u64,
-    deposit: u128,
-) -> Result<T> {
-    let outcome = state.near.call_zns_mut(method, args, gas, deposit).await?;
-    match outcome.status {
-        FinalExecutionStatus::SuccessValue(v) => {
-            serde_json::from_slice(&v).context("decode contract method result")
-        }
-        FinalExecutionStatus::Failure(err) => bail!("{method} failed: {err:?}"),
-        other => bail!("{method} unexpected status: {other:?}"),
-    }
-}
-
-fn parse_contract_status(status: &str) -> Result<PurchaseStatus> {
-    match status {
-        "AwaitingPayment" => Ok(PurchaseStatus::AwaitingPayment),
-        "PayoutAuthorized" => Ok(PurchaseStatus::PayoutAuthorized),
-        "Completed" => Ok(PurchaseStatus::Completed),
-        "Refundable" => Ok(PurchaseStatus::Refundable),
-        "Refunded" => Ok(PurchaseStatus::Refunded),
-        "Expired" => Ok(PurchaseStatus::Expired),
-        other => bail!("unknown contract purchase status: {other}"),
-    }
-}
-
-fn fixed_memo(memo: &str) -> [u8; 512] {
+/// Build the BUY memo placed on the treasury Orchard output.
+///
+/// Format: `ZNS:BUY:<name>:<buyer_ua>:<buyer_sig_b64>:<buyer_pubkey_b64>`.
+/// The buyer signature was already verified by both the relayer's POST
+/// handler and the contract's submit_funding — this just embeds it on
+/// chain so any indexer can re-verify the sale.
+fn build_buy_memo(
+    listing_name: &str,
+    buyer_ua: &str,
+    buyer_signature_b64: &str,
+    buyer_pubkey_b64: &str,
+) -> [u8; 512] {
+    let memo = format!(
+        "ZNS:BUY:{listing_name}:{buyer_ua}:{buyer_signature_b64}:{buyer_pubkey_b64}"
+    );
     let mut bytes = [0u8; 512];
     let raw = memo.as_bytes();
     let len = raw.len().min(512);
     bytes[..len].copy_from_slice(&raw[..len]);
     bytes
-}
-
-/// Build the BUY memo for the treasury Orchard output.
-///
-/// Priority:
-/// 1. Buyer-signed memo if buyer_signature_b64 & buyer_pubkey_b64 are present.
-/// 2. Admin-signed memo if the service has a memo_signer configured.
-/// 3. Contract required_memo fallback (indexer won't parse as BUY action).
-fn build_buy_memo(
-    state: &AppState,
-    listing_name: &str,
-    buyer_ua: &str,
-    buyer_signature_b64: &Option<String>,
-    buyer_pubkey_b64: &Option<String>,
-    required_memo: &str,
-) -> [u8; 512] {
-    if let (Some(sig), Some(pk)) = (buyer_signature_b64, buyer_pubkey_b64) {
-        let memo = format!("ZNS:BUY:{listing_name}:{buyer_ua}:{sig}:{pk}");
-        return fixed_memo(&memo);
-    }
-    if let Some(ref signer) = state.memo_signer {
-        let memo = signer.sign_buy(listing_name, buyer_ua);
-        return fixed_memo(&memo);
-    }
-    fixed_memo(required_memo)
 }
 
 fn decode_pubkey(hex_key: &str) -> Result<[u8; 33]> {
@@ -508,4 +382,3 @@ fn signature_to_compact(sig: &MpcSignature) -> Result<[u8; 64]> {
     compact[32..].copy_from_slice(&scalar_bytes);
     Ok(compact)
 }
-

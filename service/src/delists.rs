@@ -87,7 +87,8 @@ async fn sync_once(state: &Arc<AppState>, client: &reqwest::Client) -> Result<()
                 continue;
             };
 
-            if listing.winning_purchase_id.is_none() {
+            if listing.funded {
+                // Cannot cancel a funded listing — payout is in flight.
                 continue;
             }
 

@@ -22,21 +22,22 @@ pub struct AppState {
 pub struct CreatePurchaseRequest {
     pub name: String,
     pub buyer_ua: String,
+    /// Optional sovereign buyer signature over `BUY:<name>:<buyer_ua>`.
+    /// If omitted, the relayer falls back to its admin ed25519 key.
     pub buyer_signature_b64: Option<String>,
     pub buyer_pubkey_b64: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct CreatePurchaseResponse {
-    pub local_purchase_id: i64,
-    pub contract_purchase_id: u64,
+    pub registration_id: i64,
+    pub listing_id: u64,
     pub burner_taddr: String,
-    pub required_memo: String,
     pub price_zat: u64,
     pub commission_zat: u64,
     pub fee_zat: u64,
     pub seller_receives_zat: u64,
-    pub refund_receives_zat: u64,
+    pub buy_memo: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -47,25 +48,23 @@ pub struct ContractListingView {
     pub price_zat: u64,
     pub commission_bps: u64,
     pub treasury_ua: String,
-    pub winning_purchase_id: Option<u64>,
     pub created_at_ns: u64,
     pub listing_nonce: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct PurchaseAcceptedView {
-    pub purchase_id: u64,
     pub burner_taddr: String,
     pub burner_pubkey_hex: String,
     pub mpc_path: String,
-    pub required_memo: String,
+    pub funded: bool,
+    pub buyer_ua: Option<String>,
     pub buyer_signature_b64: Option<String>,
     pub buyer_pubkey_b64: Option<String>,
-    pub price_zat: u64,
-    pub commission_zat: u64,
+    pub funding_outpoint_txid_hex: Option<String>,
+    pub funding_vout: Option<u32>,
+    pub utxo_value_zats: Option<u64>,
+    pub payout_tx_hash_hex: Option<String>,
+    pub payout_sighash_hex: Option<String>,
     pub payout_fee_zat: u64,
+    pub commission_zat: u64,
     pub seller_receives_zat: u64,
-    pub refund_receives_zat: u64,
 }
 
 struct ResolvedListing {
@@ -73,7 +72,10 @@ struct ResolvedListing {
     contract: ContractListingView,
 }
 
-async fn resolve_name(indexer_url: &str, name: &str) -> Result<(String, u64, u64, String), reqwest::Error> {
+async fn resolve_name(
+    indexer_url: &str,
+    name: &str,
+) -> Result<(String, u64, u64, String), reqwest::Error> {
     let resp: serde_json::Value = reqwest::Client::new()
         .post(indexer_url)
         .json(&serde_json::json!({
@@ -88,7 +90,10 @@ async fn resolve_name(indexer_url: &str, name: &str) -> Result<(String, u64, u64
     let seller_ua = resp["result"]["address"].as_str().unwrap_or("").to_string();
     let price = resp["result"]["listing"]["price"].as_u64().unwrap_or(0);
     let nonce = resp["result"]["listing"]["nonce"].as_u64().unwrap_or(0);
-    let signature = resp["result"]["listing"]["signature"].as_str().unwrap_or("").to_string();
+    let signature = resp["result"]["listing"]["signature"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
     Ok((seller_ua, price, nonce, signature))
 }
 
@@ -105,7 +110,10 @@ fn cache_listing(
             listing.price_zat,
             listing.commission_bps,
             &listing.treasury_ua,
-            listing.winning_purchase_id.map(|v| v as i64),
+            &listing.burner_taddr,
+            &listing.burner_pubkey_hex,
+            &listing.mpc_path,
+            listing.funded,
         )
         .map_err(|e| {
             tracing::error!("upsert listing: {e}");
@@ -198,92 +206,93 @@ async fn create_purchase_handler(
 ) -> Result<Json<CreatePurchaseResponse>, axum::http::StatusCode> {
     let listing = ensure_listing(&state, &body.name).await?;
 
-    let path = format!(
-        "zns-purchase-{}-{}",
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-        listing.contract.id
-    );
-
-    if let (Some(sig), Some(pk)) = (&body.buyer_signature_b64, &body.buyer_pubkey_b64) {
-        if !crate::memo::verify_buy_signature(&listing.contract.name, &body.buyer_ua, sig, pk) {
-            tracing::warn!(
-                "buyer signature verification failed for {}",
-                listing.contract.name
-            );
-            return Err(axum::http::StatusCode::UNAUTHORIZED);
-        }
+    if listing.contract.funded {
+        tracing::warn!("listing {} already funded", listing.contract.name);
+        return Err(axum::http::StatusCode::CONFLICT);
     }
 
-    let args = serde_json::json!({
-        "listing_id": listing.contract.id,
-        "buyer_ua": body.buyer_ua,
-        "mpc_path": path,
-        "buyer_signature_b64": body.buyer_signature_b64,
-        "buyer_pubkey_b64": body.buyer_pubkey_b64,
-    });
-    let deposit_yocto = 100_000_000_000_000_000_000_000u128;
-    let gas = 100_000_000_000_000u64;
+    // Default path: relayer's admin key signs the BUY memo.
+    // Sovereign override: if the buyer supplies their own ed25519 sig+pk,
+    // we verify and use those instead. Either way the DB stores final
+    // credentials and the on-chain memo embeds them.
+    let (sig_b64, pk_b64, is_sovereign) =
+        match (body.buyer_signature_b64, body.buyer_pubkey_b64) {
+            (Some(sig), Some(pk)) => {
+                if !crate::memo::verify_buy_signature(
+                    &listing.contract.name,
+                    &body.buyer_ua,
+                    &sig,
+                    &pk,
+                ) {
+                    tracing::warn!(
+                        "buyer signature verification failed for {}",
+                        listing.contract.name
+                    );
+                    return Err(axum::http::StatusCode::UNAUTHORIZED);
+                }
+                (sig, pk, true)
+            }
+            _ => {
+                let Some(signer) = state.memo_signer.as_ref() else {
+                    tracing::warn!(
+                        "no admin key configured and buyer didn't sign for {}",
+                        listing.contract.name
+                    );
+                    return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+                };
+                let (sig, pk) =
+                    signer.sign_buy_credentials(&listing.contract.name, &body.buyer_ua);
+                (sig, pk, false)
+            }
+        };
 
-    let outcome = state
-        .near
-        .call_zns_mut("accept_listing", args, gas, deposit_yocto)
-        .await
-        .map_err(|e| {
-            tracing::error!("NEAR accept_listing: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let value = match outcome.status {
-        FinalExecutionStatus::SuccessValue(v) => v,
-        FinalExecutionStatus::Failure(err) => {
-            tracing::error!("NEAR accept_listing failure: {:?}", err);
-            return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        }
-        other => {
-            tracing::error!("NEAR accept_listing unexpected status: {:?}", other);
-            return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    let accepted: PurchaseAcceptedView = serde_json::from_slice(&value).map_err(|e| {
-        tracing::error!("decode accept_listing result: {e}");
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let local_purchase_id = state
+    if let Some(existing) = state
         .store
-        .insert_purchase(
+        .get_active_registration_for_listing(listing.local_id)
+        .map_err(|e| {
+            tracing::error!("check active registration: {e}");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    {
+        tracing::info!(
+            "listing {} already has an active registration {}",
+            listing.contract.name,
+            existing.id
+        );
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
+
+    let registration_id = state
+        .store
+        .insert_registration(
             listing.local_id,
             &body.buyer_ua,
-            &accepted.burner_taddr,
-            &accepted.burner_pubkey_hex,
-            &accepted.mpc_path,
-            accepted.buyer_signature_b64.as_deref(),
-            accepted.buyer_pubkey_b64.as_deref(),
+            &sig_b64,
+            &pk_b64,
+            is_sovereign,
         )
         .map_err(|e| {
-            tracing::error!("insert purchase: {e}");
+            tracing::error!("insert registration: {e}");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    state
-        .store
-        .set_contract_purchase_id(local_purchase_id, accepted.purchase_id as i64)
-        .map_err(|e| {
-            tracing::error!("set contract_purchase_id: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let buy_memo = format!(
+        "ZNS:BUY:{}:{}:{}:{}",
+        listing.contract.name,
+        body.buyer_ua,
+        sig_b64,
+        pk_b64,
+    );
 
     Ok(Json(CreatePurchaseResponse {
-        local_purchase_id,
-        contract_purchase_id: accepted.purchase_id,
-        burner_taddr: accepted.burner_taddr,
-        required_memo: accepted.required_memo,
-        price_zat: accepted.price_zat,
-        commission_zat: accepted.commission_zat,
-        fee_zat: accepted.payout_fee_zat,
-        seller_receives_zat: accepted.seller_receives_zat,
-        refund_receives_zat: accepted.refund_receives_zat,
+        registration_id,
+        listing_id: listing.contract.id,
+        burner_taddr: listing.contract.burner_taddr,
+        price_zat: listing.contract.price_zat,
+        commission_zat: listing.contract.commission_zat,
+        fee_zat: listing.contract.payout_fee_zat,
+        seller_receives_zat: listing.contract.seller_receives_zat,
+        buy_memo,
     }))
 }
 

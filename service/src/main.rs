@@ -48,8 +48,10 @@ async fn main() -> Result<()> {
 
     let watcher = Watcher::new(&cfg.lwd_url);
 
-    let memo_signer = cfg.admin_ed25519_key.as_ref().and_then(|k|
-        memo::MemoSigner::from_hex(k).ok());
+    let memo_signer = cfg
+        .admin_ed25519_key
+        .as_ref()
+        .and_then(|k| memo::MemoSigner::from_hex(k).ok());
 
     let http_state = Arc::new(http::AppState {
         cfg: cfg.clone(),

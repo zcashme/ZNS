@@ -1,23 +1,22 @@
-//! Admin Ed25519 memo signing — BUY memos for the Zcash name registry.
+//! BUY memo signing and verification.
 //!
-//! When the buyer does not provide their own Ed25519 signature, the admin
-//! wallet signs the BUY memo as a fallback. This keeps the indexer compatible
-//! with the non-custodial flow while still allowing buyer-side sovereignty.
+//! Sovereign path: buyer signs `BUY:<name>:<buyer_ua>` with their own ed25519
+//! key; relayer just verifies and forwards.
 //!
-//! BUY memo format (with admin signature):
-//!     ZNS:BUY:<name>:<buyer_ua>:<sig>
-//! where <sig> is the base64-encoded Ed25519 signature of:
-//!     BUY:<name>:<buyer_ua>
+//! Admin fallback: if the buyer omits a signature, the relayer signs the same
+//! payload with `ZNS_ADMIN_ED25519_KEY` and submits the admin's pubkey as the
+//! buyer credentials. The contract treats them identically — any valid
+//! ed25519 sig over `BUY:<name>:<buyer_ua>` is accepted. Indexers can decide
+//! whether to trust the admin key as a memo signer.
 //!
-//! Buyer-sovereignty format (optional):
-//!     ZNS:BUY:<name>:<buyer_ua>:<buyer_sig>:<buyer_pubkey>
+//! On-chain memo wire format (Orchard treasury output):
+//!     ZNS:BUY:<name>:<buyer_ua>:<sig_b64>:<pubkey_b64>
 
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey, Verifier};
 
 pub struct MemoSigner {
     key: SigningKey,
-    #[allow(dead_code)]
     pubkey_b64: String,
 }
 
@@ -33,26 +32,25 @@ impl MemoSigner {
         Ok(Self { key, pubkey_b64 })
     }
 
-    /// Sign a BUY memo and return the full wire-format memo string.
-    pub fn sign_buy(&self, name: &str, buyer_ua: &str) -> String {
+    /// Sign `BUY:<name>:<buyer_ua>` and return the base64-encoded signature
+    /// alongside the admin pubkey (also base64). Caller submits both to the
+    /// contract as `(buyer_signature_b64, buyer_pubkey_b64)`.
+    pub fn sign_buy_credentials(&self, name: &str, buyer_ua: &str) -> (String, String) {
         let payload = format!("BUY:{name}:{buyer_ua}");
-        let sig = base64::engine::general_purpose::STANDARD
+        let sig_b64 = base64::engine::general_purpose::STANDARD
             .encode(self.key.sign(payload.as_bytes()).to_bytes());
-        format!("ZNS:BUY:{name}:{buyer_ua}:{sig}")
-    }
-
-    /// Return the base64-encoded public key (used by CLI / explorers).
-    #[allow(dead_code)]
-    pub fn pubkey(&self) -> &str {
-        &self.pubkey_b64
+        (sig_b64, self.pubkey_b64.clone())
     }
 }
 
-/// Verify a buyer-provided BUY signature.
-///
-/// Returns true if `signature_b64` over `BUY:{name}:{buyer_ua}` validates
-/// against the provided base64-encoded Ed25519 public key.
-pub fn verify_buy_signature(name: &str, buyer_ua: &str, signature_b64: &str, pubkey_b64: &str) -> bool {
+/// Verify a BUY signature against an arbitrary ed25519 pubkey (buyer's own
+/// or the admin's — the contract doesn't distinguish).
+pub fn verify_buy_signature(
+    name: &str,
+    buyer_ua: &str,
+    signature_b64: &str,
+    pubkey_b64: &str,
+) -> bool {
     let Ok(sig_bytes) = base64::engine::general_purpose::STANDARD.decode(signature_b64) else {
         return false;
     };
