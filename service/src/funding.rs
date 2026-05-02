@@ -141,28 +141,35 @@ async fn build_and_submit_funding(
     let burner_pubkey = decode_pubkey(&purchase.burner_pubkey_hex)?;
     let outpoint = transparent::bundle::OutPoint::new(txid_le(&utxo.txid)?, utxo.vout);
 
-    let payout_tx = payout::build_tx_bytes(PayoutInputs {
-        network: &state.cfg.zcash_network,
-        target_height: build_height,
-        utxo_outpoint: outpoint.clone(),
-        utxo_value_zats: utxo.value_zats,
-        utxo_script_pubkey: utxo.script.clone(),
-        burner_pubkey,
-        seller_ua: &listing.seller_ua,
-        treasury_ua: &listing.treasury_ua,
-        buyer_ua: None,
-        seller_amount: contract_purchase.seller_receives_zat,
-        treasury_amount: contract_purchase.commission_zat,
-        memo: build_buy_memo(
-            &state,
-            &listing.name,
-            &purchase.buyer_ua,
-            &purchase.buyer_signature_b64,
-            &purchase.buyer_pubkey_b64,
-            &contract_purchase.required_memo,
-        ),
-        fee: Some(contract_purchase.payout_fee_zat),
-    })?;
+    let is_exact = utxo.value_zats == contract_purchase.price_zat;
+    let refund_amount = utxo.value_zats.saturating_sub(contract_purchase.payout_fee_zat);
+
+    let payout_tx_opt = if is_exact {
+        Some(payout::build_tx_bytes(PayoutInputs {
+            network: &state.cfg.zcash_network,
+            target_height: build_height,
+            utxo_outpoint: outpoint.clone(),
+            utxo_value_zats: utxo.value_zats,
+            utxo_script_pubkey: utxo.script.clone(),
+            burner_pubkey,
+            seller_ua: &listing.seller_ua,
+            treasury_ua: &listing.treasury_ua,
+            buyer_ua: None,
+            seller_amount: contract_purchase.seller_receives_zat,
+            treasury_amount: contract_purchase.commission_zat,
+            memo: build_buy_memo(
+                &state,
+                &listing.name,
+                &purchase.buyer_ua,
+                &purchase.buyer_signature_b64,
+                &purchase.buyer_pubkey_b64,
+                &contract_purchase.required_memo,
+            ),
+            fee: Some(contract_purchase.payout_fee_zat),
+        })?)
+    } else {
+        None
+    };
 
     let refund_tx = payout::build_tx_bytes(PayoutInputs {
         network: &state.cfg.zcash_network,
@@ -174,7 +181,7 @@ async fn build_and_submit_funding(
         seller_ua: &listing.seller_ua,
         treasury_ua: &listing.treasury_ua,
         buyer_ua: Some(&purchase.buyer_ua),
-        seller_amount: contract_purchase.refund_receives_zat,
+        seller_amount: refund_amount,
         treasury_amount: 0,
         memo: [0u8; 512],
         fee: Some(contract_purchase.payout_fee_zat),
@@ -187,7 +194,7 @@ async fn build_and_submit_funding(
             "purchase_id": contract_purchase.id,
             "utxo_value_zats": utxo.value_zats,
             "utxo_script_pubkey": utxo.script,
-            "payout_tx": payout_tx,
+            "payout_tx": payout_tx_opt,
             "refund_tx": refund_tx,
         }),
         SUBMIT_FUNDING_GAS,
@@ -302,10 +309,16 @@ async fn find_matching_funding_utxo(
 ) -> Result<Option<EscrowUtxo>> {
     let mut utxos = state.watcher.get_utxos(&purchase.burner_taddr).await?;
     utxos.retain(|u| {
-        u.value_zats == contract_purchase.price_zat
+        u.value_zats > contract_purchase.payout_fee_zat
             && u.confirmations >= state.cfg.min_confirmations
     });
-    utxos.sort_by_key(|u| std::cmp::Reverse(u.confirmations));
+    // Prioritize exact-match UTXOs, then sort by confirmations.
+    utxos.sort_by_key(|u| {
+        (
+            std::cmp::Reverse(u.value_zats == contract_purchase.price_zat),
+            std::cmp::Reverse(u.confirmations),
+        )
+    });
     Ok(utxos.into_iter().next())
 }
 

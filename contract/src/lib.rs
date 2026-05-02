@@ -273,9 +273,9 @@ pub struct PurchaseAcceptedView {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SubmittedFundingView {
     pub purchase_id: u64,
-    pub payout_tx_hash_hex: String,
+    pub payout_tx_hash_hex: Option<String>,
     pub refund_tx_hash_hex: String,
-    pub payout_sighash_hex: String,
+    pub payout_sighash_hex: Option<String>,
     pub refund_sighash_hex: String,
     pub status: String,
 }
@@ -699,7 +699,7 @@ impl ZnsContract {
         purchase_id: u64,
         utxo_value_zats: u64,
         utxo_script_pubkey: Vec<u8>,
-        payout_tx: Vec<u8>,
+        payout_tx: Option<Vec<u8>>,
         refund_tx: Vec<u8>,
     ) -> SubmittedFundingView {
         let mut purchase = self
@@ -714,92 +714,130 @@ impl ZnsContract {
             "purchase not awaiting payment"
         );
 
-        // The UTXO value must exactly match the listed price.
+        // The UTXO must at least cover the network fee.
         assert!(
-            utxo_value_zats == purchase.price_zat,
-            "utxo value must equal listed price"
+            utxo_value_zats > purchase.payout_fee_zat,
+            "utxo value too small to cover fee"
         );
 
         // Verify the scriptPubKey commits to this purchase's burner pubkey.
         validate_burner_script(&utxo_script_pubkey, &purchase.burner_pubkey)
             .unwrap_or_else(|e| env::panic_str(&format!("burner script invalid: {e}")));
 
-        // Sanity-check tx sizes.
-        assert!(
-            !payout_tx.is_empty() && payout_tx.len() <= MAX_TX_BYTES,
-            "payout_tx size"
-        );
+        // Always parse and validate the refund tx.
         assert!(
             !refund_tx.is_empty() && refund_tx.len() <= MAX_TX_BYTES,
             "refund_tx size"
         );
-
-        // Parse both transactions.
-        let payout_parsed = parse_tx(&payout_tx)
-            .unwrap_or_else(|e| env::panic_str(&format!("payout_tx invalid: {e}")));
         let refund_parsed = parse_tx(&refund_tx)
             .unwrap_or_else(|e| env::panic_str(&format!("refund_tx invalid: {e}")));
-
-        // Both txs must target the same consensus branch.
-        assert_eq!(
-            payout_parsed.consensus_branch_id, self.consensus_branch_id,
-            "payout_tx wrong consensus branch id"
-        );
         assert_eq!(
             refund_parsed.consensus_branch_id, self.consensus_branch_id,
             "refund_tx wrong consensus branch id"
         );
 
-        // Both txs must spend the same outpoint (the funding UTXO).
-        assert_eq!(
-            payout_parsed.tx_in.prevout_txid, refund_parsed.tx_in.prevout_txid,
-            "payout/refund txid mismatch"
+        // Validate refund tx has exactly 1 Orchard action and the right value balance.
+        let refund_orchard = refund_parsed.orchard.as_ref()
+            .expect("refund missing orchard bundle");
+        assert!(
+            refund_orchard.actions.len() == 1,
+            "refund must have exactly 1 orchard action"
         );
+        let expected_refund_value_balance = -(utxo_value_zats as i64 - purchase.payout_fee_zat as i64);
         assert_eq!(
-            payout_parsed.tx_in.prevout_vout, refund_parsed.tx_in.prevout_vout,
-            "payout/refund vout mismatch"
+            refund_orchard.value_balance, expected_refund_value_balance,
+            "refund value_balance mismatch"
         );
 
-        // Compute ZIP-244 sighashes for both txs.
-        let payout_sighash =
-            compute_sighash_all(&payout_parsed, utxo_value_zats, &utxo_script_pubkey);
-        let refund_sighash =
-            compute_sighash_all(&refund_parsed, utxo_value_zats, &utxo_script_pubkey);
+        // Determine whether this is an exact-amount or wrong-amount funding.
+        let is_exact = utxo_value_zats == purchase.price_zat;
 
-        // First-to-fund wins: atomically check and set the listing's winner.
-        let status = if let Some(listing) = self.listings.get(&purchase.listing_id) {
-            if let Some(winner_id) = listing.winning_purchase_id {
-                if winner_id == purchase_id {
-                    // This purchase was already the winner (re-submission).
-                    PurchaseStatus::PayoutAuthorized
+        let (_payout_parsed_opt, payout_sighash_opt, payout_tx_hash_opt) = if is_exact {
+            let payout_tx_bytes = payout_tx.expect("payout_tx required for exact funding");
+            assert!(
+                !payout_tx_bytes.is_empty() && payout_tx_bytes.len() <= MAX_TX_BYTES,
+                "payout_tx size"
+            );
+            let payout_parsed = parse_tx(&payout_tx_bytes)
+                .unwrap_or_else(|e| env::panic_str(&format!("payout_tx invalid: {e}")));
+            assert_eq!(
+                payout_parsed.consensus_branch_id, self.consensus_branch_id,
+                "payout_tx wrong consensus branch id"
+            );
+            // Both txs must spend the same outpoint (the funding UTXO).
+            assert_eq!(
+                payout_parsed.tx_in.prevout_txid, refund_parsed.tx_in.prevout_txid,
+                "payout/refund txid mismatch"
+            );
+            assert_eq!(
+                payout_parsed.tx_in.prevout_vout, refund_parsed.tx_in.prevout_vout,
+                "payout/refund vout mismatch"
+            );
+            // Validate payout tx has exactly 2 Orchard actions and the right value balance.
+            let payout_orchard = payout_parsed.orchard.as_ref()
+                .expect("payout missing orchard bundle");
+            assert!(
+                payout_orchard.actions.len() == 2,
+                "payout must have exactly 2 orchard actions"
+            );
+            let expected_payout_value_balance = -(purchase.price_zat as i64 - purchase.payout_fee_zat as i64);
+            assert_eq!(
+                payout_orchard.value_balance, expected_payout_value_balance,
+                "payout value_balance mismatch"
+            );
+
+            let payout_sighash = compute_sighash_all(&payout_parsed, utxo_value_zats, &utxo_script_pubkey);
+            let payout_tx_hash = sha256(&payout_tx_bytes);
+            (Some(payout_parsed), Some(payout_sighash), Some(payout_tx_hash))
+        } else {
+            // Wrong-amount funding: payout tx must be None.
+            assert!(
+                payout_tx.is_none(),
+                "payout_tx must be None for wrong-amount funding"
+            );
+            (None, None, None)
+        };
+
+        // Compute refund sighash and hash (always needed).
+        let refund_sighash = compute_sighash_all(&refund_parsed, utxo_value_zats, &utxo_script_pubkey);
+        let refund_tx_hash = sha256(&refund_tx);
+
+        // Update refund_receives_zat to the actual amount the buyer will get back.
+        purchase.refund_receives_zat = utxo_value_zats - purchase.payout_fee_zat;
+
+        // First-to-fund wins: only run the race for exact-amount purchases.
+        let status = if is_exact {
+            if let Some(listing) = self.listings.get(&purchase.listing_id) {
+                if let Some(winner_id) = listing.winning_purchase_id {
+                    if winner_id == purchase_id {
+                        PurchaseStatus::PayoutAuthorized
+                    } else {
+                        PurchaseStatus::Refundable
+                    }
                 } else {
-                    // Another purchase already funded first.
-                    PurchaseStatus::Refundable
+                    let mut updated_listing = listing.clone();
+                    updated_listing.winning_purchase_id = Some(purchase_id);
+                    self.listings.insert(purchase.listing_id, updated_listing);
+                    PurchaseStatus::PayoutAuthorized
                 }
             } else {
-                // No winner yet — claim it atomically.
-                let mut updated_listing = listing.clone();
-                updated_listing.winning_purchase_id = Some(purchase_id);
-                self.listings.insert(purchase.listing_id, updated_listing);
-                PurchaseStatus::PayoutAuthorized
+                PurchaseStatus::Refundable
             }
         } else {
-            // Listing has been removed.
+            // Wrong amount: never a winner, immediately refundable.
             PurchaseStatus::Refundable
         };
 
-        let payout_tx_hash = sha256(&payout_tx);
-        let refund_tx_hash = sha256(&refund_tx);
-
         // Persist funding details.
-        purchase.funding_outpoint = Some((
-            payout_parsed.tx_in.prevout_txid,
-            payout_parsed.tx_in.prevout_vout,
-        ));
+        let funding_outpoint = (
+            refund_parsed.tx_in.prevout_txid,
+            refund_parsed.tx_in.prevout_vout,
+        );
+        purchase.funding_outpoint = Some(funding_outpoint);
         purchase.utxo_value_zats = Some(utxo_value_zats);
-        purchase.payout_tx_hash = Some(payout_tx_hash);
+        purchase.payout_tx_hash = payout_tx_hash_opt;
         purchase.refund_tx_hash = Some(refund_tx_hash);
-        purchase.payout_sighash = Some(payout_sighash);
+        purchase.payout_sighash = payout_sighash_opt;
         purchase.refund_sighash = Some(refund_sighash);
         purchase.status = status.clone();
         self.purchases.insert(purchase_id, purchase);
@@ -808,10 +846,10 @@ impl ZnsContract {
             "funding_submitted",
             serde_json::json!({
                 "purchase_id": purchase_id,
-                "utxo_txid": hex::encode(payout_parsed.tx_in.prevout_txid),
-                "utxo_vout": payout_parsed.tx_in.prevout_vout,
+                "utxo_txid": hex::encode(funding_outpoint.0),
+                "utxo_vout": funding_outpoint.1,
                 "utxo_value_zats": utxo_value_zats,
-                "payout_tx_hash": hex::encode(payout_tx_hash),
+                "payout_tx_hash": payout_tx_hash_opt.map(hex::encode),
                 "refund_tx_hash": hex::encode(refund_tx_hash),
                 "status": purchase_status_str(&status),
             }),
@@ -819,14 +857,15 @@ impl ZnsContract {
 
         SubmittedFundingView {
             purchase_id,
-            payout_tx_hash_hex: hex::encode(payout_tx_hash),
+            payout_tx_hash_hex: payout_tx_hash_opt.map(hex::encode),
             refund_tx_hash_hex: hex::encode(refund_tx_hash),
-            payout_sighash_hex: hex::encode(payout_sighash),
+            payout_sighash_hex: payout_sighash_opt.map(hex::encode),
             refund_sighash_hex: hex::encode(refund_sighash),
             status: purchase_status_str(&status).to_string(),
         }
     }
 
+    // ── MPC signing flow ─────────────────────────────────────────────────
     // ── MPC signing flow ─────────────────────────────────────────────────
 
     /// Request the MPC to sign the payout transaction.
