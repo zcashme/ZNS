@@ -132,7 +132,7 @@ trait ExtSelf {
 /// `submit_funding` succeeds, the listing is locked to a single buyer's
 /// payout and cannot be re-funded.
 #[derive(Clone, Debug)]
-#[near(serializers = [borsh])]
+#[near(serializers = [borsh, json])]
 pub struct Listing {
     pub id: u64,
     pub name: String,
@@ -145,7 +145,7 @@ pub struct Listing {
 
     // Derived burner key + path.
     pub burner_taddr: String,
-    pub burner_pubkey: [u8; 33],
+    pub burner_pubkey: Vec<u8>,
     pub mpc_path: String,
 
     // Funding state — populated by submit_funding.
@@ -161,42 +161,7 @@ pub struct Listing {
 
     // Per-buyer burner path + key (set by submit_funding, used by MPC).
     pub buyer_mpc_path: Option<String>,
-    pub buyer_burner_pubkey: Option<[u8; 33]>,
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-// View types (JSON-friendly)
-// ───────────────────────────────────────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-#[near(serializers = [json])]
-pub struct ListingView {
-    pub id: u64,
-    pub name: String,
-    pub seller_ua: String,
-    pub price_zat: u64,
-    pub commission_bps: u64,
-    pub treasury_ua: String,
-    pub created_at_ns: u64,
-    pub listing_nonce: u64,
-    pub burner_taddr: String,
-    pub burner_pubkey_hex: String,
-    pub mpc_path: String,
-    pub funded: bool,
-    pub buyer_ua: Option<String>,
-    pub buyer_signature_b64: Option<String>,
-    pub buyer_pubkey_b64: Option<String>,
-    pub funding_outpoint_txid_hex: Option<String>,
-    pub funding_vout: Option<u32>,
-    pub utxo_value_zats: Option<u64>,
-    pub payout_tx_hash_hex: Option<String>,
-    pub payout_sighash_hex: Option<String>,
-    pub buyer_mpc_path: Option<String>,
-    pub buyer_burner_pubkey_hex: Option<String>,
-    pub listing_mpc_path: String,
-    pub payout_fee_zat: u64,
-    pub commission_zat: u64,
-    pub seller_receives_zat: u64,
+    pub buyer_burner_pubkey: Option<Vec<u8>>,
 }
 
 /// Returned by `get_buyer_burner` — a per-buyer t-addr derived from
@@ -352,7 +317,7 @@ impl ZnsContract {
         nonce: u64,
         signature_b64: String,
         user_pubkey_b64: Option<String>,
-    ) -> ListingView {
+    ) -> Listing {
         assert!(
             !name.is_empty() && name.len() <= MAX_NAME_LEN,
             "name length"
@@ -422,7 +387,7 @@ impl ZnsContract {
             created_at_ns: now,
             listing_nonce: nonce,
             burner_taddr: burner_taddr.clone(),
-            burner_pubkey,
+            burner_pubkey: burner_pubkey.to_vec(),
             mpc_path: mpc_path.clone(),
             funded: false,
             buyer_ua: None,
@@ -458,7 +423,7 @@ impl ZnsContract {
                 "mpc_path": mpc_path,
             }),
         );
-        self.listing_to_view(&listing)
+        listing
     }
 
     /// Cancel a listing.  Only valid while the listing is unfunded.
@@ -619,7 +584,7 @@ impl ZnsContract {
         listing.payout_tx_hash = Some(payout_tx_hash);
         listing.payout_sighash = Some(payout_sighash);
         listing.buyer_mpc_path = Some(buyer_mpc_path.clone());
-        listing.buyer_burner_pubkey = Some(burner_pubkey);
+        listing.buyer_burner_pubkey = Some(burner_pubkey.to_vec());
         self.listings.insert(listing_id, listing);
 
         emit_event(
@@ -750,15 +715,15 @@ impl ZnsContract {
         }
     }
 
-    pub fn get_listing(&self, id: u64) -> Option<ListingView> {
-        self.listings.get(&id).map(|l| self.listing_to_view(l))
+    pub fn get_listing(&self, id: u64) -> Option<Listing> {
+        self.listings.get(&id).cloned()
     }
 
-    pub fn get_listing_by_name(&self, name: String) -> Option<ListingView> {
+    pub fn get_listing_by_name(&self, name: String) -> Option<Listing> {
         self.listing_ids_by_name
             .get(&name)
             .and_then(|id| self.listings.get(id))
-            .map(|l| self.listing_to_view(l))
+            .cloned()
     }
 
     pub fn get_payout_signature(&self, listing_id: u64) -> Option<MpcSignature> {
@@ -829,44 +794,6 @@ impl ZnsContract {
             )
     }
 
-    fn listing_to_view(&self, listing: &Listing) -> ListingView {
-        let commission_zat = listing.price_zat.saturating_mul(listing.commission_bps) / 10_000;
-        let seller_receives_zat = listing
-            .price_zat
-            .saturating_sub(commission_zat)
-            .saturating_sub(self.payout_fee_zat);
-        ListingView {
-            id: listing.id,
-            name: listing.name.clone(),
-            seller_ua: listing.seller_ua.clone(),
-            price_zat: listing.price_zat,
-            commission_bps: listing.commission_bps,
-            treasury_ua: listing.treasury_ua.clone(),
-            created_at_ns: listing.created_at_ns,
-            listing_nonce: listing.listing_nonce,
-            burner_taddr: listing.burner_taddr.clone(),
-            burner_pubkey_hex: hex::encode(listing.burner_pubkey),
-            mpc_path: listing.mpc_path.clone(),
-            funded: listing.funded,
-            buyer_ua: listing.buyer_ua.clone(),
-            buyer_signature_b64: listing.buyer_signature_b64.clone(),
-            buyer_pubkey_b64: listing.buyer_pubkey_b64.clone(),
-            funding_outpoint_txid_hex: listing
-                .funding_outpoint
-                .as_ref()
-                .map(|(txid, _)| hex::encode(txid)),
-            funding_vout: listing.funding_outpoint.map(|(_, vout)| vout),
-            utxo_value_zats: listing.utxo_value_zats,
-            payout_tx_hash_hex: listing.payout_tx_hash.map(hex::encode),
-            payout_sighash_hex: listing.payout_sighash.map(hex::encode),
-            payout_fee_zat: self.payout_fee_zat,
-            commission_zat,
-            seller_receives_zat,
-            buyer_mpc_path: listing.buyer_mpc_path.clone(),
-            buyer_burner_pubkey_hex: listing.buyer_burner_pubkey.map(hex::encode),
-            listing_mpc_path: listing.mpc_path.clone(),
-        }
-    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
