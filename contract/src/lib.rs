@@ -455,7 +455,20 @@ impl ZnsContract {
     ///
     /// Per-buyer burners make it impossible for a third party to spend
     /// another buyer's UTXO — the burner derivation path includes the
-    /// buyer's pubkey, so every UTXO is cryptographically bound to one buyer.
+    /// Submit a funding UTXO + pre-built payout transaction, locking the
+    /// listing to a specific buyer.
+    ///
+    /// Two mutually exclusive paths:
+    ///
+    ///   * **Admin path** — `buyer_signature_b64` and `buyer_pubkey_b64` are
+    ///     both `None`.  The UTXO is expected at the listing-level burner and
+    ///     the MPC signs with `listing.mpc_path`.  No extra signature check.
+    ///
+    ///   * **Sovereign path** — both are `Some`.  The buyer's Ed25519 sig over
+    ///     `BUY:<name>:<buyer_ua>` is verified, a per-buyer burner is derived,
+    ///     and the MPC signs with a per-buyer path.
+    ///
+    /// Mixed `Some/None` panics.
     pub fn submit_funding(
         &mut self,
         listing_id: u64,
@@ -463,9 +476,8 @@ impl ZnsContract {
         utxo_script_pubkey: Vec<u8>,
         payout_tx: Vec<u8>,
         buyer_ua: String,
-        buyer_pubkey_b64: String,
-        admin_signature_b64: String,
         buyer_signature_b64: Option<String>,
+        buyer_pubkey_b64: Option<String>,
     ) {
         let mut listing = self
             .listings
@@ -483,40 +495,42 @@ impl ZnsContract {
         validate_unified_address(&buyer_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("buyer_ua invalid: {e}")));
 
-        let buyer_pubkey = decode_pubkey_b64(&buyer_pubkey_b64)
-            .unwrap_or_else(|e| env::panic_str(&format!("buyer_pubkey invalid: {e}")));
-
-        let admin_payload = format!("BUY:{}:{buyer_ua}", listing.name);
-        assert!(
-            ed25519_verify_b64(&admin_signature_b64, &admin_payload, &self.admin_pubkey),
-            "admin signature invalid"
-        );
-
-        if let Some(sig) = &buyer_signature_b64 {
-            let buyer_payload = format!("BUY:{}:{buyer_ua}", listing.name);
-            assert!(
-                ed25519_verify_b64(sig, &buyer_payload, &buyer_pubkey),
-                "buyer signature invalid"
-            );
-        }
-
-        let buyer_mpc_path = build_buyer_path(
-            &listing.name,
-            listing.listing_nonce,
-            &buyer_pubkey_b64,
-        );
-        assert!(
-            !buyer_mpc_path.is_empty() && buyer_mpc_path.len() <= MAX_PATH_LEN,
-            "buyer mpc_path length"
-        );
-
-        let (_burner_taddr, burner_pubkey) = derive_burner(
-            &self.mpc_root_pubkey,
-            env::current_account_id().as_str(),
-            &buyer_mpc_path,
-            self.mainnet,
-        )
-        .unwrap_or_else(|e| env::panic_str(&format!("buyer burner derivation failed: {e}")));
+        let (burner_pubkey, mpc_path) = match (&buyer_signature_b64, &buyer_pubkey_b64) {
+            (Some(sig), Some(pk_b64)) => {
+                let buyer_pubkey = decode_pubkey_b64(pk_b64)
+                    .unwrap_or_else(|e| env::panic_str(&format!("buyer_pubkey invalid: {e}")));
+                let buyer_payload = format!("BUY:{}:{buyer_ua}", listing.name);
+                assert!(
+                    ed25519_verify_b64(sig, &buyer_payload, &buyer_pubkey),
+                    "buyer signature invalid"
+                );
+                let buyer_mpc_path = build_buyer_path(
+                    &listing.name,
+                    listing.listing_nonce,
+                    pk_b64,
+                );
+                assert!(
+                    !buyer_mpc_path.is_empty() && buyer_mpc_path.len() <= MAX_PATH_LEN,
+                    "buyer mpc_path length"
+                );
+                let (_taddr, pk) = derive_burner(
+                    &self.mpc_root_pubkey,
+                    env::current_account_id().as_str(),
+                    &buyer_mpc_path,
+                    self.mainnet,
+                )
+                .unwrap_or_else(|e| env::panic_str(&format!("buyer burner derivation failed: {e}")));
+                (pk, buyer_mpc_path)
+            }
+            (None, None) => {
+                let mut pk = [0u8; 33];
+                pk.copy_from_slice(&listing.burner_pubkey);
+                (pk, listing.mpc_path.clone())
+            }
+            _ => env::panic_str(
+                "buyer_signature and buyer_pubkey must both be present or both absent"
+            ),
+        };
 
         validate_burner_script(&utxo_script_pubkey, &burner_pubkey)
             .unwrap_or_else(|e| env::panic_str(&format!("burner script invalid: {e}")));
@@ -558,12 +572,12 @@ impl ZnsContract {
         listing.funded = true;
         listing.buyer_ua = Some(buyer_ua.clone());
         listing.buyer_signature_b64 = buyer_signature_b64;
-        listing.buyer_pubkey_b64 = Some(buyer_pubkey_b64);
+        listing.buyer_pubkey_b64 = buyer_pubkey_b64;
         listing.funding_outpoint = Some(funding_outpoint);
         listing.utxo_value_zats = Some(utxo_value_zats);
         listing.payout_tx_hash = Some(payout_tx_hash);
         listing.payout_sighash = Some(payout_sighash);
-        listing.buyer_mpc_path = Some(buyer_mpc_path.clone());
+        listing.buyer_mpc_path = Some(mpc_path.clone());
         listing.buyer_burner_pubkey = Some(burner_pubkey.to_vec());
         self.listings.insert(listing_id, listing);
 
@@ -577,10 +591,9 @@ impl ZnsContract {
                 "utxo_value_zats": utxo_value_zats,
                 "payout_tx_hash": hex::encode(payout_tx_hash),
                 "payout_sighash": hex::encode(payout_sighash),
-                "buyer_mpc_path": buyer_mpc_path,
+                "buyer_mpc_path": mpc_path,
             }),
         );
-
     }
 
     // ── MPC signing flow ─────────────────────────────────────────────────
