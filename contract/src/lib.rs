@@ -164,26 +164,6 @@ pub struct Listing {
     pub buyer_burner_pubkey: Option<Vec<u8>>,
 }
 
-/// Returned by `get_buyer_burner` — a per-buyer t-addr derived from
-/// `name + nonce + buyer_pubkey`. Each buyer gets a unique burner; no one
-/// else can spend a UTXO that lands there.
-#[derive(Clone, Debug)]
-#[near(serializers = [json])]
-pub struct BuyerBurnerView {
-    pub burner_taddr: String,
-    pub burner_pubkey_hex: String,
-    pub mpc_path: String,
-}
-
-/// Returned by `submit_funding` once the relayer has attached buyer info
-/// and a built payout tx. Contains the sighash the MPC will sign.
-#[derive(Clone, Debug)]
-#[near(serializers = [json])]
-pub struct SubmittedFundingView {
-    pub listing_id: u64,
-    pub payout_tx_hash_hex: String,
-    pub payout_sighash_hex: String,
-}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Contract state
@@ -486,7 +466,7 @@ impl ZnsContract {
         buyer_pubkey_b64: String,
         admin_signature_b64: String,
         buyer_signature_b64: Option<String>,
-    ) -> SubmittedFundingView {
+    ) -> serde_json::Value {
         let mut listing = self
             .listings
             .get(&listing_id)
@@ -601,11 +581,11 @@ impl ZnsContract {
             }),
         );
 
-        SubmittedFundingView {
-            listing_id,
-            payout_tx_hash_hex: hex::encode(payout_tx_hash),
-            payout_sighash_hex: hex::encode(payout_sighash),
-        }
+        serde_json::json!({
+            "listing_id": listing_id,
+            "payout_tx_hash_hex": hex::encode(payout_tx_hash),
+            "payout_sighash_hex": hex::encode(payout_sighash),
+        })
     }
 
     // ── MPC signing flow ─────────────────────────────────────────────────
@@ -682,7 +662,7 @@ impl ZnsContract {
         &self,
         name: String,
         buyer_pubkey_b64: String,
-    ) -> BuyerBurnerView {
+    ) -> serde_json::Value {
         let existing = self
             .listing_ids_by_name
             .get(&name)
@@ -708,11 +688,11 @@ impl ZnsContract {
             self.mainnet,
         )
         .unwrap_or_else(|e| env::panic_str(&format!("buyer burner derivation failed: {e}")));
-        BuyerBurnerView {
-            burner_taddr,
-            burner_pubkey_hex: hex::encode(burner_pubkey),
-            mpc_path: buyer_mpc_path,
-        }
+        serde_json::json!({
+            "burner_taddr": burner_taddr,
+            "burner_pubkey_hex": hex::encode(burner_pubkey),
+            "mpc_path": buyer_mpc_path,
+        })
     }
 
     pub fn get_listing(&self, id: u64) -> Option<Listing> {
