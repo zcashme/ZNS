@@ -361,3 +361,107 @@ pub fn build_tx_bytes(input: PayoutInputs<'_>) -> Result<Vec<u8>> {
     dummy_compact.copy_from_slice(&dummy_sig.serialize_compact());
     finalize_with_mpc(plan, &dummy_compact)
 }
+
+#[cfg(test)]
+mod sighash_tests {
+    use super::*;
+    use ripemd::Ripemd160;
+    use sha2::{Digest, Sha256};
+    use zcash_keys::keys::{UnifiedAddressRequest, UnifiedSpendingKey};
+    use zcash_protocol::consensus::TestNetwork;
+    use zip32::AccountId;
+    use zns_contract::zcash::{compute_sighash_all, parse_tx};
+
+    /// Derives a testnet Unified Address with an Orchard receiver from a single seed byte.
+    fn test_ua(seed_byte: u8) -> String {
+        let seed = vec![seed_byte; 32];
+        let usk = UnifiedSpendingKey::from_seed(&TestNetwork, &seed, AccountId::ZERO)
+            .expect("USK derivation");
+        let uivk = usk
+            .to_unified_full_viewing_key()
+            .to_unified_incoming_viewing_key();
+        let (ua, _) = uivk
+            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .expect("UA derivation");
+        ua.encode(&TestNetwork)
+    }
+
+    /// Builds a P2PKH scriptPubKey for a compressed secp256k1 public key.
+    fn p2pkh_script(pubkey: &[u8; 33]) -> Vec<u8> {
+        let sha = Sha256::digest(pubkey);
+        let ripe = Ripemd160::digest(sha);
+        let mut script = vec![0x76u8, 0xa9, 0x14];
+        script.extend_from_slice(&ripe);
+        script.extend_from_slice(&[0x88, 0xac]);
+        script
+    }
+
+    /// Verifies that the contract's hand-rolled ZIP-244 sighash matches
+    /// zcash_primitives' reference implementation on the same transaction.
+    ///
+    /// Flow:
+    ///   1. build_unsigned  → plan.sighash  (zcash_primitives reference via signature_hash)
+    ///   2. finalize_with_mpc               → serialized tx bytes
+    ///   3. parse_tx + compute_sighash_all  → contract's sighash
+    ///   4. assert_eq
+    #[test]
+    fn contract_sighash_matches_zcash_primitives() {
+        let seller_ua = test_ua(1);
+        let treasury_ua = test_ua(2);
+
+        let secp = Secp256k1::new();
+        let dummy_sk = secp256k1::SecretKey::from_slice(&[7u8; 32]).expect("dummy secret key");
+        let burner_pubkey: [u8; 33] =
+            secp256k1::PublicKey::from_secret_key(&secp, &dummy_sk).serialize();
+        let script_pubkey = p2pkh_script(&burner_pubkey);
+
+        let utxo_value: u64 = 200_000;
+        let fee: u64 = payout_fee();
+        let seller_amount: u64 = 185_000;
+        let treasury_amount: u64 = utxo_value
+            .checked_sub(seller_amount)
+            .and_then(|r| r.checked_sub(fee))
+            .expect("test amounts must balance");
+
+        let plan = build_unsigned(PayoutInputs {
+            network: "testnet",
+            target_height: 2_000_000,
+            utxo_outpoint: transparent::bundle::OutPoint::new([42u8; 32], 1),
+            utxo_value_zats: utxo_value,
+            utxo_script_pubkey: script_pubkey.clone(),
+            burner_pubkey,
+            seller_ua: &seller_ua,
+            treasury_ua: &treasury_ua,
+            buyer_ua: None,
+            seller_amount,
+            treasury_amount,
+            memo: [0u8; 512],
+            fee: Some(fee),
+        })
+        .expect("build_unsigned");
+
+        // zcash_primitives reference — computed inside build_unsigned via signature_hash().
+        let reference_sighash = plan.sighash;
+
+        // Sign the actual sighash so finalize_with_mpc's secp256k1 verification passes.
+        // The transparent input's scriptSig is skipped by parse_tx and does not
+        // affect the sighash computation on either path.
+        let dummy_msg = secp256k1::Message::from_digest(reference_sighash);
+        let dummy_sig = secp.sign_ecdsa(&dummy_msg, &dummy_sk);
+        let mut dummy_compact = [0u8; 64];
+        dummy_compact.copy_from_slice(&dummy_sig.serialize_compact());
+        let tx_bytes = finalize_with_mpc(plan, &dummy_compact).expect("finalize_with_mpc");
+
+        // Contract path: parse the finalized bytes and recompute the sighash.
+        let parsed_tx = parse_tx(&tx_bytes).expect("parse_tx");
+        let contract_sighash = compute_sighash_all(&parsed_tx, utxo_value, &script_pubkey);
+
+        assert_eq!(
+            contract_sighash,
+            reference_sighash,
+            "\ncontract:  {}\nreference: {}",
+            hex::encode(contract_sighash),
+            hex::encode(reference_sighash),
+        );
+    }
+}

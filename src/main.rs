@@ -9,7 +9,7 @@
 //   LIST      — put a name up for sale at a price
 //   DELIST    — remove a listing
 //   UPDATE    — change the address behind a name
-//   BUY       — memo-only advisory event (sales are non-custodial via NEAR contract)
+//   BUY       — purchase a listed name (admin-signed; buyer may append pubkey)
 //   RELEASE   — release a name back to the pool
 
 mod config;
@@ -137,16 +137,18 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
         if !matches!(
             action.kind,
             memo::ActionKind::SetPrice { .. } | memo::ActionKind::Claim { .. } | memo::ActionKind::Buy { .. }
-        ) && let Some((stored_sig, stored_ua, stored_action)) =
-            reg.get_claim_sig_for_ownership(&action.name)
-        {
-            let Some(payload) = memo::ownership_payload(&stored_action, &action.name, &stored_ua) else {
-                eprintln!("Invalid stored action '{}' for ownership proof on '{}'", stored_action, action.name);
-                return false;
-            };
-            if !memo::verify_signature(&payload, &stored_sig, admin_pubkey) {
-                eprintln!("Admin rejected: '{}' is sovereign", action.name);
-                return false;
+        ) {
+            if let Some((stored_sig, stored_ua, stored_action)) =
+                reg.get_claim_sig_for_ownership(&action.name)
+            {
+                let Some(payload) = memo::ownership_payload(&stored_action, &action.name, &stored_ua) else {
+                    eprintln!("Invalid stored action '{}' for ownership proof on '{}'", stored_action, action.name);
+                    return false;
+                };
+                if !memo::verify_signature(&payload, &stored_sig, admin_pubkey) {
+                    eprintln!("Admin rejected: '{}' is sovereign", action.name);
+                    return false;
+                }
             }
         }
         if !memo::verify_action(action, admin_pubkey) {
@@ -167,11 +169,11 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
     let pubkey = pubkey_b64.as_deref();
     match &action.kind {
         ActionKind::SetPrice { prices, nonce } => {
-            if let Some(current) = reg.get_pricing_nonce()
-                && nonce <= &current
-            {
-                eprintln!("SETPRICE: nonce {nonce} <= current {current}");
-                return;
+            if let Some(current) = reg.get_pricing_nonce() {
+                if nonce <= &current {
+                    eprintln!("SETPRICE: nonce {nonce} <= current {current}");
+                    return;
+                }
             }
             let tiers_str: String = prices
                 .iter()
@@ -291,44 +293,25 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
         }
         ActionKind::Buy { buyer_ua } => {
-            // The admin signature on this BUY is the indexer's only trust
-            // signal. The off-chain custody service is trusted to broadcast a
-            // BUY only after observing on-chain payment to the per-intent
-            // burner t-address; the indexer cannot independently verify that
-            // payment occurred. The note carrying this memo holds only the
-            // commission, not the full sale price, so no value check applies.
-            // The seller's listing state is intentionally not consulted: once
-            // the buyer has paid the burner, a late DELIST must not strand
-            // their funds.
-            let sale_price = reg.get_listing_price(&action.name);
-            match reg.process_buy(&action.name,
-                buyer_ua,
-                &action.signature,
-                txid,
-                height,
-                pubkey,
-            ) {
+            let Some(price) = reg.get_listing_price(&action.name) else {
+                eprintln!("BUY for unlisted name {}", action.name);
+                return;
+            };
+            if note_value < price {
+                eprintln!(
+                    "BUY underpayment for {}: {note_value} < {price}",
+                    action.name
+                );
+                return;
+            }
+            match reg.process_buy(&action.name, buyer_ua, &action.signature, txid, height, pubkey) {
                 Ok(()) => {
-                    let _ = reg.insert_event(
-                        &action,
-                        action.kind.label(),
-                        txid,
-                        height,
-                        Some(buyer_ua),
-                        sale_price,
-                        None,
-                        pubkey,
-                    );
-                    match sale_price {
-                        Some(p) => println!(
-                            "Sold: {} → {buyer_ua} for {p} zats (height {height})",
-                            action.name
-                        ),
-                        None => println!(
-                            "Sold: {} → {buyer_ua} (height {height}, unlisted)",
-                            action.name
-                        ),
-                    }
+                    let _ =
+                        reg.insert_event(&action, action.kind.label(), txid, height, Some(buyer_ua), Some(price), None, pubkey);
+                    println!(
+                        "Sold: {} → {buyer_ua} for {price} zats (height {height})",
+                        action.name
+                    )
                 }
                 Err(e) => eprintln!("DB error (buy): {e}"),
             }

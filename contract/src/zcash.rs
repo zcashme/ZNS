@@ -6,7 +6,7 @@
 //!
 //! | Component         | Constraint                                       |
 //! |-------------------|--------------------------------------------------|
-//! | Header            | version `0x80000005`, version_group_id `0x26A7270B` |
+//! | Header            | version `0x80000005`, version_group_id `0x26A7270A` |
 //! | Transparent       | exactly 1 input, 0 outputs                       |
 //! | Sapling           | 0 spends, 0 outputs (bundle empty)               |
 //! | Orchard           | N actions where N >= 1                           |
@@ -78,7 +78,7 @@ const P_OUTPUTS:    &[u8; 16] = b"ZTxIdOutputsHash";
 const P_AMOUNTS:    &[u8; 16] = b"ZTxTrAmountsHash";
 const P_SCRIPTS:    &[u8; 16] = b"ZTxTrScriptsHash";
 const P_TXIN:       &[u8; 16] = b"Zcash___TxInHash";
-const P_SAPLING:    &[u8; 16] = b"ZTxIdSAplingHash";
+const P_SAPLING:    &[u8; 16] = b"ZTxIdSaplingHash";
 const P_ORCHARD:    &[u8; 16] = b"ZTxIdOrchardHash";
 const P_ORCH_AC:    &[u8; 16] = b"ZTxIdOrcActCHash"; // orchard actions compact
 const P_ORCH_AM:    &[u8; 16] = b"ZTxIdOrcActMHash"; // orchard actions memos
@@ -242,7 +242,7 @@ pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
         return Err("not v5 overwintered");
     }
     let version_group_id = read_u32_le(raw, &mut c).ok_or("short vgid")?;
-    if version_group_id != 0x26A7270B {
+    if version_group_id != 0x26A7270A {
         return Err("bad version_group_id");
     }
     let consensus_branch_id = read_u32_le(raw, &mut c).ok_or("short branch")?;
@@ -524,6 +524,7 @@ pub fn compute_sighash_all(
     blake2b_personal(&top_level_personal(tx.consensus_branch_id), &buf)
 }
 
+
 /// SHA-256 of header fields: version, version_group_id, branch_id, lock_time, expiry_height.
 fn header_digest(tx: &ParsedTx) -> [u8; 32] {
     let mut buf = Vec::with_capacity(20);
@@ -554,13 +555,15 @@ fn transparent_sig_digest(
     prevouts_buf.extend_from_slice(&prev_vout_le);
     let prevouts_sig = blake2b_personal(P_PREVOUTS, &prevouts_buf);
 
-    // Hash of all input amounts.
+    // Hash of all input amounts — raw concatenation of each amount as i64 LE (no array length prefix).
     let amounts_sig = blake2b_personal(P_AMOUNTS, &utxo_value_zats.to_le_bytes());
 
-    // Hash of all input scriptPubKeys (length-prefixed).
-    let mut scripts_buf = encode_compact_size(utxo_script_pubkey.len() as u64);
-    scripts_buf.extend_from_slice(utxo_script_pubkey);
-    let scripts_sig = blake2b_personal(P_SCRIPTS, &scripts_buf);
+    // Hash of all input scriptPubKeys — compact_size(len) || bytes per script, no array length prefix.
+    let scripts_sig = {
+        let mut buf = encode_compact_size(utxo_script_pubkey.len() as u64);
+        buf.extend_from_slice(utxo_script_pubkey);
+        blake2b_personal(P_SCRIPTS, &buf)
+    };
 
     // Hash of all input sequence numbers.
     let sequence_sig = blake2b_personal(P_SEQUENCES, &seq_le);
@@ -698,5 +701,114 @@ mod tests {
         let a = blake2b_personal(P_SAPLING, &[]);
         let b = blake2b_personal(P_SAPLING, &[]);
         assert_eq!(a, b);
+    }
+
+    /// Replicate the exact NEAR MPC tweak derivation and key derivation inline,
+    /// then assert our `derive_burner` produces the same pubkey and address.
+    ///
+    /// If this test ever fails, the contract and the live MPC disagree on the
+    /// burner key — funds sent to the burner address would be unspendable.
+    #[test]
+    fn derive_burner_matches_mpc_logic() {
+        // Generator point as a NEAR-encoded secp256k1 pubkey (deterministic).
+        let root = "secp256k1:3SB8tA9Kbn7FBtT6GWR6AJk73QceudisHaGThPoLCDgC9tan7d3cwZFiDZtrmhSAf8aTynEdQ3N7KXhMm3nWhekP";
+        let account = "alice.near";
+        let path = "zns-alice-0";
+
+        // Contract derivation.
+        let (contract_taddr, contract_pk) =
+            derive_burner(root, account, path, false).expect("derive_burner failed");
+
+        // --- Inline MPC-equivalent derivation ---
+
+        // 1. Parse the root pubkey exactly as the contract does.
+        let root_pk = parse_near_pubkey(root).unwrap();
+
+        // 2. Compute tweak hash the exact same way as the MPC:
+        //    SHA3-256(prefix || account_id || "," || path)
+        let mut hasher = Sha3_256::new();
+        hasher.update(EPSILON_PREFIX.as_bytes());
+        hasher.update(account.as_bytes());
+        hasher.update(b",");
+        hasher.update(path.as_bytes());
+        let tweak_bytes: [u8; 32] = hasher.finalize().into();
+
+        // 3. Convert to scalar using the MPC's strict method:
+        //    Scalar::from_repr(bytes).into_option() — fails if bytes >= curve order.
+        use k256::elliptic_curve::PrimeField;
+        let mpc_scalar =
+            k256::Scalar::from_repr(*FieldBytes::from_slice(&tweak_bytes)).into_option();
+        assert!(
+            mpc_scalar.is_some(),
+            "tweak hash >= secp256k1 order — MPC would reject this path"
+        );
+        let mpc_scalar = mpc_scalar.unwrap();
+        assert!(
+            !bool::from(mpc_scalar.is_zero()),
+            "MPC derived zero scalar — contract would reject"
+        );
+
+        // 4. Contract uses reduce_bytes which always succeeds. For this test vector
+        //    the two methods must agree (probability of disagreement is ~2^-224).
+        let contract_scalar =
+            <k256::Scalar as Reduce<U256>>::reduce_bytes(FieldBytes::from_slice(&tweak_bytes));
+        assert_eq!(
+            mpc_scalar, contract_scalar,
+            "reduce_bytes disagrees with from_repr for this test vector"
+        );
+
+        // 5. MPC derives: child = root + tweak * G.
+        //    (The MPC writes it as G * tweak + public_key; addition is commutative.)
+        let mpc_child = (ProjectivePoint::from(*root_pk.as_affine())
+            + (ProjectivePoint::GENERATOR * mpc_scalar))
+            .to_affine();
+        let mpc_encoded = EncodedPoint::from(mpc_child).compress();
+        let mpc_pk = mpc_encoded.as_bytes();
+        assert_eq!(mpc_pk.len(), 33);
+
+        // 6. Addresses must match.
+        let mpc_taddr = {
+            let version = TADDR_VERSION_TESTNET; // [0x1D, 0x25]
+            let mut payload = Vec::with_capacity(22);
+            payload.extend_from_slice(&version);
+            payload.extend_from_slice(&hash160(mpc_pk));
+            bs58::encode(payload).with_check().into_string()
+        };
+
+        assert_eq!(
+            contract_pk.as_slice(), mpc_pk,
+            "contract pubkey does not match MPC-equivalent derivation"
+        );
+        assert_eq!(
+            contract_taddr, mpc_taddr,
+            "contract t-addr does not match MPC-equivalent derivation"
+        );
+    }
+
+    /// Test vector taken from the NEAR MPC snapshot test
+    /// (`near_mpc_crypto_types__kdf__tests__derive_tweak__has_not_changed`).
+    /// The snapshot proves the MPC has produced these exact tweak bytes for
+    /// these exact inputs. Our contract must hash to the same 32 bytes.
+    #[test]
+    fn derive_burner_mpc_tweak_snapshot_vector() {
+        let account = "dwefqwg";
+        let path = "frwewegwegweg";
+
+        let mut hasher = Sha3_256::new();
+        hasher.update(EPSILON_PREFIX.as_bytes());
+        hasher.update(account.as_bytes());
+        hasher.update(b",");
+        hasher.update(path.as_bytes());
+        let tweak_bytes: [u8; 32] = hasher.finalize().into();
+
+        // First entry from the MPC snapshot.
+        let expected: [u8; 32] = [
+            173, 45, 111, 193, 244, 69, 161, 180, 56, 48, 65, 94, 126, 110, 61, 3, 205, 7, 118,
+            115, 4, 120, 72, 160, 133, 241, 48, 194, 79, 83, 238, 0,
+        ];
+        assert_eq!(
+            tweak_bytes, expected,
+            "contract tweak hash does not match NEAR MPC snapshot for known inputs"
+        );
     }
 }

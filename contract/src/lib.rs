@@ -45,7 +45,7 @@ use near_sdk::{
     PromiseError,
 };
 
-mod zcash;
+pub mod zcash;
 use zcash::{compute_sighash_all, derive_burner, parse_tx, sha256, validate_burner_script};
 
 // ───────────────────────────────────────────────────────────────────────────

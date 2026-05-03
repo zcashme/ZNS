@@ -75,7 +75,7 @@ struct ResolvedListing {
 async fn resolve_name(
     indexer_url: &str,
     name: &str,
-) -> Result<(String, u64, u64, String), reqwest::Error> {
+) -> Result<(String, u64, u64, String, Option<String>), reqwest::Error> {
     let resp: serde_json::Value = reqwest::Client::new()
         .post(indexer_url)
         .json(&serde_json::json!({
@@ -94,7 +94,10 @@ async fn resolve_name(
         .as_str()
         .unwrap_or("")
         .to_string();
-    Ok((seller_ua, price, nonce, signature))
+    let pubkey = resp["result"]["listing"]["pubkey"]
+        .as_str()
+        .map(|s| s.to_string());
+    Ok((seller_ua, price, nonce, signature, pubkey))
 }
 
 fn cache_listing(
@@ -125,6 +128,18 @@ async fn ensure_listing(
     state: &AppState,
     name: &str,
 ) -> Result<ResolvedListing, axum::http::StatusCode> {
+    let (seller_ua, price_zat, nonce, signature, pubkey) = resolve_name(&state.cfg.indexer_rpc, name)
+        .await
+        .map_err(|e| {
+            tracing::error!("indexer resolve: {e}");
+            axum::http::StatusCode::BAD_GATEWAY
+        })?;
+
+    if seller_ua.is_empty() || price_zat == 0 || signature.is_empty() {
+        tracing::warn!("name not listed: {}", name);
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+
     let on_chain = state
         .near
         .view_zns::<Option<ContractListingView>>(
@@ -137,24 +152,56 @@ async fn ensure_listing(
             axum::http::StatusCode::BAD_GATEWAY
         })?;
 
-    if let Some(listing) = on_chain {
-        let local_id = cache_listing(state, &listing)?;
+    if let Some(existing) = on_chain {
+        if !existing.funded && nonce > existing.listing_nonce {
+            let args = serde_json::json!({
+                "name": name,
+                "seller_ua": seller_ua,
+                "price_zat": price_zat,
+                "nonce": nonce,
+                "signature_b64": signature,
+                "user_pubkey_b64": pubkey,
+            });
+            let deposit_yocto = 100_000_000_000_000_000_000_000u128;
+            let gas = 100_000_000_000_000u64;
+
+            let outcome = state
+                .near
+                .call_zns_mut("create_listing", args, gas, deposit_yocto)
+                .await
+                .map_err(|e| {
+                    tracing::error!("NEAR create_listing: {e}");
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+
+            let value = match outcome.status {
+                FinalExecutionStatus::SuccessValue(v) => v,
+                FinalExecutionStatus::Failure(err) => {
+                    tracing::error!("NEAR create_listing failure: {:?}", err);
+                    return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                }
+                other => {
+                    tracing::error!("NEAR create_listing unexpected status: {:?}", other);
+                    return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            };
+
+            let listing: ContractListingView = serde_json::from_slice(&value).map_err(|e| {
+                tracing::error!("decode create_listing result: {e}");
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            let local_id = cache_listing(state, &listing)?;
+            return Ok(ResolvedListing {
+                local_id,
+                contract: listing,
+            });
+        }
+
+        let local_id = cache_listing(state, &existing)?;
         return Ok(ResolvedListing {
             local_id,
-            contract: listing,
+            contract: existing,
         });
-    }
-
-    let (seller_ua, price_zat, nonce, signature) = resolve_name(&state.cfg.indexer_rpc, name)
-        .await
-        .map_err(|e| {
-            tracing::error!("indexer resolve: {e}");
-            axum::http::StatusCode::BAD_GATEWAY
-        })?;
-
-    if seller_ua.is_empty() || price_zat == 0 || signature.is_empty() {
-        tracing::warn!("name not listed: {}", name);
-        return Err(axum::http::StatusCode::NOT_FOUND);
     }
 
     let args = serde_json::json!({
@@ -163,7 +210,7 @@ async fn ensure_listing(
         "price_zat": price_zat,
         "nonce": nonce,
         "signature_b64": signature,
-        "user_pubkey_b64": null,
+        "user_pubkey_b64": pubkey,
     });
     let deposit_yocto = 100_000_000_000_000_000_000_000u128;
     let gas = 100_000_000_000_000u64;

@@ -69,3 +69,7 @@ tokio-util = "0.7"
 
 [dev-dependencies]
 tokio-test = "0.4"
+ripemd = "0.1"
+zip32 = "0.2"
+near-sdk = { version = "5", features = ["unit-testing"] }
+zns-contract = { path = "../contract" }

@@ -260,11 +260,6 @@ fn parse_update(rest: &str) -> Option<MemoAction> {
 
 fn parse_buy(rest: &str) -> Option<MemoAction> {
     // ZNS:BUY:<name>:<buyer_ua>:<sig>[:<user_pubkey>]
-    //
-    // 3 parts = admin-signed backward-compatible fallback.
-    // 4 parts = buyer-signed sovereignty path (sig validates against user_pubkey).
-    // The indexer verifies the signature via verify_and_authorize, which handles
-    // both admin and user paths generically.
     let parts: Vec<&str> = rest.splitn(4, ':').collect();
     if parts.len() < 3 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
         return None;

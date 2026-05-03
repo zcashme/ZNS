@@ -25,6 +25,7 @@ struct ListingItem {
     price: u64,
     nonce: u64,
     signature: String,
+    pubkey: Option<String>,
 }
 
 pub async fn run_worker(state: Arc<AppState>) {
@@ -74,7 +75,40 @@ async fn sync_once(state: &Arc<AppState>, client: &reqwest::Client) -> Result<()
                 .await;
 
             match on_chain {
-                Ok(Some(_)) => continue,
+                Ok(Some(existing)) => {
+                    if existing.funded {
+                        continue;
+                    }
+                    if listing.nonce > existing.listing_nonce {
+                        let deposit_yocto = 50_000_000_000_000_000_000_000u128;
+                        let gas = 50_000_000_000_000u64;
+                        tracing::info!(
+                            "replacing stale listing {} (nonce {} -> {})",
+                            item.name,
+                            existing.listing_nonce,
+                            listing.nonce
+                        );
+                        if let Err(e) = state
+                            .near
+                            .call_zns_mut(
+                                "create_listing",
+                                json!({
+                                    "name": item.name,
+                                    "seller_ua": item.address,
+                                    "price_zat": listing.price,
+                                    "nonce": listing.nonce,
+                                    "signature_b64": listing.signature,
+                                    "user_pubkey_b64": listing.pubkey,
+                                }),
+                                gas,
+                                deposit_yocto,
+                            )
+                            .await
+                        {
+                            tracing::error!("failed to replace listing {}: {e}", item.name);
+                        }
+                    }
+                }
                 Ok(None) => {
                     let deposit_yocto = 50_000_000_000_000_000_000_000u128;
                     let gas = 50_000_000_000_000u64;
@@ -89,7 +123,7 @@ async fn sync_once(state: &Arc<AppState>, client: &reqwest::Client) -> Result<()
                                 "price_zat": listing.price,
                                 "nonce": listing.nonce,
                                 "signature_b64": listing.signature,
-                                "user_pubkey_b64": null,
+                                "user_pubkey_b64": listing.pubkey,
                             }),
                             gas,
                             deposit_yocto,
