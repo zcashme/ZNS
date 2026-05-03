@@ -466,7 +466,7 @@ impl ZnsContract {
         buyer_pubkey_b64: String,
         admin_signature_b64: String,
         buyer_signature_b64: Option<String>,
-    ) -> serde_json::Value {
+    ) {
         let mut listing = self
             .listings
             .get(&listing_id)
@@ -581,11 +581,6 @@ impl ZnsContract {
             }),
         );
 
-        serde_json::json!({
-            "listing_id": listing_id,
-            "payout_tx_hash_hex": hex::encode(payout_tx_hash),
-            "payout_sighash_hex": hex::encode(payout_sighash),
-        })
     }
 
     // ── MPC signing flow ─────────────────────────────────────────────────
@@ -657,43 +652,6 @@ impl ZnsContract {
     }
 
     // ── Read-only queries ────────────────────────────────────────────────
-
-    pub fn get_buyer_burner(
-        &self,
-        name: String,
-        buyer_pubkey_b64: String,
-    ) -> serde_json::Value {
-        let existing = self
-            .listing_ids_by_name
-            .get(&name)
-            .and_then(|id| self.listings.get(id));
-        let Some(listing) = existing else {
-            env::panic_str("listing not found");
-        };
-        if listing.funded {
-            env::panic_str("listing already funded");
-        }
-        decode_pubkey_b64(&buyer_pubkey_b64)
-            .unwrap_or_else(|e| env::panic_str(&format!("buyer_pubkey invalid: {e}")));
-        let buyer_mpc_path = build_buyer_path(
-            &listing.name,
-            listing.listing_nonce,
-            &buyer_pubkey_b64,
-        );
-        assert!(buyer_mpc_path.len() <= MAX_PATH_LEN, "buyer mpc_path length");
-        let (burner_taddr, burner_pubkey) = derive_burner(
-            &self.mpc_root_pubkey,
-            env::current_account_id().as_str(),
-            &buyer_mpc_path,
-            self.mainnet,
-        )
-        .unwrap_or_else(|e| env::panic_str(&format!("buyer burner derivation failed: {e}")));
-        serde_json::json!({
-            "burner_taddr": burner_taddr,
-            "burner_pubkey_hex": hex::encode(burner_pubkey),
-            "mpc_path": buyer_mpc_path,
-        })
-    }
 
     pub fn get_listing(&self, id: u64) -> Option<Listing> {
         self.listings.get(&id).cloned()
