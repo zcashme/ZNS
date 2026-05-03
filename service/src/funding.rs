@@ -137,7 +137,7 @@ async fn submit_funding(
             &listing.name,
             &reg.buyer_ua,
             &reg.buyer_signature_b64,
-            &reg.buyer_pubkey_b64,
+            reg.is_sovereign.then_some(&reg.buyer_pubkey_b64),
         ),
         fee: Some(contract_listing.payout_fee_zat),
     })?;
@@ -224,7 +224,7 @@ async fn drive_payout(
             &listing.name,
             &reg.buyer_ua,
             &reg.buyer_signature_b64,
-            &reg.buyer_pubkey_b64,
+            reg.is_sovereign.then_some(&reg.buyer_pubkey_b64),
         ),
         fee: Some(contract_listing.payout_fee_zat),
     })?;
@@ -321,19 +321,26 @@ async fn call_contract_method(
 
 /// Build the BUY memo placed on the treasury Orchard output.
 ///
-/// Format: `ZNS:BUY:<name>:<buyer_ua>:<buyer_sig_b64>:<buyer_pubkey_b64>`.
-/// The buyer signature was already verified by both the relayer's POST
-/// handler and the contract's submit_funding — this just embeds it on
-/// chain so any indexer can re-verify the sale.
+/// Sovereign format: `ZNS:BUY:<name>:<buyer_ua>:<buyer_sig_b64>:<buyer_pubkey_b64>`.
+/// Admin format:    `ZNS:BUY:<name>:<buyer_ua>:<admin_sig_b64>` (no pubkey).
+///
+/// The signature was already verified by both the relayer's POST handler
+/// and the contract's submit_funding — this just embeds it on chain so
+/// any indexer can re-verify the sale.
 fn build_buy_memo(
     listing_name: &str,
     buyer_ua: &str,
     buyer_signature_b64: &str,
-    buyer_pubkey_b64: &str,
+    buyer_pubkey_b64: Option<&str>,
 ) -> [u8; 512] {
-    let memo = format!(
-        "ZNS:BUY:{listing_name}:{buyer_ua}:{buyer_signature_b64}:{buyer_pubkey_b64}"
-    );
+    let memo = match buyer_pubkey_b64 {
+        Some(pk) => format!(
+            "ZNS:BUY:{listing_name}:{buyer_ua}:{buyer_signature_b64}:{pk}"
+        ),
+        None => format!(
+            "ZNS:BUY:{listing_name}:{buyer_ua}:{buyer_signature_b64}"
+        ),
+    };
     let mut bytes = [0u8; 512];
     let raw = memo.as_bytes();
     let len = raw.len().min(512);

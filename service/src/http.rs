@@ -280,13 +280,22 @@ async fn create_purchase_handler(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let buy_memo = format!(
-        "ZNS:BUY:{}:{}:{}:{}",
-        listing.contract.name,
-        body.buyer_ua,
-        sig_b64,
-        pk_b64,
-    );
+    let buy_memo = if is_sovereign {
+        format!(
+            "ZNS:BUY:{}:{}:{}:{}",
+            listing.contract.name,
+            body.buyer_ua,
+            sig_b64,
+            pk_b64,
+        )
+    } else {
+        format!(
+            "ZNS:BUY:{}:{}:{}",
+            listing.contract.name,
+            body.buyer_ua,
+            sig_b64,
+        )
+    };
 
     Ok(Json(CreatePurchaseResponse {
         registration_id,
