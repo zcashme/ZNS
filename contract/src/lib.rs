@@ -476,6 +476,7 @@ impl ZnsContract {
         utxo_script_pubkey: Vec<u8>,
         payout_tx: Vec<u8>,
         buyer_ua: String,
+        admin_signature_b64: String,
         buyer_signature_b64: Option<String>,
         buyer_pubkey_b64: Option<String>,
     ) {
@@ -494,6 +495,12 @@ impl ZnsContract {
 
         validate_unified_address(&buyer_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("buyer_ua invalid: {e}")));
+
+        let admin_payload = format!("BUY:{}:{buyer_ua}", listing.name);
+        assert!(
+            ed25519_verify_b64(&admin_signature_b64, &admin_payload, &self.admin_pubkey),
+            "admin signature invalid"
+        );
 
         let (burner_pubkey, mpc_path) = match (&buyer_signature_b64, &buyer_pubkey_b64) {
             (Some(sig), Some(pk_b64)) => {
