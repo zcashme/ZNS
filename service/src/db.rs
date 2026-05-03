@@ -35,6 +35,7 @@ pub struct BuyerRegistration {
     pub buyer_ua: String,
     pub buyer_signature_b64: String,
     pub buyer_pubkey_b64: String,
+    pub admin_signature_b64: String,
     /// True if the buyer supplied their own signature (sovereign override);
     /// false if the relayer signed on their behalf with the admin key.
     pub is_sovereign: bool,
@@ -97,18 +98,19 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_listings_burner ON listings(burner_taddr);
 
             CREATE TABLE IF NOT EXISTS buyer_registrations (
-                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                listing_id           INTEGER NOT NULL REFERENCES listings(id),
-                buyer_ua             TEXT NOT NULL,
-                buyer_signature_b64  TEXT NOT NULL,
-                buyer_pubkey_b64     TEXT NOT NULL,
-                is_sovereign         INTEGER NOT NULL DEFAULT 0,
-                status               TEXT NOT NULL,
-                created_at           TEXT NOT NULL,
-                funding_txid         TEXT,
-                funding_vout         INTEGER,
-                build_height         INTEGER,
-                payout_txid          TEXT
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id            INTEGER NOT NULL REFERENCES listings(id),
+                buyer_ua              TEXT NOT NULL,
+                buyer_signature_b64   TEXT NOT NULL,
+                buyer_pubkey_b64      TEXT NOT NULL,
+                admin_signature_b64  TEXT NOT NULL,
+                is_sovereign          INTEGER NOT NULL DEFAULT 0,
+                status                TEXT NOT NULL,
+                created_at            TEXT NOT NULL,
+                funding_txid          TEXT,
+                funding_vout          INTEGER,
+                build_height          INTEGER,
+                payout_txid           TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_reg_listing ON buyer_registrations(listing_id);
             CREATE INDEX IF NOT EXISTS idx_reg_status  ON buyer_registrations(status);
@@ -212,6 +214,7 @@ impl Store {
         buyer_ua: &str,
         buyer_signature_b64: &str,
         buyer_pubkey_b64: &str,
+        admin_signature_b64: &str,
         is_sovereign: bool,
     ) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
@@ -219,13 +222,14 @@ impl Store {
         conn.execute(
             "INSERT INTO buyer_registrations (
                 listing_id, buyer_ua, buyer_signature_b64, buyer_pubkey_b64,
-                is_sovereign, status, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                admin_signature_b64, is_sovereign, status, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 listing_id,
                 buyer_ua,
                 buyer_signature_b64,
                 buyer_pubkey_b64,
+                admin_signature_b64,
                 is_sovereign as i64,
                 RegistrationStatus::AwaitingPayment.as_str(),
                 now,
@@ -242,8 +246,8 @@ impl Store {
         let conn = self.lock()?;
         conn.query_row(
             "SELECT id, listing_id, buyer_ua, buyer_signature_b64, buyer_pubkey_b64,
-                    is_sovereign, status, created_at, funding_txid, funding_vout,
-                    build_height, payout_txid
+                    admin_signature_b64, is_sovereign, status, created_at, funding_txid,
+                    funding_vout, build_height, payout_txid
              FROM buyer_registrations
              WHERE listing_id = ?1 AND status IN ('awaiting_payment','submitted')
              LIMIT 1",
@@ -258,8 +262,8 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT id, listing_id, buyer_ua, buyer_signature_b64, buyer_pubkey_b64,
-                    is_sovereign, status, created_at, funding_txid, funding_vout,
-                    build_height, payout_txid
+                    admin_signature_b64, is_sovereign, status, created_at, funding_txid,
+                    funding_vout, build_height, payout_txid
              FROM buyer_registrations
              WHERE status IN ('awaiting_payment','submitted')
              ORDER BY created_at",
@@ -326,17 +330,17 @@ fn row_to_listing(row: &rusqlite::Row) -> rusqlite::Result<Listing> {
 }
 
 fn row_to_registration(row: &rusqlite::Row) -> rusqlite::Result<BuyerRegistration> {
-    let status_str: String = row.get(6)?;
-    let created_at_str: String = row.get(7)?;
+    let status_str: String = row.get(7)?;
+    let created_at_str: String = row.get(8)?;
     let status = RegistrationStatus::from_str(&status_str).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
-            6,
+            7,
             rusqlite::types::Type::Text,
             e.to_string().into(),
         )
     })?;
     let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
+        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
     })?;
     Ok(BuyerRegistration {
         id: row.get(0)?,
@@ -344,12 +348,13 @@ fn row_to_registration(row: &rusqlite::Row) -> rusqlite::Result<BuyerRegistratio
         buyer_ua: row.get(2)?,
         buyer_signature_b64: row.get(3)?,
         buyer_pubkey_b64: row.get(4)?,
-        is_sovereign: row.get::<_, i64>(5)? != 0,
+        admin_signature_b64: row.get(5)?,
+        is_sovereign: row.get::<_, i64>(6)? != 0,
         status,
         created_at,
-        funding_txid: row.get(8)?,
-        funding_vout: row.get(9)?,
-        build_height: row.get(10)?,
-        payout_txid: row.get(11)?,
+        funding_txid: row.get(9)?,
+        funding_vout: row.get(10)?,
+        build_height: row.get(11)?,
+        payout_txid: row.get(12)?,
     })
 }

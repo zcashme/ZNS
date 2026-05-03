@@ -215,7 +215,15 @@ async fn create_purchase_handler(
     // Sovereign override: if the buyer supplies their own ed25519 sig+pk,
     // we verify and use those instead. Either way the DB stores final
     // credentials and the on-chain memo embeds them.
-    let (sig_b64, pk_b64, is_sovereign) =
+    let Some(signer) = state.memo_signer.as_ref() else {
+        tracing::warn!(
+            "no admin memo signer configured for {}",
+            listing.contract.name
+        );
+        return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let (sig_b64, pk_b64, admin_sig_b64, is_sovereign) =
         match (body.buyer_signature_b64, body.buyer_pubkey_b64) {
             (Some(sig), Some(pk)) => {
                 if !crate::memo::verify_buy_signature(
@@ -230,19 +238,14 @@ async fn create_purchase_handler(
                     );
                     return Err(axum::http::StatusCode::UNAUTHORIZED);
                 }
-                (sig, pk, true)
+                let (admin_sig, _) =
+                    signer.sign_buy_credentials(&listing.contract.name, &body.buyer_ua);
+                (sig, pk, admin_sig, true)
             }
             _ => {
-                let Some(signer) = state.memo_signer.as_ref() else {
-                    tracing::warn!(
-                        "no admin key configured and buyer didn't sign for {}",
-                        listing.contract.name
-                    );
-                    return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
-                };
                 let (sig, pk) =
                     signer.sign_buy_credentials(&listing.contract.name, &body.buyer_ua);
-                (sig, pk, false)
+                (sig.clone(), pk, sig, false)
             }
         };
 
@@ -269,6 +272,7 @@ async fn create_purchase_handler(
             &body.buyer_ua,
             &sig_b64,
             &pk_b64,
+            &admin_sig_b64,
             is_sovereign,
         )
         .map_err(|e| {

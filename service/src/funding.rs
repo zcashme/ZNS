@@ -160,6 +160,7 @@ async fn submit_funding(
             "utxo_script_pubkey": utxo.script,
             "payout_tx": payout_tx,
             "buyer_ua": reg.buyer_ua,
+            "admin_signature_b64": reg.admin_signature_b64,
             "buyer_signature_b64": sovereign_sig,
             "buyer_pubkey_b64": sovereign_pk,
         }),
