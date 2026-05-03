@@ -806,44 +806,90 @@ fn validate_unified_address(ua: &str, mainnet: bool) -> Result<(), &'static str>
     if hrp != expected {
         return Err("wrong HRP for network");
     }
-    let data: Vec<u8> = parsed.byte_iter().collect();
-    if data.is_empty() {
-        return Err("empty receiver list");
+
+    let mut data: Vec<u8> = parsed.byte_iter().collect();
+    f4jumble::f4jumble_inv_mut(&mut data).map_err(|_| "F4Jumble decode failed")?;
+
+    if data.len() < 16 {
+        return Err("payload too short for padding");
     }
-    let mut offset = 0;
-    let mut count = 0;
-    while offset < data.len() {
-        if offset + 2 > data.len() {
-            return Err("truncated receiver header");
-        }
-        let typecode = data[offset];
-        let len = data[offset + 1] as usize;
-        offset += 2;
+    let padding_len = hrp.len().min(16);
+    let (payload, padding) = data.split_at(data.len() - 16);
+    if &padding[..padding_len] != hrp.as_bytes() {
+        return Err("invalid padding");
+    }
+
+    let mut cursor: &[u8] = payload;
+    let mut prev_typecode: Option<u32> = None;
+    let mut has_shielded = false;
+    let mut has_orchard = false;
+    let mut has_p2pkh = false;
+    let mut has_p2sh = false;
+
+    while !cursor.is_empty() {
+        let typecode = zcash_encoding::CompactSize::read(&mut cursor)
+            .map_err(|_| "invalid typecode")? as u32;
+        let len = zcash_encoding::CompactSize::read(&mut cursor)
+            .map_err(|_| "invalid receiver length")? as usize;
+
         if len == 0 {
             return Err("empty receiver payload");
         }
-        if offset + len > data.len() {
+        if cursor.len() < len {
             return Err("truncated receiver payload");
         }
-        match typecode {
-            0x00 | 0x01 => {
-                if len != 20 {
-                    return Err("invalid transparent receiver length");
-                }
+
+        if let Some(prev) = prev_typecode {
+            if typecode <= prev {
+                return Err("duplicate or out-of-order typecode");
             }
-            0x02 | 0x03 => {
-                if len != 43 {
-                    return Err("invalid shielded receiver length");
-                }
-            }
-            _ => {}
         }
-        offset += len;
-        count += 1;
+        prev_typecode = Some(typecode);
+
+        match typecode {
+            0x00 => {
+                if len != 20 {
+                    return Err("invalid P2PKH receiver length");
+                }
+                has_p2pkh = true;
+            }
+            0x01 => {
+                if len != 20 {
+                    return Err("invalid P2SH receiver length");
+                }
+                has_p2sh = true;
+            }
+            0x02 => {
+                if len != 43 {
+                    return Err("invalid Sapling receiver length");
+                }
+                has_shielded = true;
+            }
+            0x03 => {
+                if len != 43 {
+                    return Err("invalid Orchard receiver length");
+                }
+                has_shielded = true;
+                has_orchard = true;
+            }
+            _ => {
+                has_shielded = true;
+            }
+        }
+
+        cursor = &cursor[len..];
     }
-    if count == 0 {
-        return Err("no receivers");
+
+    if has_p2pkh && has_p2sh {
+        return Err("UA contains both P2PKH and P2SH");
     }
+    if !has_shielded {
+        return Err("UA contains only transparent receivers");
+    }
+    if !has_orchard {
+        return Err("UA has no Orchard receiver");
+    }
+
     Ok(())
 }
 
@@ -856,14 +902,23 @@ mod tests {
     use super::*;
 
     fn make_ua(hrp: &str, receivers: &[(u8, &[u8])]) -> String {
-        let hrp = bech32::Hrp::parse(hrp).unwrap();
-        let mut data = vec![];
+        let hrp_parsed = bech32::Hrp::parse(hrp).unwrap();
+        let mut raw = vec![];
         for (tc, payload) in receivers {
-            data.push(*tc);
-            data.push(payload.len() as u8);
-            data.extend_from_slice(payload);
+            zcash_encoding::CompactSize::write(&mut raw, *tc as usize).unwrap();
+            zcash_encoding::CompactSize::write(&mut raw, payload.len()).unwrap();
+            raw.extend_from_slice(payload);
         }
-        bech32::encode::<bech32::Bech32m>(hrp, &data).unwrap()
+        let mut padding = [0u8; 16];
+        padding[..hrp.len()].copy_from_slice(hrp.as_bytes());
+        raw.extend_from_slice(&padding);
+        f4jumble::f4jumble_mut(&mut raw).unwrap();
+        bech32::encode::<bech32::Bech32m>(hrp_parsed, &raw).unwrap()
+    }
+
+    fn make_ua_raw(hrp: &str, raw: &[u8]) -> String {
+        let hrp_parsed = bech32::Hrp::parse(hrp).unwrap();
+        bech32::encode::<bech32::Bech32m>(hrp_parsed, raw).unwrap()
     }
 
     #[test]
@@ -880,13 +935,58 @@ mod tests {
 
     #[test]
     fn valid_testnet_ua() {
-        let ua = make_ua("utest", &[(0x02, &[0u8; 43])]);
+        let ua = make_ua("utest", &[(0x02, &[0u8; 43]), (0x03, &[0u8; 43])]);
         assert!(validate_unified_address(&ua, false).is_ok());
     }
 
     #[test]
     fn invalid_wrong_hrp_mainnet() {
         let ua = make_ua("utest", &[(0x03, &[0u8; 43])]);
+        assert!(validate_unified_address(&ua, true).is_err());
+    }
+
+    #[test]
+    fn invalid_f4jumble_length() {
+        let hrp = bech32::Hrp::parse("utest").unwrap();
+        let short = vec![0u8; 10];
+        let ua = bech32::encode::<bech32::Bech32m>(hrp, &short).unwrap();
+        assert!(validate_unified_address(&ua, false).is_err());
+    }
+
+    #[test]
+    fn invalid_padding() {
+        let mut raw = vec![0x03u8];
+        zcash_encoding::CompactSize::write(&mut raw, 43usize).unwrap();
+        raw.extend_from_slice(&[0u8; 43]);
+        let mut padding = [0u8; 16];
+        padding[..5].copy_from_slice(b"wrong");
+        raw.extend_from_slice(&padding);
+        f4jumble::f4jumble_mut(&mut raw).unwrap();
+        let ua = make_ua_raw("utest", &raw);
+        assert!(validate_unified_address(&ua, false).is_err());
+    }
+
+    #[test]
+    fn invalid_orchard_length() {
+        let ua = make_ua("u", &[(0x03, &[0u8; 42])]);
+        assert!(validate_unified_address(&ua, true).is_err());
+    }
+
+    #[test]
+    fn invalid_duplicate_typecode() {
+        let ua = make_ua("u", &[(0x03, &[0u8; 43]), (0x03, &[0u8; 43])]);
+        assert!(validate_unified_address(&ua, true).is_err());
+    }
+
+    #[test]
+    fn invalid_both_p2pkh_and_p2sh() {
+        let ua = make_ua("u", &[(0x00, &[0u8; 20]), (0x01, &[0u8; 20]), (0x03, &[0u8; 43])]);
+        assert!(validate_unified_address(&ua, true).is_err());
+    }
+
+    #[test]
+    fn invalid_no_orchard() {
+        let ua = make_ua("u", &[(0x02, &[0u8; 43])]);
         assert!(validate_unified_address(&ua, true).is_err());
     }
 
