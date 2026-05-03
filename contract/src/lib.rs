@@ -416,6 +416,11 @@ impl ZnsContract {
     ) {
         let listing = self.listings.get(&id).expect("not found").clone();
         assert!(!listing.funded, "cannot cancel a funded listing");
+        assert_eq!(
+            nonce,
+            listing.listing_nonce,
+            "nonce mismatch"
+        );
 
         let pubkey: [u8; 32] = if let Some(pk_b64) = user_pubkey_b64 {
             decode_pubkey_b64(&pk_b64)
