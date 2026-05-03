@@ -440,35 +440,22 @@ impl ZnsContract {
     /// Submit a funding UTXO + pre-built payout transaction, locking the
     /// listing to a specific buyer.
     ///
-    /// The relayer is the only caller in this path — the admin signature
-    /// over `BUY:<name>:<buyer_ua>` gates access. The contract:
-    ///
-    ///   1. Verifies the admin-signed `BUY:<name>:<buyer_ua>` against
-    ///      `self.admin_pubkey`.
-    ///   2. Derives the per-buyer burner from `name + nonce + buyer_pubkey_b64`.
-    ///   3. Verifies the UTXO scriptPubKey commits to that burner.
-    ///   4. If a sovereign signature is supplied, verifies it over
-    ///      `BUY:<name>:<buyer_ua>` against `buyer_pubkey_b64`.
-    ///   5. Requires `utxo_value_zats == price_zat` (exact).
-    ///   6. Parses the payout tx, validates structure + value balance.
-    ///   7. Computes the sighash, stores everything, marks listing funded.
-    ///
-    /// Per-buyer burners make it impossible for a third party to spend
-    /// another buyer's UTXO — the burner derivation path includes the
-    /// Submit a funding UTXO + pre-built payout transaction, locking the
-    /// listing to a specific buyer.
-    ///
-    /// Two mutually exclusive paths:
+    /// Admin signature over `BUY:<name>:<buyer_ua>` is verified unconditionally.
+    /// Then the contract branches into two mutually exclusive paths:
     ///
     ///   * **Admin path** — `buyer_signature_b64` and `buyer_pubkey_b64` are
     ///     both `None`.  The UTXO is expected at the listing-level burner and
-    ///     the MPC signs with `listing.mpc_path`.  No extra signature check.
+    ///     the MPC signs with `listing.mpc_path`.
     ///
     ///   * **Sovereign path** — both are `Some`.  The buyer's Ed25519 sig over
-    ///     `BUY:<name>:<buyer_ua>` is verified, a per-buyer burner is derived,
-    ///     and the MPC signs with a per-buyer path.
+    ///     `BUY:<name>:<buyer_ua>` is additionally verified, a per-buyer burner
+    ///     is derived, and the MPC signs with a per-buyer path.
     ///
     /// Mixed `Some/None` panics.
+    ///
+    /// The contract then validates the UTXO scriptPubKey, payout tx structure,
+    /// and value balance before computing the sighash and marking the listing
+    /// funded.
     pub fn submit_funding(
         &mut self,
         listing_id: u64,
