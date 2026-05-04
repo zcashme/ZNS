@@ -157,6 +157,9 @@ pub struct Listing {
     // Per-buyer burner path + key (set by submit_funding, used by MPC).
     pub buyer_mpc_path: Option<String>,
     pub buyer_burner_pubkey: Option<Vec<u8>>,
+
+    // Ed25519 pubkey that authorized this listing (None = admin key).
+    pub listing_pubkey: Option<[u8; 32]>,
 }
 
 
@@ -304,11 +307,12 @@ impl ZnsContract {
             "price_zat must exceed payout fee"
         );
 
-        let pubkey: [u8; 32] = if let Some(pk_b64) = user_pubkey_b64 {
-            decode_pubkey_b64(&pk_b64)
-                .unwrap_or_else(|e| env::panic_str(&format!("user_pubkey invalid: {e}")))
+        let (pubkey, listing_pubkey) = if let Some(pk_b64) = user_pubkey_b64 {
+            let pk = decode_pubkey_b64(&pk_b64)
+                .unwrap_or_else(|e| env::panic_str(&format!("user_pubkey invalid: {e}")));
+            (pk, Some(pk))
         } else {
-            self.admin_pubkey
+            (self.admin_pubkey, None)
         };
 
         let payload = format!("LIST:{name}:{price_zat}:{nonce}");
@@ -375,6 +379,7 @@ impl ZnsContract {
             payout_signature: None,
             buyer_mpc_path: None,
             buyer_burner_pubkey: None,
+            listing_pubkey,
         };
         self.listings.insert(id, listing.clone());
         self.listing_ids_by_name.insert(name.clone(), id);
@@ -418,9 +423,21 @@ impl ZnsContract {
         );
 
         let pubkey: [u8; 32] = if let Some(pk_b64) = user_pubkey_b64 {
-            decode_pubkey_b64(&pk_b64)
-                .unwrap_or_else(|e| env::panic_str(&format!("user_pubkey invalid: {e}")))
+            let pk = decode_pubkey_b64(&pk_b64)
+                .unwrap_or_else(|e| env::panic_str(&format!("user_pubkey invalid: {e}")));
+            // Must match the key that created this listing.
+            assert_eq!(
+                listing.listing_pubkey,
+                Some(pk),
+                "cancel pubkey does not match listing creator"
+            );
+            pk
         } else {
+            // Admin path: listing must have been admin-created (no stored pubkey).
+            assert!(
+                listing.listing_pubkey.is_none(),
+                "sovereign listing requires user pubkey to cancel"
+            );
             self.admin_pubkey
         };
 
