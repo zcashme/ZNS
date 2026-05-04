@@ -1,26 +1,3 @@
-//! Zcash v5 (NU5+) transaction parsing and ZIP-244 sighash computation.
-//!
-//! ## Accepted transaction shape
-//!
-//! The contract only accepts transactions with this exact structure:
-//!
-//! | Component         | Constraint                                       |
-//! |-------------------|--------------------------------------------------|
-//! | Header            | version `0x80000005`, version_group_id `0x26A7270A` |
-//! | Transparent       | exactly 1 input, 0 outputs                       |
-//! | Sapling           | 0 spends, 0 outputs (bundle empty)               |
-//! | Orchard           | N actions where N >= 1                           |
-//!
-//! This narrow shape keeps the parser small and the sighash deterministic.
-//! Anything outside this envelope is rejected at parse time.
-//!
-//! ## Key responsibilities
-//!
-//! * **parse_tx** — strict v5/NU5 parser that validates the tx shape above
-//! * **derive_burner** — determinstic burner key/t-addr from MPC root + path
-//! * **validate_burner_script** — verify a P2PKH scriptPubKey commits to the burner pubkey
-//! * **compute_sighash_all** — ZIP-244 SIGHASH_ALL digest the MPC must sign
-
 use blake2b_simd::Params;
 use k256::{
     elliptic_curve::{bigint::U256, ops::Reduce, sec1::FromEncodedPoint},
@@ -30,18 +7,8 @@ use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
 use sha3::Sha3_256;
 
-// ───────────────────────────────────────────────────────────────────────────
-// Constants
-// ───────────────────────────────────────────────────────────────────────────
-
-/// Prefix used in the epsilon derivation (ZIP-32 / BIP-32 analogue for MPC).
 const EPSILON_PREFIX: &str = "near-mpc-recovery v0.1.0 epsilon derivation:";
 
-// ───────────────────────────────────────────────────────────────────────────
-// Hash functions
-// ───────────────────────────────────────────────────────────────────────────
-
-/// HASH160 = RIPEMD-160(SHA-256(data)).  Used for P2PKH addresses.
 pub fn hash160(data: &[u8]) -> [u8; 20] {
     let sha = Sha256::digest(data);
     let ripe = <Ripemd160 as Digest>::digest(sha);
@@ -50,7 +17,6 @@ pub fn hash160(data: &[u8]) -> [u8; 20] {
     out
 }
 
-/// Single SHA-256.  Used for tx hashes and memo commitments.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let hash = Sha256::digest(data);
     let mut out = [0u8; 32];
@@ -58,17 +24,12 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Blake2b with a 16-byte personalization string (ZIP-244 convention).
 fn blake2b_personal(personal: &[u8; 16], data: &[u8]) -> [u8; 32] {
     let h = Params::new().hash_length(32).personal(personal).hash(data);
     let mut out = [0u8; 32];
     out.copy_from_slice(h.as_bytes());
     out
 }
-
-// ───────────────────────────────────────────────────────────────────────────
-// ZIP-244 personalization strings (each exactly 16 bytes)
-// ───────────────────────────────────────────────────────────────────────────
 
 const P_HEADERS:    &[u8; 16] = b"ZTxIdHeadersHash";
 const P_TRANSPARENT:&[u8; 16] = b"ZTxIdTranspaHash";
@@ -80,11 +41,10 @@ const P_SCRIPTS:    &[u8; 16] = b"ZTxTrScriptsHash";
 const P_TXIN:       &[u8; 16] = b"Zcash___TxInHash";
 const P_SAPLING:    &[u8; 16] = b"ZTxIdSaplingHash";
 const P_ORCHARD:    &[u8; 16] = b"ZTxIdOrchardHash";
-const P_ORCH_AC:    &[u8; 16] = b"ZTxIdOrcActCHash"; // orchard actions compact
-const P_ORCH_AM:    &[u8; 16] = b"ZTxIdOrcActMHash"; // orchard actions memos
-const P_ORCH_AN:    &[u8; 16] = b"ZTxIdOrcActNHash"; // orchard actions non-compact
+const P_ORCH_AC:    &[u8; 16] = b"ZTxIdOrcActCHash";
+const P_ORCH_AM:    &[u8; 16] = b"ZTxIdOrcActMHash";
+const P_ORCH_AN:    &[u8; 16] = b"ZTxIdOrcActNHash";
 
-/// Build the top-level Blake2b personalization string from a branch id.
 fn top_level_personal(branch_id: u32) -> [u8; 16] {
     let mut p = [0u8; 16];
     p[..12].copy_from_slice(b"ZcashTxHash_");
@@ -92,11 +52,6 @@ fn top_level_personal(branch_id: u32) -> [u8; 16] {
     p
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Compact size encoding (Bitcoin / Zcash varint)
-// ───────────────────────────────────────────────────────────────────────────
-
-/// Read a variable-length integer (compact size uint).  Advances `offset`.
 fn read_compact_size(data: &[u8], offset: &mut usize) -> Option<u64> {
     let first = *data.get(*offset)?;
     *offset += 1;
@@ -124,7 +79,6 @@ fn read_compact_size(data: &[u8], offset: &mut usize) -> Option<u64> {
     Some(val)
 }
 
-/// Encode a u64 as a compact size byte sequence.
 fn encode_compact_size(value: u64) -> Vec<u8> {
     if value <= 252 {
         vec![value as u8]
@@ -142,10 +96,6 @@ fn encode_compact_size(value: u64) -> Vec<u8> {
         v
     }
 }
-
-// ───────────────────────────────────────────────────────────────────────────
-// Low-level cursor helpers (little-endian reads, advances offset)
-// ───────────────────────────────────────────────────────────────────────────
 
 fn read_u32_le(data: &[u8], offset: &mut usize) -> Option<u32> {
     let bytes = data.get(*offset..*offset + 4)?;
@@ -175,11 +125,6 @@ fn read_array<const N: usize>(data: &[u8], offset: &mut usize) -> Option<[u8; N]
     Some(out)
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Parsed transaction types
-// ───────────────────────────────────────────────────────────────────────────
-
-/// A single transparent input within the parsed tx.
 #[derive(Debug, Clone)]
 pub struct TransparentInput {
     pub prevout_txid: [u8; 32],
@@ -187,32 +132,25 @@ pub struct TransparentInput {
     pub sequence: u32,
 }
 
-/// A single Orchard action.  EncCiphertext is 580 bytes; OutCiphertext is 80.
 #[derive(Debug, Clone)]
 pub struct OrchardAction {
-    pub cv: [u8; 32],             // value commitment
+    pub cv: [u8; 32],
     pub nullifier: [u8; 32],
-    pub rk: [u8; 32],             // randomized public key
-    pub cmx: [u8; 32],            // note commitment
+    pub rk: [u8; 32],
+    pub cmx: [u8; 32],
     pub ephemeral_key: [u8; 32],
-    pub enc_ciphertext: Vec<u8>,  // 580 bytes
+    pub enc_ciphertext: Vec<u8>,
     pub out_ciphertext: [u8; 80],
 }
 
-/// The full Orchard bundle within a v5 tx.
 #[derive(Debug, Clone)]
 pub struct OrchardBundle {
     pub actions: Vec<OrchardAction>,
     pub flags: u8,
-    pub value_balance: i64,       // net value entering the transparent pool
+    pub value_balance: i64,
     pub anchor: [u8; 32],
 }
 
-/// The parsed representation of a Zcash v5 transaction.
-///
-/// Only the fields relevant to sighash computation are retained.
-/// The parser enforces exactly 1 transparent input, 0 transparent outputs,
-/// and 0 Sapling spends/outputs.
 #[derive(Debug, Clone)]
 pub struct ParsedTx {
     pub version: u32,
@@ -224,18 +162,8 @@ pub struct ParsedTx {
     pub orchard: Option<OrchardBundle>,
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Transaction parser
-// ───────────────────────────────────────────────────────────────────────────
-
-/// Strict v5 / NU5 parser for our payout/refund tx shape.
-///
-/// Fails with an `Err` string if the tx does not match the accepted shape
-/// described at the top of this module.
 pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
     let mut c = 0usize;
-
-    // ── Header ──────────────────────────────────────────────────────────
 
     let version = read_u32_le(raw, &mut c).ok_or("short version")?;
     if version != 0x80000005 {
@@ -249,9 +177,6 @@ pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
     let lock_time = read_u32_le(raw, &mut c).ok_or("short lock_time")?;
     let expiry_height = read_u32_le(raw, &mut c).ok_or("short expiry")?;
 
-    // ── Transparent bundle ──────────────────────────────────────────────
-
-    // Inputs: must be exactly 1.
     let tx_in_count = read_compact_size(raw, &mut c).ok_or("short tx_in_count")?;
     if tx_in_count != 1 {
         return Err("expected exactly 1 transparent input");
@@ -259,9 +184,6 @@ pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
     let prevout_txid = read_array(raw, &mut c).ok_or("short prevout txid")?;
     let prevout_vout = read_u32_le(raw, &mut c).ok_or("short prevout vout")?;
     let script_len = read_compact_size(raw, &mut c).ok_or("short script_sig len")? as usize;
-
-    // scriptSig is empty in our unsigned txs (signature is filled in
-    // post-MPC), so we just skip past it.
     c = c.checked_add(script_len).ok_or("offset overflow")?;
     if c > raw.len() {
         return Err("script_sig truncated");
@@ -273,17 +195,11 @@ pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
         sequence,
     };
 
-    // Outputs: must be 0.
     let tx_out_count = read_compact_size(raw, &mut c).ok_or("short tx_out_count")?;
     if tx_out_count != 0 {
         return Err("expected 0 transparent outputs");
     }
 
-    // ── Sapling bundle ──────────────────────────────────────────────────
-
-    // Enforced empty.  When both spends and outputs are zero, the
-    // valueBalance, anchor, proofs, spendAuth sigs, and bindingSig
-    // fields are all omitted per ZIP-225 §7.1.2.
     let sapling_spend_count = read_compact_size(raw, &mut c).ok_or("short sapling spends")?;
     if sapling_spend_count != 0 {
         return Err("sapling spends must be empty");
@@ -292,8 +208,6 @@ pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
     if sapling_output_count != 0 {
         return Err("sapling outputs must be empty");
     }
-
-    // ── Orchard bundle ──────────────────────────────────────────────────
 
     let n_actions = read_compact_size(raw, &mut c).ok_or("short orchard actions")?;
     let orchard = if n_actions == 0 {
@@ -325,8 +239,6 @@ pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
         let value_balance = read_i64_le(raw, &mut c).ok_or("short value_balance")?;
         let anchor: [u8; 32] = read_array(raw, &mut c).ok_or("short anchor")?;
 
-        // Skip Orchard proofs, spend-auth signatures, and binding signature.
-        // These are verified on-chain by the Zcash network, not by our contract.
         let proofs_size = read_compact_size(raw, &mut c).ok_or("short proofs size")? as usize;
         c = c.checked_add(proofs_size).ok_or("offset overflow")?;
         if c > raw.len() {
@@ -337,7 +249,7 @@ pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
         if c > raw.len() {
             return Err("orchard spend-auth sigs truncated");
         }
-        c = c.checked_add(64).ok_or("offset overflow")?; // bindingSigOrchard
+        c = c.checked_add(64).ok_or("offset overflow")?;
         if c > raw.len() {
             return Err("orchard binding sig truncated");
         }
@@ -350,7 +262,6 @@ pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
         })
     };
 
-    // No trailing data allowed.
     if c != raw.len() {
         return Err("trailing bytes after tx");
     }
@@ -366,17 +277,6 @@ pub fn parse_tx(raw: &[u8]) -> Result<ParsedTx, &'static str> {
     })
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Script verification
-// ───────────────────────────────────────────────────────────────────────────
-
-/// Validate a 25-byte P2PKH scriptPubKey commits to `burner_pubkey`.
-///
-/// Expected format:
-/// ```text
-/// 76 a9 14 <20-byte-pubkey-hash> 88 ac
-///  OP_DUP OP_HASH160 OP_PUSH20 ... OP_EQUALVERIFY OP_CHECKSIG
-/// ```
 pub fn validate_burner_script(script: &[u8], burner_pubkey: &[u8; 33]) -> Result<(), &'static str> {
     if script.len() != 25 {
         return Err("scriptPubKey wrong length");
@@ -393,37 +293,17 @@ pub fn validate_burner_script(script: &[u8], burner_pubkey: &[u8; 33]) -> Result
     Ok(())
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Burner address derivation
-// ───────────────────────────────────────────────────────────────────────────
-
-/// Transparent address version bytes.
 const TADDR_VERSION_MAINNET: [u8; 2] = [0x1C, 0xB8];
 const TADDR_VERSION_TESTNET: [u8; 2] = [0x1D, 0x25];
 
-/// Derive a deterministic burner key and t-address from the MPC root key.
-///
-/// # Derivation
-///
-/// 1. Parse the NEAR-encoded MPC root pubkey (secp256k1 base58).
-/// 2. Compute epsilon = SHA3-256(epsilon_prefix || account_id || "," || path).
-/// 3. Reduce epsilon modulo secp256k1 order → scalar.
-/// 4. child_pubkey = root_pubkey + epsilon * G (additive tweak).
-/// 5. Encode as a Zcash transparent address (P2PKH).
-///
-/// This is a deterministic key derivation that the MPC can also compute
-/// (it knows the root key), so both sides agree on the burner key without
-/// needing an on-chain interaction.
 pub fn derive_burner(
     mpc_root_pubkey: &str,
     predecessor_account_id: &str,
     path: &str,
     mainnet: bool,
 ) -> Result<(String, [u8; 33]), &'static str> {
-    // Parse the NEAR-encoded secp256k1 public key.
     let root_pk = parse_near_pubkey(mpc_root_pubkey)?;
 
-    // Compute epsilon = SHA3-256(prefix || account_id || "," || path).
     let mut hasher = Sha3_256::new();
     hasher.update(EPSILON_PREFIX.as_bytes());
     hasher.update(predecessor_account_id.as_bytes());
@@ -431,19 +311,16 @@ pub fn derive_burner(
     hasher.update(path.as_bytes());
     let epsilon_bytes: [u8; 32] = hasher.finalize().into();
 
-    // Reduce epsilon to a valid secp256k1 scalar.
     let epsilon =
         <k256::Scalar as Reduce<U256>>::reduce_bytes(FieldBytes::from_slice(&epsilon_bytes));
     if bool::from(epsilon.is_zero()) {
         return Err("derived zero epsilon");
     }
 
-    // child_pubkey = root + epsilon * G
     let child = (ProjectivePoint::from(*root_pk.as_affine())
         + (ProjectivePoint::GENERATOR * epsilon))
         .to_affine();
 
-    // Compress to 33-byte SEC1 format.
     let encoded = EncodedPoint::from(child).compress();
     let bytes = encoded.as_bytes();
     if bytes.len() != 33 {
@@ -452,7 +329,6 @@ pub fn derive_burner(
     let mut pubkey = [0u8; 33];
     pubkey.copy_from_slice(bytes);
 
-    // Build the Zcash transparent address (Base58Check-encoded P2PKH).
     let version = if mainnet {
         TADDR_VERSION_MAINNET
     } else {
@@ -465,9 +341,6 @@ pub fn derive_burner(
     Ok((taddr, pubkey))
 }
 
-/// Parse a NEAR-encoded secp256k1 public key string.
-///
-/// Expected format: `"secp256k1:<58 base58 characters>"` (64 bytes of raw key data).
 fn parse_near_pubkey(input: &str) -> Result<PublicKey, &'static str> {
     let b58 = input
         .strip_prefix("secp256k1:")
@@ -479,7 +352,6 @@ fn parse_near_pubkey(input: &str) -> Result<PublicKey, &'static str> {
         return Err("mpc_root_pubkey payload must be 64 bytes");
     }
 
-    // The 64 bytes are the uncompressed SEC1 coordinates: [x (32 bytes) | y (32 bytes)].
     let x = FieldBytes::from_slice(&bytes[..32]);
     let y = FieldBytes::from_slice(&bytes[32..]);
     let encoded = EncodedPoint::from_affine_coordinates(x, y, false);
@@ -488,24 +360,6 @@ fn parse_near_pubkey(input: &str) -> Result<PublicKey, &'static str> {
     PublicKey::from_affine(point).map_err(|_| "invalid secp256k1 public key")
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// ZIP-244 SIGHASH_ALL
-// ───────────────────────────────────────────────────────────────────────────
-
-/// Compute the ZIP-244 SIGHASH_ALL digest for the single transparent input
-/// of `tx`.
-///
-/// Returns the 32-byte digest that the MPC should sign with the burner key.
-///
-/// ## Digest composition (ZIP-244 §T.1)
-///
-/// ```text
-/// sighash = Blake2b_256(branch_id_personal,
-///     header_digest
-///     || transparent_sig_digest
-///     || sapling_digest        (empty for us)
-///     || orchard_digest)
-/// ```
 pub fn compute_sighash_all(
     tx: &ParsedTx,
     utxo_value_zats: u64,
@@ -513,7 +367,7 @@ pub fn compute_sighash_all(
 ) -> [u8; 32] {
     let header = header_digest(tx);
     let trans = transparent_sig_digest(tx, utxo_value_zats, utxo_script_pubkey);
-    let saplng = blake2b_personal(P_SAPLING, &[]); // always empty in our txs
+    let saplng = blake2b_personal(P_SAPLING, &[]);
     let orchrd = orchard_digest(tx);
 
     let mut buf = Vec::with_capacity(128);
@@ -525,7 +379,6 @@ pub fn compute_sighash_all(
 }
 
 
-/// SHA-256 of header fields: version, version_group_id, branch_id, lock_time, expiry_height.
 fn header_digest(tx: &ParsedTx) -> [u8; 32] {
     let mut buf = Vec::with_capacity(20);
     buf.extend_from_slice(&tx.version.to_le_bytes());
@@ -536,10 +389,6 @@ fn header_digest(tx: &ParsedTx) -> [u8; 32] {
     blake2b_personal(P_HEADERS, &buf)
 }
 
-/// Transparent signature digest per ZIP-244 §T.2.
-///
-/// Computes hashes over prevouts, amounts, scripts, sequences, and outputs,
-/// then combines them with the per-input digest.
 fn transparent_sig_digest(
     tx: &ParsedTx,
     utxo_value_zats: u64,
@@ -549,29 +398,23 @@ fn transparent_sig_digest(
     let prev_vout_le = tx.tx_in.prevout_vout.to_le_bytes();
     let seq_le       = tx.tx_in.sequence.to_le_bytes();
 
-    // Hash of all inputs' (txid, vout) pairs — just one for us.
     let mut prevouts_buf = Vec::with_capacity(36);
     prevouts_buf.extend_from_slice(&prev_txid);
     prevouts_buf.extend_from_slice(&prev_vout_le);
     let prevouts_sig = blake2b_personal(P_PREVOUTS, &prevouts_buf);
 
-    // Hash of all input amounts — raw concatenation of each amount as i64 LE (no array length prefix).
     let amounts_sig = blake2b_personal(P_AMOUNTS, &utxo_value_zats.to_le_bytes());
 
-    // Hash of all input scriptPubKeys — compact_size(len) || bytes per script, no array length prefix.
     let scripts_sig = {
         let mut buf = encode_compact_size(utxo_script_pubkey.len() as u64);
         buf.extend_from_slice(utxo_script_pubkey);
         blake2b_personal(P_SCRIPTS, &buf)
     };
 
-    // Hash of all input sequence numbers.
     let sequence_sig = blake2b_personal(P_SEQUENCES, &seq_le);
 
-    // Hash of empty transparent outputs.
     let outputs_sig = blake2b_personal(P_OUTPUTS, &[]);
 
-    // Per-input digest: (txid, vout, amount, scriptPubKey, sequence).
     let mut txin_buf = Vec::with_capacity(64);
     txin_buf.extend_from_slice(&prev_txid);
     txin_buf.extend_from_slice(&prev_vout_le);
@@ -581,9 +424,8 @@ fn transparent_sig_digest(
     txin_buf.extend_from_slice(&seq_le);
     let txin_sig = blake2b_personal(P_TXIN, &txin_buf);
 
-    // Combine: sighash type || prevouts || amounts || scripts || sequences || outputs || txin.
     let mut buf = Vec::with_capacity(1 + 32 * 6);
-    buf.push(0x01); // SIGHASH_ALL
+    buf.push(0x01);
     buf.extend_from_slice(&prevouts_sig);
     buf.extend_from_slice(&amounts_sig);
     buf.extend_from_slice(&scripts_sig);
@@ -593,11 +435,6 @@ fn transparent_sig_digest(
     blake2b_personal(P_TRANSPARENT, &buf)
 }
 
-/// Orchard bundle digest per ZIP-244 §T.4.
-///
-/// If the bundle is empty, returns Blake2b(empty).  Otherwise computes
-/// the three action-part hashes (compact, memos, non-compact) and
-/// combines them with flags, valueBalance, and anchor.
 fn orchard_digest(tx: &ParsedTx) -> [u8; 32] {
     match &tx.orchard {
         None => blake2b_personal(P_ORCHARD, &[]),
@@ -618,7 +455,6 @@ fn orchard_digest(tx: &ParsedTx) -> [u8; 32] {
     }
 }
 
-/// Orchard actions "compact" hash: nullifier || cmx || ephemeralKey || encCiphertext[..52].
 fn orchard_actions_compact(actions: &[OrchardAction]) -> [u8; 32] {
     let mut buf = Vec::with_capacity(actions.len() * (32 + 32 + 32 + 52));
     for a in actions {
@@ -630,7 +466,6 @@ fn orchard_actions_compact(actions: &[OrchardAction]) -> [u8; 32] {
     blake2b_personal(P_ORCH_AC, &buf)
 }
 
-/// Orchard actions "memos" hash: encCiphertext[52..564] (512 bytes per action).
 fn orchard_actions_memos(actions: &[OrchardAction]) -> [u8; 32] {
     let mut buf = Vec::with_capacity(actions.len() * 512);
     for a in actions {
@@ -639,7 +474,6 @@ fn orchard_actions_memos(actions: &[OrchardAction]) -> [u8; 32] {
     blake2b_personal(P_ORCH_AM, &buf)
 }
 
-/// Orchard actions "non-compact" hash: cv || rk || encCiphertext[564..580] || outCiphertext.
 fn orchard_actions_noncompact(actions: &[OrchardAction]) -> [u8; 32] {
     let mut buf = Vec::with_capacity(actions.len() * (32 + 32 + 16 + 80));
     for a in actions {
@@ -650,10 +484,6 @@ fn orchard_actions_noncompact(actions: &[OrchardAction]) -> [u8; 32] {
     }
     blake2b_personal(P_ORCH_AN, &buf)
 }
-
-// ───────────────────────────────────────────────────────────────────────────
-// Tests
-// ───────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -703,29 +533,17 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// Replicate the exact NEAR MPC tweak derivation and key derivation inline,
-    /// then assert our `derive_burner` produces the same pubkey and address.
-    ///
-    /// If this test ever fails, the contract and the live MPC disagree on the
-    /// burner key — funds sent to the burner address would be unspendable.
     #[test]
     fn derive_burner_matches_mpc_logic() {
-        // Generator point as a NEAR-encoded secp256k1 pubkey (deterministic).
         let root = "secp256k1:3SB8tA9Kbn7FBtT6GWR6AJk73QceudisHaGThPoLCDgC9tan7d3cwZFiDZtrmhSAf8aTynEdQ3N7KXhMm3nWhekP";
         let account = "alice.near";
         let path = "zns-alice-0";
 
-        // Contract derivation.
         let (contract_taddr, contract_pk) =
             derive_burner(root, account, path, false).expect("derive_burner failed");
 
-        // --- Inline MPC-equivalent derivation ---
-
-        // 1. Parse the root pubkey exactly as the contract does.
         let root_pk = parse_near_pubkey(root).unwrap();
 
-        // 2. Compute tweak hash the exact same way as the MPC:
-        //    SHA3-256(prefix || account_id || "," || path)
         let mut hasher = Sha3_256::new();
         hasher.update(EPSILON_PREFIX.as_bytes());
         hasher.update(account.as_bytes());
@@ -733,8 +551,6 @@ mod tests {
         hasher.update(path.as_bytes());
         let tweak_bytes: [u8; 32] = hasher.finalize().into();
 
-        // 3. Convert to scalar using the MPC's strict method:
-        //    Scalar::from_repr(bytes).into_option() — fails if bytes >= curve order.
         use k256::elliptic_curve::PrimeField;
         let mpc_scalar =
             k256::Scalar::from_repr(*FieldBytes::from_slice(&tweak_bytes)).into_option();
@@ -748,8 +564,6 @@ mod tests {
             "MPC derived zero scalar — contract would reject"
         );
 
-        // 4. Contract uses reduce_bytes which always succeeds. For this test vector
-        //    the two methods must agree (probability of disagreement is ~2^-224).
         let contract_scalar =
             <k256::Scalar as Reduce<U256>>::reduce_bytes(FieldBytes::from_slice(&tweak_bytes));
         assert_eq!(
@@ -757,8 +571,6 @@ mod tests {
             "reduce_bytes disagrees with from_repr for this test vector"
         );
 
-        // 5. MPC derives: child = root + tweak * G.
-        //    (The MPC writes it as G * tweak + public_key; addition is commutative.)
         let mpc_child = (ProjectivePoint::from(*root_pk.as_affine())
             + (ProjectivePoint::GENERATOR * mpc_scalar))
             .to_affine();
@@ -766,9 +578,8 @@ mod tests {
         let mpc_pk = mpc_encoded.as_bytes();
         assert_eq!(mpc_pk.len(), 33);
 
-        // 6. Addresses must match.
         let mpc_taddr = {
-            let version = TADDR_VERSION_TESTNET; // [0x1D, 0x25]
+            let version = TADDR_VERSION_TESTNET;
             let mut payload = Vec::with_capacity(22);
             payload.extend_from_slice(&version);
             payload.extend_from_slice(&hash160(mpc_pk));
@@ -785,10 +596,6 @@ mod tests {
         );
     }
 
-    /// Test vector taken from the NEAR MPC snapshot test
-    /// (`near_mpc_crypto_types__kdf__tests__derive_tweak__has_not_changed`).
-    /// The snapshot proves the MPC has produced these exact tweak bytes for
-    /// these exact inputs. Our contract must hash to the same 32 bytes.
     #[test]
     fn derive_burner_mpc_tweak_snapshot_vector() {
         let account = "dwefqwg";
@@ -801,7 +608,6 @@ mod tests {
         hasher.update(path.as_bytes());
         let tweak_bytes: [u8; 32] = hasher.finalize().into();
 
-        // First entry from the MPC snapshot.
         let expected: [u8; 32] = [
             173, 45, 111, 193, 244, 69, 161, 180, 56, 48, 65, 94, 126, 110, 61, 3, 205, 7, 118,
             115, 4, 120, 72, 160, 133, 241, 48, 194, 79, 83, 238, 0,

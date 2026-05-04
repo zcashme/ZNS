@@ -40,13 +40,14 @@ pub struct CreatePurchaseResponse {
     pub buy_memo: String,
 }
 
+const COMMISSION_BPS: u64 = 400; // 4%
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ContractListingView {
     pub id: u64,
     pub name: String,
     pub seller_ua: String,
     pub price_zat: u64,
-    pub commission_bps: u64,
     pub treasury_ua: String,
     pub created_at_ns: u64,
     pub listing_nonce: u64,
@@ -55,7 +56,6 @@ pub struct ContractListingView {
     pub mpc_path: String,
     pub funded: bool,
     pub buyer_ua: Option<String>,
-    pub buyer_signature_b64: Option<String>,
     pub buyer_pubkey_b64: Option<String>,
     pub funding_outpoint: Option<([u8; 32], u32)>,
     pub utxo_value_zats: Option<u64>,
@@ -80,7 +80,7 @@ impl ContractListingView {
         self.payout_sighash.map(|h| hex::encode(h))
     }
     pub fn commission_zat(&self) -> u64 {
-        self.price_zat * self.commission_bps / 10_000
+        self.price_zat * COMMISSION_BPS / 10_000
     }
     pub fn seller_receives_zat(&self, payout_fee_zat: u64) -> u64 {
         self.price_zat
@@ -133,7 +133,6 @@ fn cache_listing(
             &listing.name,
             &listing.seller_ua,
             listing.price_zat,
-            listing.commission_bps,
             &listing.treasury_ua,
             &listing.burner_taddr,
             &listing.burner_pubkey_hex(),

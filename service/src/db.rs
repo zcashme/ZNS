@@ -18,7 +18,6 @@ pub struct Listing {
     pub name: String,
     pub seller_ua: String,
     pub price_zat: u64,
-    pub commission_bps: u64,
     pub treasury_ua: String,
     pub burner_taddr: String,
     pub burner_pubkey_hex: String,
@@ -87,7 +86,6 @@ impl Store {
                 name                TEXT NOT NULL UNIQUE,
                 seller_ua           TEXT NOT NULL,
                 price_zat           INTEGER NOT NULL,
-                commission_bps      INTEGER NOT NULL,
                 treasury_ua         TEXT NOT NULL,
                 burner_taddr        TEXT NOT NULL,
                 burner_pubkey_hex   TEXT NOT NULL,
@@ -138,7 +136,6 @@ impl Store {
         name: &str,
         seller_ua: &str,
         price_zat: u64,
-        commission_bps: u64,
         treasury_ua: &str,
         burner_taddr: &str,
         burner_pubkey_hex: &str,
@@ -149,14 +146,13 @@ impl Store {
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO listings (
-                contract_listing_id, name, seller_ua, price_zat, commission_bps,
+                contract_listing_id, name, seller_ua, price_zat,
                 treasury_ua, burner_taddr, burner_pubkey_hex, mpc_path, funded, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(name) DO UPDATE SET
                  contract_listing_id = excluded.contract_listing_id,
                  seller_ua           = excluded.seller_ua,
                  price_zat           = excluded.price_zat,
-                 commission_bps      = excluded.commission_bps,
                  treasury_ua         = excluded.treasury_ua,
                  burner_taddr        = excluded.burner_taddr,
                  burner_pubkey_hex   = excluded.burner_pubkey_hex,
@@ -167,7 +163,6 @@ impl Store {
                 name,
                 seller_ua,
                 price_zat as i64,
-                commission_bps as i64,
                 treasury_ua,
                 burner_taddr,
                 burner_pubkey_hex,
@@ -196,7 +191,7 @@ impl Store {
     pub fn get_listing_by_id(&self, id: i64) -> Result<Option<Listing>> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT id, contract_listing_id, name, seller_ua, price_zat, commission_bps,
+            "SELECT id, contract_listing_id, name, seller_ua, price_zat,
                     treasury_ua, burner_taddr, burner_pubkey_hex, mpc_path, funded, created_at
              FROM listings WHERE id = ?1",
             params![id],
@@ -309,9 +304,9 @@ impl Store {
 }
 
 fn row_to_listing(row: &rusqlite::Row) -> rusqlite::Result<Listing> {
-    let created_at_str: String = row.get(11)?;
+    let created_at_str: String = row.get(10)?;
     let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(e))
+        rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e))
     })?;
     Ok(Listing {
         id: row.get(0)?,
@@ -319,12 +314,11 @@ fn row_to_listing(row: &rusqlite::Row) -> rusqlite::Result<Listing> {
         name: row.get(2)?,
         seller_ua: row.get(3)?,
         price_zat: row.get::<_, i64>(4)? as u64,
-        commission_bps: row.get::<_, i64>(5)? as u64,
-        treasury_ua: row.get(6)?,
-        burner_taddr: row.get(7)?,
-        burner_pubkey_hex: row.get(8)?,
-        mpc_path: row.get(9)?,
-        funded: row.get::<_, i64>(10)? != 0,
+        treasury_ua: row.get(5)?,
+        burner_taddr: row.get(6)?,
+        burner_pubkey_hex: row.get(7)?,
+        mpc_path: row.get(8)?,
+        funded: row.get::<_, i64>(9)? != 0,
         created_at,
     })
 }

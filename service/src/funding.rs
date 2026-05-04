@@ -144,10 +144,10 @@ async fn submit_funding(
 
     // Sovereign signatures are flagged in the DB so the contract can verify
     // them on chain. The admin signature is always in the memo for anti-forgery.
-    let (sovereign_sig, sovereign_pk) = if reg.is_sovereign {
-        (Some(reg.buyer_signature_b64.as_str()), Some(reg.buyer_pubkey_b64.as_str()))
+    let sovereign_pk = if reg.is_sovereign {
+        Some(reg.buyer_pubkey_b64.as_str())
     } else {
-        (None, None)
+        None
     };
 
     call_contract_method(
@@ -160,7 +160,6 @@ async fn submit_funding(
             "payout_tx": payout_tx,
             "buyer_ua": reg.buyer_ua,
             "admin_signature_b64": reg.admin_signature_b64,
-            "buyer_signature_b64": sovereign_sig,
             "buyer_pubkey_b64": sovereign_pk,
         }),
         SUBMIT_FUNDING_GAS,

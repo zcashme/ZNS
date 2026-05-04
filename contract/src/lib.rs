@@ -326,8 +326,15 @@ impl ZnsContract {
             "cancel signature invalid"
         );
 
+        let storage_before = env::storage_usage();
         self.listings.remove(&id);
         self.listing_ids_by_name.remove(&listing.name);
+        let storage_freed = storage_before.saturating_sub(env::storage_usage()) as u128;
+        let refund_yocto = env::storage_byte_cost().as_yoctonear().saturating_mul(storage_freed);
+        if refund_yocto > 0 {
+            Promise::new(env::predecessor_account_id())
+                .transfer(NearToken::from_yoctonear(refund_yocto));
+        }
         emit_event("listing_cancelled", serde_json::json!({ "id": id }));
     }
 
