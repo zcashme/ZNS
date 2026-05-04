@@ -280,10 +280,10 @@ async fn create_purchase_handler(
         return Err(axum::http::StatusCode::CONFLICT);
     }
 
-    // Default path: relayer's admin key signs the BUY memo.
-    // Sovereign override: if the buyer supplies their own ed25519 sig+pk,
-    // we verify and use those instead. Either way the DB stores final
-    // credentials and the on-chain memo embeds them.
+    // Always sign with the admin key — the admin signature proves the relayer
+    // confirmed a valid UTXO and is the anti-forgery anchor for indexers.
+    // Sovereign path: the buyer also signs (verified on-chain) and their pubkey
+    // is appended to the memo as a mode flag.
     let Some(signer) = state.memo_signer.as_ref() else {
         tracing::warn!(
             "no admin memo signer configured for {}",
@@ -292,7 +292,7 @@ async fn create_purchase_handler(
         return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    let (sig_b64, pk_b64, admin_sig_b64, is_sovereign) =
+    let (admin_sig_b64, buyer_sig_b64, buyer_pk_b64, is_sovereign) =
         match (body.buyer_signature_b64, body.buyer_pubkey_b64) {
             (Some(sig), Some(pk)) => {
                 if !crate::memo::verify_buy_signature(
@@ -309,12 +309,12 @@ async fn create_purchase_handler(
                 }
                 let (admin_sig, _) =
                     signer.sign_buy_credentials(&listing.contract.name, &body.buyer_ua);
-                (sig, pk, admin_sig, true)
+                (admin_sig, sig, pk, true)
             }
             _ => {
-                let (sig, pk) =
+                let (admin_sig, _admin_pk) =
                     signer.sign_buy_credentials(&listing.contract.name, &body.buyer_ua);
-                (sig.clone(), pk, sig, false)
+                (admin_sig, String::new(), String::new(), false)
             }
         };
 
@@ -339,8 +339,8 @@ async fn create_purchase_handler(
         .insert_registration(
             listing.local_id,
             &body.buyer_ua,
-            &sig_b64,
-            &pk_b64,
+            &buyer_sig_b64,
+            &buyer_pk_b64,
             &admin_sig_b64,
             is_sovereign,
         )
@@ -354,15 +354,15 @@ async fn create_purchase_handler(
             "ZNS:BUY:{}:{}:{}:{}",
             listing.contract.name,
             body.buyer_ua,
-            sig_b64,
-            pk_b64,
+            admin_sig_b64,
+            buyer_pk_b64,
         )
     } else {
         format!(
             "ZNS:BUY:{}:{}:{}",
             listing.contract.name,
             body.buyer_ua,
-            sig_b64,
+            admin_sig_b64,
         )
     };
 

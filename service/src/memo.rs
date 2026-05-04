@@ -1,16 +1,20 @@
 //! BUY memo signing and verification.
 //!
-//! Sovereign path: buyer signs `BUY:<name>:<buyer_ua>` with their own ed25519
-//! key; relayer just verifies and forwards.
+//! Both paths always embed the admin Ed25519 signature in the memo. This
+//! prevents forgery — only the ZNS operator can produce a valid admin sig,
+//! and it only does so after the funding worker confirms a valid UTXO.
 //!
-//! Admin fallback: if the buyer omits a signature, the relayer signs the same
-//! payload with `ZNS_ADMIN_ED25519_KEY` and submits the admin's pubkey as the
-//! buyer credentials. The contract treats them identically — any valid
-//! ed25519 sig over `BUY:<name>:<buyer_ua>` is accepted. Indexers can decide
-//! whether to trust the admin key as a memo signer.
+//! Sovereign path: the buyer also signs `BUY:<name>:<buyer_ua>` with their own
+//! ed25519 key (verified on-chain in submit_funding). The memo appends the
+//! buyer's pubkey as a mode flag so the indexer knows future actions on this
+//! name require sovereign auth.
+//!
+//! Admin path: the relayer signs with `ZNS_ADMIN_ED25519_KEY` — no buyer
+//! credentials on the memo.
 //!
 //! On-chain memo wire format (Orchard treasury output):
-//!     ZNS:BUY:<name>:<buyer_ua>:<sig_b64>:<pubkey_b64>
+//!     Admin:     ZNS:BUY:<name>:<buyer_ua>:<admin_sig_b64>
+//!     Sovereign: ZNS:BUY:<name>:<buyer_ua>:<admin_sig_b64>:<buyer_pubkey_b64>
 
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey, Verifier};

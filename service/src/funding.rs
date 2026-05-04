@@ -136,15 +136,14 @@ async fn submit_funding(
         memo: build_buy_memo(
             &listing.name,
             &reg.buyer_ua,
-            &reg.buyer_signature_b64,
+            &reg.admin_signature_b64,
             reg.is_sovereign.then_some(&reg.buyer_pubkey_b64),
         ),
         fee: Some(crate::payout::payout_fee()),
     })?;
 
     // Sovereign signatures are flagged in the DB so the contract can verify
-    // them on chain. Admin-signed credentials are kept off-chain (the memo
-    // still carries them so indexers can re-verify).
+    // them on chain. The admin signature is always in the memo for anti-forgery.
     let (sovereign_sig, sovereign_pk) = if reg.is_sovereign {
         (Some(reg.buyer_signature_b64.as_str()), Some(reg.buyer_pubkey_b64.as_str()))
     } else {
@@ -223,7 +222,7 @@ async fn drive_payout(
         memo: build_buy_memo(
             &listing.name,
             &reg.buyer_ua,
-            &reg.buyer_signature_b64,
+            &reg.admin_signature_b64,
             reg.is_sovereign.then_some(&reg.buyer_pubkey_b64),
         ),
         fee: Some(crate::payout::payout_fee()),
@@ -321,24 +320,24 @@ async fn call_contract_method(
 
 /// Build the BUY memo placed on the treasury Orchard output.
 ///
-/// Sovereign format: `ZNS:BUY:<name>:<buyer_ua>:<buyer_sig_b64>:<buyer_pubkey_b64>`.
-/// Admin format:    `ZNS:BUY:<name>:<buyer_ua>:<admin_sig_b64>` (no pubkey).
+/// Admin format:    `ZNS:BUY:<name>:<buyer_ua>:<admin_sig_b64>`
+/// Sovereign format: `ZNS:BUY:<name>:<buyer_ua>:<admin_sig_b64>:<buyer_pubkey_b64>`
 ///
-/// The signature was already verified by both the relayer's POST handler
-/// and the contract's submit_funding — this just embeds it on chain so
-/// any indexer can re-verify the sale.
+/// The admin signature is always present — it proves the relayer's funding
+/// worker confirmed a valid UTXO. The buyer pubkey is a sovereign mode flag
+/// for the indexer; it is NOT used for memo authentication.
 fn build_buy_memo(
     listing_name: &str,
     buyer_ua: &str,
-    buyer_signature_b64: &str,
+    admin_signature_b64: &str,
     buyer_pubkey_b64: Option<&str>,
 ) -> [u8; 512] {
     let memo = match buyer_pubkey_b64 {
         Some(pk) => format!(
-            "ZNS:BUY:{listing_name}:{buyer_ua}:{buyer_signature_b64}:{pk}"
+            "ZNS:BUY:{listing_name}:{buyer_ua}:{admin_signature_b64}:{pk}"
         ),
         None => format!(
-            "ZNS:BUY:{listing_name}:{buyer_ua}:{buyer_signature_b64}"
+            "ZNS:BUY:{listing_name}:{buyer_ua}:{admin_signature_b64}"
         ),
     };
     let mut bytes = [0u8; 512];

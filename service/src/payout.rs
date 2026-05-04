@@ -551,7 +551,7 @@ mod debug_sighash {
         let seller_ua = "utest1ltqheke0z42vffh8zzs2xp4t470rueevlhyanhfem5843v8nr2pn36qpphcqf90w3ax2ahc8hvap5fl5kedfv4ymmu5hdcmsqcamtlux";
         let treasury_ua = "utest1f32kn6c4zvn54xr8wfsnxmj9hzpu2mwgtxzpzwcw34906tdccdvzs0z2dx38lly7tpan77x6udt8pjczqm22ymsdhlz9j0tk5yq664nl";
         let buyer_sig = "LstUOjHhihPPubyX+mjn0TsZshzmwv5xwyPKja9pD03bnXtZZ+VRxEqxG2U9cStlJBTQxG3H8+ZGgNqJLCpZBQ==";
-        let memo_str = format!("ZNS:BUY:testmarket:{}:{}", treasury_ua, buyer_sig);
+        let memo_str = format!("ZNS:BUY:testmarket:{}:{}", treasury_ua, buyer_sig); // admin-sig-only format (no buyer pubkey)
         let mut memo = [0u8; 512];
         memo[..memo_str.len()].copy_from_slice(memo_str.as_bytes());
 
@@ -609,7 +609,7 @@ mod debug_finalize {
         let seller_ua = "utest1ltqheke0z42vffh8zzs2xp4t470rueevlhyanhfem5843v8nr2pn36qpphcqf90w3ax2ahc8hvap5fl5kedfv4ymmu5hdcmsqcamtlux";
         let treasury_ua = "utest1f32kn6c4zvn54xr8wfsnxmj9hzpu2mwgtxzpzwcw34906tdccdvzs0z2dx38lly7tpan77x6udt8pjczqm22ymsdhlz9j0tk5yq664nl";
         let buyer_sig = "LstUOjHhihPPubyX+mjn0TsZshzmwv5xwyPKja9pD03bnXtZZ+VRxEqxG2U9cStlJBTQxG3H8+ZGgNqJLCpZBQ==";
-        let memo_str = format!("ZNS:BUY:testmarket:{}:{}", treasury_ua, buyer_sig);
+        let memo_str = format!("ZNS:BUY:testmarket:{}:{}", treasury_ua, buyer_sig); // admin-sig-only format (no buyer pubkey)
         let mut memo = [0u8; 512];
         memo[..memo_str.len()].copy_from_slice(memo_str.as_bytes());
 
