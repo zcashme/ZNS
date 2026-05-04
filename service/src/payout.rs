@@ -513,3 +513,154 @@ mod sighash_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+    use zcash_protocol::consensus::TestNetwork;
+
+    #[test]
+    fn debug_payout_fee() {
+        println!("payout_fee = {}", payout_fee());
+    }
+}
+
+#[cfg(test)]
+mod debug_sighash {
+    use super::*;
+    use ripemd::Ripemd160;
+    use sha2::{Digest, Sha256};
+
+    fn p2pkh_script(pubkey: &[u8; 33]) -> Vec<u8> {
+        let sha = Sha256::digest(pubkey);
+        let ripe = Ripemd160::digest(sha);
+        let mut script = vec![0x76u8, 0xa9, 0x14];
+        script.extend_from_slice(&ripe);
+        script.extend_from_slice(&[0x88, 0xac]);
+        script
+    }
+
+    #[test]
+    fn debug_rebuild_sighash() {
+        let burner_pubkey: [u8; 33] = hex::decode("02cd4e7c736d3b4853ffeda3d49868d1430dd9054ce16f8412c12f4fc768d3dc28")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let script_pubkey = p2pkh_script(&burner_pubkey);
+
+        let seller_ua = "utest1ltqheke0z42vffh8zzs2xp4t470rueevlhyanhfem5843v8nr2pn36qpphcqf90w3ax2ahc8hvap5fl5kedfv4ymmu5hdcmsqcamtlux";
+        let treasury_ua = "utest1f32kn6c4zvn54xr8wfsnxmj9hzpu2mwgtxzpzwcw34906tdccdvzs0z2dx38lly7tpan77x6udt8pjczqm22ymsdhlz9j0tk5yq664nl";
+        let buyer_sig = "LstUOjHhihPPubyX+mjn0TsZshzmwv5xwyPKja9pD03bnXtZZ+VRxEqxG2U9cStlJBTQxG3H8+ZGgNqJLCpZBQ==";
+        let memo_str = format!("ZNS:BUY:testmarket:{}:{}", treasury_ua, buyer_sig);
+        let mut memo = [0u8; 512];
+        memo[..memo_str.len()].copy_from_slice(memo_str.as_bytes());
+
+        let txid_le_bytes: [u8; 32] = hex::decode("c023517881db80146905fb2361882dfec6ff53507f88a7df141db0bf7695717f")
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let outpoint = transparent::bundle::OutPoint::new(txid_le_bytes, 0);
+
+        let plan = build_unsigned(PayoutInputs {
+            network: "testnet",
+            target_height: 3995088,
+            utxo_outpoint: outpoint,
+            utxo_value_zats: 50_000_000,
+            utxo_script_pubkey: script_pubkey,
+            burner_pubkey,
+            seller_ua,
+            treasury_ua,
+            buyer_ua: None,
+            seller_amount: 48_735_000,
+            treasury_amount: 1_250_000,
+            memo,
+            fee: Some(15_000),
+        }).expect("build_unsigned");
+
+        println!("sighash: {}", hex::encode(plan.sighash));
+        println!("orchard_sighash: {}", hex::encode(plan.orchard_sighash));
+    }
+}
+
+#[cfg(test)]
+mod debug_finalize {
+    use super::*;
+    use ripemd::Ripemd160;
+    use sha2::{Digest, Sha256};
+
+    fn p2pkh_script(pubkey: &[u8; 33]) -> Vec<u8> {
+        let sha = Sha256::digest(pubkey);
+        let ripe = Ripemd160::digest(sha);
+        let mut script = vec![0x76u8, 0xa9, 0x14];
+        script.extend_from_slice(&ripe);
+        script.extend_from_slice(&[0x88, 0xac]);
+        script
+    }
+
+    #[test]
+    fn debug_finalize_with_mpc() {
+        let burner_pubkey: [u8; 33] = hex::decode("02cd4e7c736d3b4853ffeda3d49868d1430dd9054ce16f8412c12f4fc768d3dc28")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let script_pubkey = p2pkh_script(&burner_pubkey);
+
+        let seller_ua = "utest1ltqheke0z42vffh8zzs2xp4t470rueevlhyanhfem5843v8nr2pn36qpphcqf90w3ax2ahc8hvap5fl5kedfv4ymmu5hdcmsqcamtlux";
+        let treasury_ua = "utest1f32kn6c4zvn54xr8wfsnxmj9hzpu2mwgtxzpzwcw34906tdccdvzs0z2dx38lly7tpan77x6udt8pjczqm22ymsdhlz9j0tk5yq664nl";
+        let buyer_sig = "LstUOjHhihPPubyX+mjn0TsZshzmwv5xwyPKja9pD03bnXtZZ+VRxEqxG2U9cStlJBTQxG3H8+ZGgNqJLCpZBQ==";
+        let memo_str = format!("ZNS:BUY:testmarket:{}:{}", treasury_ua, buyer_sig);
+        let mut memo = [0u8; 512];
+        memo[..memo_str.len()].copy_from_slice(memo_str.as_bytes());
+
+        let txid_le_bytes: [u8; 32] = hex::decode("c023517881db80146905fb2361882dfec6ff53507f88a7df141db0bf7695717f")
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let outpoint = transparent::bundle::OutPoint::new(txid_le_bytes, 0);
+
+        let plan = build_unsigned(PayoutInputs {
+            network: "testnet",
+            target_height: 3995088,
+            utxo_outpoint: outpoint,
+            utxo_value_zats: 50_000_000,
+            utxo_script_pubkey: script_pubkey,
+            burner_pubkey,
+            seller_ua,
+            treasury_ua,
+            buyer_ua: None,
+            seller_amount: 48_735_000,
+            treasury_amount: 1_250_000,
+            memo,
+            fee: Some(15_000),
+        }).expect("build_unsigned");
+
+        println!("sighash: {}", hex::encode(plan.sighash));
+
+        // MPC signature
+        let r_hex = "e36f3714f8c3ec10ce0ff4feea62b74957a3e5b07b0a72ca0dffe1cd4620cef2";
+        let s_hex = "4631a64d580ad671d2bbb1da4ce72a222dab2771fa5e156eae1eff5ba3505c29";
+        let mut compact = [0u8; 64];
+        compact[..32].copy_from_slice(&hex::decode(r_hex).unwrap());
+        compact[32..].copy_from_slice(&hex::decode(s_hex).unwrap());
+
+        let result = finalize_with_mpc(plan, &compact);
+        match &result {
+            Ok(tx_bytes) => println!("SUCCESS, tx len: {}", tx_bytes.len()),
+            Err(e) => println!("FAILED: {:?}", e),
+        }
+    }
+}
+
+#[cfg(test)]
+mod debug_branch {
+    use super::*;
+    use zcash_protocol::consensus::{BranchId, TestNetwork};
+
+    #[test]
+    fn debug_branch_id() {
+        let branch = BranchId::for_height(&TestNetwork, BlockHeight::from_u32(3995088));
+        println!("branch_id for height 3995088: {:?} = {}", branch, branch.into());
+    }
+}

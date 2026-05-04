@@ -91,13 +91,8 @@ pub struct MpcSignature {
 
 #[near(serializers = [json, borsh])]
 pub struct SignRequestArgs {
-    pub request: SignPayload,
-}
-
-#[near(serializers = [json, borsh])]
-pub struct SignPayload {
-    pub payload: Vec<u8>,
     pub path: String,
+    pub payload: [u8; 32],
     pub key_version: u32,
 }
 
@@ -731,11 +726,9 @@ impl ZnsContract {
             .with_static_gas(SIGN_GAS)
             .with_attached_deposit(MPC_DEPOSIT)
             .sign(SignRequestArgs {
-                request: SignPayload {
-                    payload: sighash.to_vec(),
-                    path: mpc_path,
-                    key_version: 0,
-                },
+                path: mpc_path,
+                payload: sighash,
+                key_version: 0,
             })
             .then(
                 ext_self::ext(env::current_account_id())

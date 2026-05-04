@@ -367,17 +367,16 @@ fn txid_le(txid_be_hex: &str) -> Result<[u8; 32]> {
 }
 
 fn signature_to_compact(sig: &MpcSignature) -> Result<[u8; 64]> {
-    let point = sig
-        .big_r
-        .affine_point
-        .strip_prefix("secp256k1:")
-        .context("unexpected big_r format")?;
-    let point_bytes = bs58::decode(point)
-        .into_vec()
-        .context("decode big_r affine point")?;
-    if point_bytes.len() != 64 {
-        bail!("big_r affine point must decode to 64 bytes");
-    }
+    let point_hex = sig.big_r.affine_point.trim_start_matches("0x");
+    let point_bytes = hex::decode(point_hex).context("decode big_r affine point")?;
+    // MPC returns big_r as either a 33-byte compressed point (03||x) or a 65-byte
+    // uncompressed point (04||x||y).  Either way, r is the x-coordinate.
+    let r_bytes: &[u8] = match point_bytes.len() {
+        33 => &point_bytes[1..], // compressed: skip 02/03 prefix
+        65 => &point_bytes[1..33], // uncompressed: skip 04 prefix, take x
+        64 => &point_bytes[..32], // raw affine coordinate pair
+        other => bail!("big_r unexpected length: {other}"),
+    };
 
     let scalar_hex = sig.s.scalar.trim_start_matches("0x");
     let scalar_bytes = hex::decode(scalar_hex).context("decode signature scalar")?;
@@ -386,7 +385,7 @@ fn signature_to_compact(sig: &MpcSignature) -> Result<[u8; 64]> {
     }
 
     let mut compact = [0u8; 64];
-    compact[..32].copy_from_slice(&point_bytes[..32]);
+    compact[..32].copy_from_slice(r_bytes);
     compact[32..].copy_from_slice(&scalar_bytes);
     Ok(compact)
 }

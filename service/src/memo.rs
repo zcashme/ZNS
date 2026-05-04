@@ -71,3 +71,16 @@ pub fn verify_buy_signature(
     let payload = format!("BUY:{name}:{buyer_ua}");
     verifying_key.verify(payload.as_bytes(), &signature).is_ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_admin_sig() {
+        let signer = MemoSigner::from_hex("9a9a49f72f1b5f222bb75950c7caa762d66fb3cbd5d675c1bea1a8ec2811a158").unwrap();
+        let (sig, pk) = signer.sign_buy_credentials("testmarket", "utest1f32kn6c4zvn54xr8wfsnxmj9hzpu2mwgtxzpzwcw34906tdccdvzs0z2dx38lly7tpan77x6udt8pjczqm22ymsdhlz9j0tk5yq664nl");
+        println!("sig_b64: {}", sig);
+        println!("pk_b64: {}", pk);
+    }
+}
