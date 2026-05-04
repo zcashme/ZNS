@@ -1,44 +1,3 @@
-//! ZNS non-custodial marketplace escrow contract.
-//!
-//! ## Architecture
-//!
-//! The contract is the authority for:
-//!
-//! * **Listing terms** — seller, treasury, price, commission, fee
-//! * **Deterministic burner address** — one per listing, derived from
-//!   `mpc_root_pubkey + zns-<name>-<listing_nonce>`
-//! * **Payout tx bytes and sighash** — the contract validates and stores
-//!   them so the MPC can sign them later
-//!
-//! ## Separation of concerns
-//!
-//! | Role      | Responsibility                                      |
-//! |-----------|-----------------------------------------------------|
-//! | Relayer   | Off-chain buyer registration, tx builder, submitter |
-//! | Contract  | Listing state machine, validation, MPC orchestration |
-//! | MPC       | Signer (stateless, invoked by this contract)        |
-//!
-//! ## Listing state machine
-//!
-//! ```text
-//!   [create_listing] → Open
-//!         |
-//!     [submit_funding] (one-shot — relayer attaches buyer info from its DB)
-//!         |
-//!         ▼
-//!      Funded
-//!         |
-//!  [request_payout_signature]
-//!         |
-//!         ▼
-//!     Completed
-//!
-//!   [cancel_listing] (only valid while Open — no funding submitted yet)
-//! ```
-//!
-//! Refunds for wrong-amount or losing-race UTXOs are deferred — those UTXOs
-//! sit at the burner address until a future `request_refund` flow is added.
-
 use near_sdk::store::LookupMap;
 use near_sdk::{
     env, ext_contract, near, near_bindgen, AccountId, Gas, NearToken, PanicOnDefault, Promise,
@@ -48,15 +7,11 @@ use near_sdk::{
 pub mod zcash;
 use zcash::{compute_sighash_all, derive_burner, parse_tx, sha256, validate_burner_script};
 
-// ───────────────────────────────────────────────────────────────────────────
-// Constants
-// ───────────────────────────────────────────────────────────────────────────
-
 const SIGN_GAS: Gas = Gas::from_tgas(250);
 const CALLBACK_GAS: Gas = Gas::from_tgas(3);
 const MPC_DEPOSIT: NearToken = NearToken::from_yoctonear(100);
 
-const MAX_COMMISSION_BPS: u64 = 1_000; // 10 %
+const COMMISSION_BPS: u64 = 400;
 const MAX_UA_LEN: usize = 512;
 const MAX_NAME_LEN: usize = 256;
 const MAX_PATH_LEN: usize = 384;
@@ -64,10 +19,6 @@ const MAX_TX_BYTES: usize = 20_000;
 
 const EVENT_STANDARD: &str = "zns";
 const EVENT_VERSION: &str = "1.0.0";
-
-// ───────────────────────────────────────────────────────────────────────────
-// MPC primitive types
-// ───────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 #[near(serializers = [json, borsh])]
@@ -96,10 +47,6 @@ pub struct SignRequestArgs {
     pub key_version: u32,
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Cross-contract call interfaces
-// ───────────────────────────────────────────────────────────────────────────
-
 #[ext_contract(ext_mpc)]
 #[allow(dead_code)]
 trait ExtMpc {
@@ -116,16 +63,6 @@ trait ExtSelf {
     );
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Domain types
-// ───────────────────────────────────────────────────────────────────────────
-
-/// On-chain listing for a name sale.
-///
-/// One listing carries one burner t-addr, derived at `create_listing` time
-/// from `mpc_root_pubkey + zns-<name>-<listing_nonce>`. After
-/// `submit_funding` succeeds, the listing is locked to a single buyer's
-/// payout and cannot be re-funded.
 #[derive(Clone, Debug)]
 #[near(serializers = [borsh, json])]
 pub struct Listing {
@@ -133,17 +70,14 @@ pub struct Listing {
     pub name: String,
     pub seller_ua: String,
     pub price_zat: u64,
-    pub commission_bps: u64,
     pub treasury_ua: String,
     pub created_at_ns: u64,
     pub listing_nonce: u64,
 
-    // Derived burner key + path.
     pub burner_taddr: String,
     pub burner_pubkey: Vec<u8>,
     pub mpc_path: String,
 
-    // Funding state — populated by submit_funding.
     pub funded: bool,
     pub buyer_ua: Option<String>,
     pub buyer_pubkey_b64: Option<String>,
@@ -153,14 +87,9 @@ pub struct Listing {
     pub payout_sighash: Option<[u8; 32]>,
     pub payout_signature: Option<MpcSignature>,
 
-    // Ed25519 pubkey that authorized this listing (None = admin key).
     pub listing_pubkey: Option<[u8; 32]>,
 }
 
-
-// ───────────────────────────────────────────────────────────────────────────
-// Contract state
-// ───────────────────────────────────────────────────────────────────────────
 
 #[near_bindgen(contract_state)]
 #[derive(PanicOnDefault)]
@@ -170,7 +99,6 @@ pub struct ZnsContract {
     pub mpc_contract: AccountId,
     pub mpc_root_pubkey: String,
     pub treasury_ua: String,
-    pub commission_bps: u64,
     pub payout_fee_zat: u64,
     pub mainnet: bool,
     pub consensus_branch_id: u32,
@@ -180,31 +108,19 @@ pub struct ZnsContract {
     pub listing_ids_by_name: LookupMap<String, u64>,
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Public entry points
-// ───────────────────────────────────────────────────────────────────────────
-
 #[near_bindgen]
 impl ZnsContract {
-    // ── Constructor ──────────────────────────────────────────────────────
-
     #[init]
     pub fn new(
         owner: AccountId,
         mpc_contract: AccountId,
         mpc_root_pubkey: String,
         treasury_ua: String,
-        commission_bps: u64,
         payout_fee_zat: u64,
         mainnet: bool,
         consensus_branch_id: u32,
         admin_pubkey_b64: String,
     ) -> Self {
-        assert!(!env::state_exists(), "already initialized");
-        assert!(
-            commission_bps <= MAX_COMMISSION_BPS,
-            "commission_bps too high"
-        );
         validate_unified_address(&treasury_ua, mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("treasury_ua invalid: {e}")));
         assert!(payout_fee_zat > 0, "payout_fee_zat must be > 0");
@@ -215,7 +131,6 @@ impl ZnsContract {
             mpc_contract,
             mpc_root_pubkey,
             treasury_ua,
-            commission_bps,
             payout_fee_zat,
             mainnet,
             consensus_branch_id,
@@ -225,8 +140,6 @@ impl ZnsContract {
             listing_ids_by_name: LookupMap::new(b"N"),
         }
     }
-
-    // ── Admin setters ────────────────────────────────────────────────────
 
     pub fn set_mpc_contract(&mut self, account: AccountId) {
         self.assert_owner();
@@ -245,12 +158,6 @@ impl ZnsContract {
         self.admin_pubkey = pk;
     }
 
-    pub fn set_commission_bps(&mut self, bps: u64) {
-        self.assert_owner();
-        assert!(bps <= MAX_COMMISSION_BPS, "commission_bps too high");
-        self.commission_bps = bps;
-    }
-
     pub fn set_payout_fee_zat(&mut self, fee: u64) {
         self.assert_owner();
         assert!(fee > 0, "payout_fee_zat must be > 0");
@@ -267,13 +174,6 @@ impl ZnsContract {
         self.owner = new_owner;
     }
 
-    // ── Listing lifecycle ────────────────────────────────────────────────
-
-    /// Create or replace a listing, deriving its burner t-address.
-    ///
-    /// Replacing an existing listing requires a strictly higher `nonce`. Each
-    /// (name, nonce) pair derives a unique burner key via path
-    /// `zns-<name>-<nonce>`, so a relisted name always gets a fresh t-addr.
     #[payable]
     pub fn create_listing(
         &mut self,
@@ -310,8 +210,6 @@ impl ZnsContract {
             "listing signature invalid"
         );
 
-        // Replacement: previous listing for this name (if any) must be
-        // unfunded and have a strictly lower nonce.
         if let Some(existing_id) = self.listing_ids_by_name.get(&name).copied() {
             let existing = self
                 .listings
@@ -323,7 +221,6 @@ impl ZnsContract {
                 "listing nonce must increase for replacement"
             );
             assert!(!existing.funded, "cannot replace a funded listing");
-            // Remove the stale listing entry before inserting the new one.
             self.listings.remove(&existing_id);
         }
 
@@ -350,7 +247,6 @@ impl ZnsContract {
             name: name.clone(),
             seller_ua: seller_ua.clone(),
             price_zat,
-            commission_bps: self.commission_bps,
             treasury_ua: self.treasury_ua.clone(),
             created_at_ns: now,
             listing_nonce: nonce,
@@ -379,7 +275,7 @@ impl ZnsContract {
                 "name": name,
                 "seller_ua": seller_ua,
                 "price_zat": price_zat,
-                "commission_bps": self.commission_bps,
+                "commission_bps": COMMISSION_BPS,
                 "treasury_ua": self.treasury_ua,
                 "payout_fee_zat": self.payout_fee_zat,
                 "created_at_ns": now,
@@ -392,7 +288,6 @@ impl ZnsContract {
         listing
     }
 
-    /// Cancel a listing.  Only valid while the listing is unfunded.
     pub fn cancel_listing(
         &mut self,
         id: u64,
@@ -411,7 +306,6 @@ impl ZnsContract {
         let pubkey: [u8; 32] = if let Some(pk_b64) = user_pubkey_b64 {
             let pk = decode_pubkey_b64(&pk_b64)
                 .unwrap_or_else(|e| env::panic_str(&format!("user_pubkey invalid: {e}")));
-            // Must match the key that created this listing.
             assert_eq!(
                 listing.listing_pubkey,
                 Some(pk),
@@ -419,7 +313,6 @@ impl ZnsContract {
             );
             pk
         } else {
-            // Admin path: listing must have been admin-created (no stored pubkey).
             assert!(
                 listing.listing_pubkey.is_none(),
                 "sovereign listing requires user pubkey to cancel"
@@ -438,24 +331,6 @@ impl ZnsContract {
         emit_event("listing_cancelled", serde_json::json!({ "id": id }));
     }
 
-    // ── Funding ──────────────────────────────────────────────────────────
-
-    /// Submit a funding UTXO + pre-built payout transaction, locking the
-    /// listing to a specific buyer.
-    ///
-    /// Admin signature over `BUY:<name>:<buyer_ua>` is verified unconditionally.
-    /// The UTXO is expected at the listing-level burner address and the MPC
-    /// signs with the listing's derivation path.
-    ///
-    /// If `buyer_pubkey_b64` is `Some`, it is stored on the listing as a
-    /// sovereign-mode flag for the indexer. The BUY preimage is always
-    /// admin-signed; the buyer's pubkey signals that subsequent operations
-    /// on this name (e.g. updates) must be signed by that key rather than
-    /// the admin key.
-    ///
-    /// The contract then validates the UTXO scriptPubKey, payout tx structure,
-    /// and value balance before computing the sighash and marking the listing
-    /// funded.
     pub fn submit_funding(
         &mut self,
         listing_id: u64,
@@ -556,9 +431,6 @@ impl ZnsContract {
         );
     }
 
-    // ── MPC signing flow ─────────────────────────────────────────────────
-
-    /// Request the MPC to sign the payout transaction for a funded listing.
     pub fn request_payout_signature(&mut self, listing_id: u64) -> Promise {
         let listing = self
             .listings
@@ -620,8 +492,6 @@ impl ZnsContract {
         }
     }
 
-    // ── Read-only queries ────────────────────────────────────────────────
-
     pub fn get_listing(&self, id: u64) -> Option<Listing> {
         self.listings.get(&id).cloned()
     }
@@ -645,7 +515,7 @@ impl ZnsContract {
             "mpc_contract": self.mpc_contract,
             "mpc_root_pubkey": self.mpc_root_pubkey,
             "treasury_ua": self.treasury_ua,
-            "commission_bps": self.commission_bps,
+            "commission_bps": COMMISSION_BPS,
             "payout_fee_zat": self.payout_fee_zat,
             "mainnet": self.mainnet,
             "consensus_branch_id": self.consensus_branch_id,
@@ -654,10 +524,6 @@ impl ZnsContract {
         })
     }
 }
-
-// ───────────────────────────────────────────────────────────────────────────
-// Private helpers
-// ───────────────────────────────────────────────────────────────────────────
 
 impl ZnsContract {
     fn assert_owner(&self) {
@@ -690,7 +556,7 @@ impl ZnsContract {
             .sign(SignRequestArgs {
                 path: mpc_path,
                 payload: sighash,
-                domain_id: 0,
+                key_version: 0,
             })
             .then(
                 ext_self::ext(env::current_account_id())
@@ -700,10 +566,6 @@ impl ZnsContract {
     }
 
 }
-
-// ───────────────────────────────────────────────────────────────────────────
-// Standalone utilities
-// ───────────────────────────────────────────────────────────────────────────
 
 fn emit_event(event: &str, data: serde_json::Value) {
     let payload = serde_json::json!({
@@ -715,10 +577,6 @@ fn emit_event(event: &str, data: serde_json::Value) {
     env::log_str(&format!("EVENT_JSON:{}", payload));
 }
 
-/// Build the MPC derivation path for a listing.
-///
-/// Format: `zns-<name>-<nonce>` — uniqueness is guaranteed because each
-/// replacement listing for the same name must use a strictly higher nonce.
 fn build_listing_path(name: &str, nonce: u64) -> String {
     format!("zns-{name}-{nonce}")
 }
@@ -843,10 +701,6 @@ fn validate_unified_address(ua: &str, mainnet: bool) -> Result<(), &'static str>
 
     Ok(())
 }
-
-// ───────────────────────────────────────────────────────────────────────────
-// Tests
-// ───────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
