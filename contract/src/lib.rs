@@ -238,13 +238,6 @@ impl ZnsContract {
         self.mpc_root_pubkey = pubkey;
     }
 
-    pub fn set_treasury_ua(&mut self, ua: String) {
-        self.assert_owner();
-        validate_unified_address(&ua, self.mainnet)
-            .unwrap_or_else(|e| env::panic_str(&format!("treasury_ua invalid: {e}")));
-        self.treasury_ua = ua;
-    }
-
     pub fn set_admin_pubkey(&mut self, pubkey_b64: String) {
         self.assert_owner();
         let pk = decode_pubkey_b64(&pubkey_b64)
@@ -291,6 +284,7 @@ impl ZnsContract {
         signature_b64: String,
         user_pubkey_b64: Option<String>,
     ) -> Listing {
+        self.assert_owner();
         assert!(
             !name.is_empty() && name.len() <= MAX_NAME_LEN,
             "name length"
@@ -696,7 +690,7 @@ impl ZnsContract {
             .sign(SignRequestArgs {
                 path: mpc_path,
                 payload: sighash,
-                key_version: 0,
+                domain_id: 0,
             })
             .then(
                 ext_self::ext(env::current_account_id())
