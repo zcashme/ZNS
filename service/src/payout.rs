@@ -33,7 +33,7 @@ use secp256k1::{PublicKey as SecpPubkey, Secp256k1};
 use sha2::{Digest, Sha256};
 use transparent::{
     builder::TransparentBuilder,
-    bundle::{Bundle as TBundle, OutPoint, TxOut},
+    bundle::{Bundle as TBundle, MapAuth, OutPoint, TxOut},
 };
 use zcash_address::ZcashAddress;
 use zcash_keys::address::{Address as ZAddress, UnifiedAddress};
@@ -351,15 +351,63 @@ pub fn finalize_with_mpc(plan: PayoutPlan, mpc_sig_compact: &[u8; 64]) -> Result
     Ok(out)
 }
 
+/// Mapper that converts an `Unauthorized` transparent bundle into an `Authorized`
+/// one with an empty scriptSig, bypassing ECDSA signature verification.
+///
+/// This is used only for `build_tx_bytes` where the transaction is submitted to
+/// the NEAR contract for structural validation and sighash computation. The
+/// contract skips the scriptSig entirely, so it does not need to contain a valid
+/// signature at this stage.
+struct DummyAuth;
+
+impl MapAuth<transparent::builder::Unauthorized, transparent::bundle::Authorized> for DummyAuth {
+    fn map_script_sig(
+        &self,
+        _s: <transparent::builder::Unauthorized as transparent::bundle::Authorization>::ScriptSig,
+    ) -> transparent::address::Script {
+        transparent::address::Script(zcash_script::script::Code(vec![]))
+    }
+
+    fn map_authorization(
+        &self,
+        _s: transparent::builder::Unauthorized,
+    ) -> transparent::bundle::Authorized {
+        transparent::bundle::Authorized
+    }
+}
+
 pub fn build_tx_bytes(input: PayoutInputs<'_>) -> Result<Vec<u8>> {
     let plan = build_unsigned(input)?;
-    let secp = Secp256k1::new();
-    let dummy_sk = secp256k1::SecretKey::from_slice(&[7u8; 32]).expect("static dummy secret key");
-    let dummy_msg = secp256k1::Message::from_digest([0u8; 32]);
-    let dummy_sig = secp.sign_ecdsa(&dummy_msg, &dummy_sk);
-    let mut dummy_compact = [0u8; 64];
-    dummy_compact.copy_from_slice(&dummy_sig.serialize_compact());
-    finalize_with_mpc(plan, &dummy_compact)
+
+    // ── prove + finalize orchard bundle binding signature ────────────────
+    let mut rng = ChaCha20Rng::from_seed(plan.proof_seed);
+    let orchard_proven = plan
+        .orchard_unproven
+        .create_proof(orchard_proving_key(), &mut rng)
+        .map_err(|e| anyhow!("orchard prove: {e:?}"))?;
+    let orchard_authed = orchard_proven
+        .apply_signatures(rng, plan.orchard_sighash, &[])
+        .map_err(|e| anyhow!("orchard apply_signatures: {e:?}"))?;
+
+    // ── bypass transparent signature verification with empty scriptSig ──
+    let transparent_authed = plan.transparent_unauth.map_authorization(DummyAuth);
+
+    // ── compose authorized transaction and serialize ─────────────────────
+    let td_auth: TransactionData<Authorized> = TransactionData::from_parts(
+        TxVersion::V5,
+        plan.consensus_branch_id,
+        0,
+        plan.target_height + 40,
+        Some(transparent_authed),
+        None,
+        None,
+        Some(orchard_authed),
+    );
+
+    let tx = td_auth.freeze().context("freeze transaction")?;
+    let mut out = Vec::with_capacity(2048);
+    tx.write(&mut out).context("serialize tx")?;
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -51,20 +51,42 @@ pub struct ContractListingView {
     pub created_at_ns: u64,
     pub listing_nonce: u64,
     pub burner_taddr: String,
-    pub burner_pubkey_hex: String,
+    pub burner_pubkey: Vec<u8>,
     pub mpc_path: String,
     pub funded: bool,
     pub buyer_ua: Option<String>,
     pub buyer_signature_b64: Option<String>,
     pub buyer_pubkey_b64: Option<String>,
-    pub funding_outpoint_txid_hex: Option<String>,
-    pub funding_vout: Option<u32>,
+    pub funding_outpoint: Option<([u8; 32], u32)>,
     pub utxo_value_zats: Option<u64>,
-    pub payout_tx_hash_hex: Option<String>,
-    pub payout_sighash_hex: Option<String>,
-    pub payout_fee_zat: u64,
-    pub commission_zat: u64,
-    pub seller_receives_zat: u64,
+    pub payout_tx_hash: Option<[u8; 32]>,
+    pub payout_sighash: Option<[u8; 32]>,
+}
+
+impl ContractListingView {
+    pub fn burner_pubkey_hex(&self) -> String {
+        hex::encode(&self.burner_pubkey)
+    }
+    pub fn funding_outpoint_txid_hex(&self) -> Option<String> {
+        self.funding_outpoint.as_ref().map(|(txid, _)| hex::encode(txid))
+    }
+    pub fn funding_vout(&self) -> Option<u32> {
+        self.funding_outpoint.map(|(_, vout)| vout)
+    }
+    pub fn payout_tx_hash_hex(&self) -> Option<String> {
+        self.payout_tx_hash.map(|h| hex::encode(h))
+    }
+    pub fn payout_sighash_hex(&self) -> Option<String> {
+        self.payout_sighash.map(|h| hex::encode(h))
+    }
+    pub fn commission_zat(&self) -> u64 {
+        self.price_zat * self.commission_bps / 10_000
+    }
+    pub fn seller_receives_zat(&self, payout_fee_zat: u64) -> u64 {
+        self.price_zat
+            .saturating_sub(self.commission_zat())
+            .saturating_sub(payout_fee_zat)
+    }
 }
 
 struct ResolvedListing {
@@ -114,7 +136,7 @@ fn cache_listing(
             listing.commission_bps,
             &listing.treasury_ua,
             &listing.burner_taddr,
-            &listing.burner_pubkey_hex,
+            &listing.burner_pubkey_hex(),
             &listing.mpc_path,
             listing.funded,
         )
@@ -344,14 +366,15 @@ async fn create_purchase_handler(
         )
     };
 
+    let fee_zat = crate::payout::payout_fee();
     Ok(Json(CreatePurchaseResponse {
         registration_id,
         listing_id: listing.contract.id,
-        burner_taddr: listing.contract.burner_taddr,
+        burner_taddr: listing.contract.burner_taddr.clone(),
         price_zat: listing.contract.price_zat,
-        commission_zat: listing.contract.commission_zat,
-        fee_zat: listing.contract.payout_fee_zat,
-        seller_receives_zat: listing.contract.seller_receives_zat,
+        commission_zat: listing.contract.commission_zat(),
+        fee_zat,
+        seller_receives_zat: listing.contract.seller_receives_zat(fee_zat),
         buy_memo,
     }))
 }

@@ -131,15 +131,15 @@ async fn submit_funding(
         seller_ua: &listing.seller_ua,
         treasury_ua: &listing.treasury_ua,
         buyer_ua: None,
-        seller_amount: contract_listing.seller_receives_zat,
-        treasury_amount: contract_listing.commission_zat,
+        seller_amount: contract_listing.seller_receives_zat(crate::payout::payout_fee()),
+        treasury_amount: contract_listing.commission_zat(),
         memo: build_buy_memo(
             &listing.name,
             &reg.buyer_ua,
             &reg.buyer_signature_b64,
             reg.is_sovereign.then_some(&reg.buyer_pubkey_b64),
         ),
-        fee: Some(contract_listing.payout_fee_zat),
+        fee: Some(crate::payout::payout_fee()),
     })?;
 
     // Sovereign signatures are flagged in the DB so the contract can verify
@@ -218,15 +218,15 @@ async fn drive_payout(
         seller_ua: &listing.seller_ua,
         treasury_ua: &listing.treasury_ua,
         buyer_ua: None,
-        seller_amount: contract_listing.seller_receives_zat,
-        treasury_amount: contract_listing.commission_zat,
+        seller_amount: contract_listing.seller_receives_zat(crate::payout::payout_fee()),
+        treasury_amount: contract_listing.commission_zat(),
         memo: build_buy_memo(
             &listing.name,
             &reg.buyer_ua,
             &reg.buyer_signature_b64,
             reg.is_sovereign.then_some(&reg.buyer_pubkey_b64),
         ),
-        fee: Some(contract_listing.payout_fee_zat),
+        fee: Some(crate::payout::payout_fee()),
     })?;
 
     let final_tx = payout::finalize_with_mpc(plan, &signature_to_compact(&sig)?)?;
