@@ -146,17 +146,12 @@ pub struct Listing {
     // Funding state — populated by submit_funding.
     pub funded: bool,
     pub buyer_ua: Option<String>,
-    pub buyer_signature_b64: Option<String>,
     pub buyer_pubkey_b64: Option<String>,
     pub funding_outpoint: Option<([u8; 32], u32)>,
     pub utxo_value_zats: Option<u64>,
     pub payout_tx_hash: Option<[u8; 32]>,
     pub payout_sighash: Option<[u8; 32]>,
     pub payout_signature: Option<MpcSignature>,
-
-    // Per-buyer burner path + key (set by submit_funding, used by MPC).
-    pub buyer_mpc_path: Option<String>,
-    pub buyer_burner_pubkey: Option<Vec<u8>>,
 
     // Ed25519 pubkey that authorized this listing (None = admin key).
     pub listing_pubkey: Option<[u8; 32]>,
@@ -370,15 +365,12 @@ impl ZnsContract {
             mpc_path: mpc_path.clone(),
             funded: false,
             buyer_ua: None,
-            buyer_signature_b64: None,
             buyer_pubkey_b64: None,
             funding_outpoint: None,
             utxo_value_zats: None,
             payout_tx_hash: None,
             payout_sighash: None,
             payout_signature: None,
-            buyer_mpc_path: None,
-            buyer_burner_pubkey: None,
             listing_pubkey,
         };
         self.listings.insert(id, listing.clone());
@@ -458,17 +450,14 @@ impl ZnsContract {
     /// listing to a specific buyer.
     ///
     /// Admin signature over `BUY:<name>:<buyer_ua>` is verified unconditionally.
-    /// Then the contract branches into two mutually exclusive paths:
+    /// The UTXO is expected at the listing-level burner address and the MPC
+    /// signs with the listing's derivation path.
     ///
-    ///   * **Admin path** — `buyer_signature_b64` and `buyer_pubkey_b64` are
-    ///     both `None`.  The UTXO is expected at the listing-level burner and
-    ///     the MPC signs with `listing.mpc_path`.
-    ///
-    ///   * **Sovereign path** — both are `Some`.  The buyer's Ed25519 sig over
-    ///     `BUY:<name>:<buyer_ua>` is additionally verified, a per-buyer burner
-    ///     is derived, and the MPC signs with a per-buyer path.
-    ///
-    /// Mixed `Some/None` panics.
+    /// If `buyer_pubkey_b64` is `Some`, it is stored on the listing as a
+    /// sovereign-mode flag for the indexer. The BUY preimage is always
+    /// admin-signed; the buyer's pubkey signals that subsequent operations
+    /// on this name (e.g. updates) must be signed by that key rather than
+    /// the admin key.
     ///
     /// The contract then validates the UTXO scriptPubKey, payout tx structure,
     /// and value balance before computing the sighash and marking the listing
@@ -481,7 +470,6 @@ impl ZnsContract {
         payout_tx: Vec<u8>,
         buyer_ua: String,
         admin_signature_b64: String,
-        buyer_signature_b64: Option<String>,
         buyer_pubkey_b64: Option<String>,
     ) {
         let mut listing = self
@@ -506,42 +494,13 @@ impl ZnsContract {
             "admin signature invalid"
         );
 
-        let (burner_pubkey, mpc_path) = match (&buyer_signature_b64, &buyer_pubkey_b64) {
-            (Some(sig), Some(pk_b64)) => {
-                let buyer_pubkey = decode_pubkey_b64(pk_b64)
-                    .unwrap_or_else(|e| env::panic_str(&format!("buyer_pubkey invalid: {e}")));
-                let buyer_payload = format!("BUY:{}:{buyer_ua}", listing.name);
-                assert!(
-                    ed25519_verify_b64(sig, &buyer_payload, &buyer_pubkey),
-                    "buyer signature invalid"
-                );
-                let buyer_mpc_path = build_buyer_path(
-                    &listing.name,
-                    listing.listing_nonce,
-                    pk_b64,
-                );
-                assert!(
-                    !buyer_mpc_path.is_empty() && buyer_mpc_path.len() <= MAX_PATH_LEN,
-                    "buyer mpc_path length"
-                );
-                let (_taddr, pk) = derive_burner(
-                    &self.mpc_root_pubkey,
-                    env::current_account_id().as_str(),
-                    &buyer_mpc_path,
-                    self.mainnet,
-                )
-                .unwrap_or_else(|e| env::panic_str(&format!("buyer burner derivation failed: {e}")));
-                (pk, buyer_mpc_path)
-            }
-            (None, None) => {
-                let mut pk = [0u8; 33];
-                pk.copy_from_slice(&listing.burner_pubkey);
-                (pk, listing.mpc_path.clone())
-            }
-            _ => env::panic_str(
-                "buyer_signature and buyer_pubkey must both be present or both absent"
-            ),
-        };
+        if let Some(pk_b64) = &buyer_pubkey_b64 {
+            let _buyer_pubkey = decode_pubkey_b64(pk_b64)
+                .unwrap_or_else(|e| env::panic_str(&format!("buyer_pubkey invalid: {e}")));
+        }
+
+        let mut burner_pubkey = [0u8; 33];
+        burner_pubkey.copy_from_slice(&listing.burner_pubkey);
 
         validate_burner_script(&utxo_script_pubkey, &burner_pubkey)
             .unwrap_or_else(|e| env::panic_str(&format!("burner script invalid: {e}")));
@@ -582,14 +541,11 @@ impl ZnsContract {
 
         listing.funded = true;
         listing.buyer_ua = Some(buyer_ua.clone());
-        listing.buyer_signature_b64 = buyer_signature_b64;
         listing.buyer_pubkey_b64 = buyer_pubkey_b64;
         listing.funding_outpoint = Some(funding_outpoint);
         listing.utxo_value_zats = Some(utxo_value_zats);
         listing.payout_tx_hash = Some(payout_tx_hash);
         listing.payout_sighash = Some(payout_sighash);
-        listing.buyer_mpc_path = Some(mpc_path.clone());
-        listing.buyer_burner_pubkey = Some(burner_pubkey.to_vec());
         self.listings.insert(listing_id, listing);
 
         emit_event(
@@ -602,7 +558,6 @@ impl ZnsContract {
                 "utxo_value_zats": utxo_value_zats,
                 "payout_tx_hash": hex::encode(payout_tx_hash),
                 "payout_sighash": hex::encode(payout_sighash),
-                "buyer_mpc_path": mpc_path,
             }),
         );
     }
@@ -622,11 +577,7 @@ impl ZnsContract {
             "payout already signed"
         );
         let sighash = listing.payout_sighash.expect("payout_sighash missing");
-        let mpc_path = listing
-            .buyer_mpc_path
-            .as_ref()
-            .expect("buyer_mpc_path missing")
-            .clone();
+        let mpc_path = listing.mpc_path.clone();
         emit_event(
             "payout_signature_requested",
             serde_json::json!({
@@ -776,10 +727,6 @@ fn emit_event(event: &str, data: serde_json::Value) {
 /// replacement listing for the same name must use a strictly higher nonce.
 fn build_listing_path(name: &str, nonce: u64) -> String {
     format!("zns-{name}-{nonce}")
-}
-
-fn build_buyer_path(name: &str, nonce: u64, buyer_pubkey_b64: &str) -> String {
-    format!("zns-{name}-{nonce}-{buyer_pubkey_b64}")
 }
 
 fn decode_pubkey_b64(b64: &str) -> Result<[u8; 32], &'static str> {
