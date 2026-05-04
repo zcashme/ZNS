@@ -144,13 +144,14 @@ impl Watcher {
                 r.error_message
             ));
         }
-        // Compute txid (double-SHA256, displayed big-endian) from the signed bytes.
-        use sha2::{Digest, Sha256};
-        let h1 = Sha256::digest(raw);
-        let h2 = Sha256::digest(h1);
-        let mut be = h2.to_vec();
-        be.reverse();
-        Ok(hex::encode(be))
+        // Compute the ZIP-244 transaction identifier (Zcash v5 txid) by
+        // deserializing the signed bytes and calling .txid(), which uses
+        // TxIdDigester internally.  Double-SHA256 of the raw bytes is the
+        // Bitcoin convention and produces the wrong txid for Zcash v5.
+        use zcash_primitives::transaction::Transaction;
+        let tx = Transaction::read(raw, zcash_primitives::consensus::BranchId::Nu6)
+            .context("deserialize tx to compute txid")?;
+        Ok(tx.txid().to_string())
     }
 }
 
