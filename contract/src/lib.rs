@@ -98,7 +98,6 @@ pub struct ZnsContract {
     pub mpc_contract: AccountId,
     pub mpc_root_pubkey: String,
     pub treasury_ua: String,
-    pub payout_fee_zat: u64,
     pub mainnet: bool,
     pub consensus_branch_id: u32,
     pub admin_pubkey: [u8; 32],
@@ -115,14 +114,12 @@ impl ZnsContract {
         mpc_contract: AccountId,
         mpc_root_pubkey: String,
         treasury_ua: String,
-        payout_fee_zat: u64,
         mainnet: bool,
         consensus_branch_id: u32,
         admin_pubkey_b64: String,
     ) -> Self {
         validate_unified_address(&treasury_ua, mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("treasury_ua invalid: {e}")));
-        assert!(payout_fee_zat > 0, "payout_fee_zat must be > 0");
         let admin_pubkey = decode_pubkey_b64(&admin_pubkey_b64)
             .unwrap_or_else(|e| env::panic_str(&format!("admin_pubkey invalid: {e}")));
         Self {
@@ -130,7 +127,6 @@ impl ZnsContract {
             mpc_contract,
             mpc_root_pubkey,
             treasury_ua,
-            payout_fee_zat,
             mainnet,
             consensus_branch_id,
             admin_pubkey,
@@ -155,12 +151,6 @@ impl ZnsContract {
         let pk = decode_pubkey_b64(&pubkey_b64)
             .unwrap_or_else(|e| env::panic_str(&format!("admin_pubkey invalid: {e}")));
         self.admin_pubkey = pk;
-    }
-
-    pub fn set_payout_fee_zat(&mut self, fee: u64) {
-        self.assert_owner();
-        assert!(fee > 0, "payout_fee_zat must be > 0");
-        self.payout_fee_zat = fee;
     }
 
     pub fn set_consensus_branch_id(&mut self, branch_id: u32) {
@@ -190,10 +180,7 @@ impl ZnsContract {
         );
         validate_unified_address(&seller_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("seller_ua invalid: {e}")));
-        assert!(
-            price_zat > self.payout_fee_zat,
-            "price_zat must exceed payout fee"
-        );
+        assert!(price_zat > 0, "price_zat must be > 0");
 
         let (pubkey, listing_pubkey) = if let Some(pk_b64) = user_pubkey_b64 {
             let pk = decode_pubkey_b64(&pk_b64)
@@ -275,7 +262,6 @@ impl ZnsContract {
                 "price_zat": price_zat,
                 "commission_bps": COMMISSION_BPS,
                 "treasury_ua": self.treasury_ua,
-                "payout_fee_zat": self.payout_fee_zat,
                 "created_at_ns": now,
                 "listing_nonce": nonce,
                 "burner_taddr": burner_taddr,
@@ -357,7 +343,6 @@ impl ZnsContract {
             utxo_value_zats, listing.price_zat,
             "utxo value must equal price"
         );
-        assert!(utxo_value_zats > self.payout_fee_zat, "price <= fee");
 
         validate_unified_address(&buyer_ua, self.mainnet)
             .unwrap_or_else(|e| env::panic_str(&format!("buyer_ua invalid: {e}")));
@@ -397,12 +382,6 @@ impl ZnsContract {
         assert!(
             payout_orchard.actions.len() == 2,
             "payout must have exactly 2 orchard actions"
-        );
-        let expected_value_balance =
-            -(listing.price_zat as i64 - self.payout_fee_zat as i64);
-        assert_eq!(
-            payout_orchard.value_balance, expected_value_balance,
-            "payout value_balance mismatch"
         );
 
         let payout_sighash =
@@ -521,7 +500,6 @@ impl ZnsContract {
             "mpc_root_pubkey": self.mpc_root_pubkey,
             "treasury_ua": self.treasury_ua,
             "commission_bps": COMMISSION_BPS,
-            "payout_fee_zat": self.payout_fee_zat,
             "mainnet": self.mainnet,
             "consensus_branch_id": self.consensus_branch_id,
             "admin_pubkey_b64": base64::encode(self.admin_pubkey),
