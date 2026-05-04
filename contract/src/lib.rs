@@ -44,7 +44,7 @@ pub struct MpcSignature {
 pub struct SignRequestArgs {
     pub path: String,
     pub payload: [u8; 32],
-    pub key_version: u32,
+    pub domain_id: u64,
 }
 
 #[ext_contract(ext_mpc)]
@@ -70,7 +70,6 @@ pub struct Listing {
     pub name: String,
     pub seller_ua: String,
     pub price_zat: u64,
-    pub treasury_ua: String,
     pub created_at_ns: u64,
     pub listing_nonce: u64,
 
@@ -247,7 +246,6 @@ impl ZnsContract {
             name: name.clone(),
             seller_ua: seller_ua.clone(),
             price_zat,
-            treasury_ua: self.treasury_ua.clone(),
             created_at_ns: now,
             listing_nonce: nonce,
             burner_taddr: burner_taddr.clone(),
@@ -563,7 +561,7 @@ impl ZnsContract {
             .sign(SignRequestArgs {
                 path: mpc_path,
                 payload: sighash,
-                key_version: 0,
+                domain_id: 0,
             })
             .then(
                 ext_self::ext(env::current_account_id())
