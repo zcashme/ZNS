@@ -16,6 +16,8 @@ pub struct AppState {
     pub near: NearClient,
     pub watcher: Watcher,
     pub memo_signer: Option<crate::memo::MemoSigner>,
+    pub treasury_ua: String,
+    pub commission_bps: u64,
 }
 
 #[derive(Deserialize)]
@@ -40,15 +42,12 @@ pub struct CreatePurchaseResponse {
     pub buy_memo: String,
 }
 
-const COMMISSION_BPS: u64 = 400; // 4%
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ContractListingView {
     pub id: u64,
     pub name: String,
     pub seller_ua: String,
     pub price_zat: u64,
-    pub treasury_ua: String,
     pub created_at_ns: u64,
     pub listing_nonce: u64,
     pub burner_taddr: String,
@@ -79,12 +78,12 @@ impl ContractListingView {
     pub fn payout_sighash_hex(&self) -> Option<String> {
         self.payout_sighash.map(|h| hex::encode(h))
     }
-    pub fn commission_zat(&self) -> u64 {
-        self.price_zat * COMMISSION_BPS / 10_000
+    pub fn commission_zat(&self, commission_bps: u64) -> u64 {
+        self.price_zat * commission_bps / 10_000
     }
-    pub fn seller_receives_zat(&self, payout_fee_zat: u64) -> u64 {
+    pub fn seller_receives_zat(&self, commission_bps: u64, payout_fee_zat: u64) -> u64 {
         self.price_zat
-            .saturating_sub(self.commission_zat())
+            .saturating_sub(self.commission_zat(commission_bps))
             .saturating_sub(payout_fee_zat)
     }
 }
@@ -133,7 +132,6 @@ fn cache_listing(
             &listing.name,
             &listing.seller_ua,
             listing.price_zat,
-            &listing.treasury_ua,
             &listing.burner_taddr,
             &listing.burner_pubkey_hex(),
             &listing.mpc_path,
@@ -371,9 +369,9 @@ async fn create_purchase_handler(
         listing_id: listing.contract.id,
         burner_taddr: listing.contract.burner_taddr.clone(),
         price_zat: listing.contract.price_zat,
-        commission_zat: listing.contract.commission_zat(),
+        commission_zat: listing.contract.commission_zat(state.commission_bps),
         fee_zat,
-        seller_receives_zat: listing.contract.seller_receives_zat(fee_zat),
+        seller_receives_zat: listing.contract.seller_receives_zat(state.commission_bps, fee_zat),
         buy_memo,
     }))
 }

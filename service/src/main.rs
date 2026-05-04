@@ -53,12 +53,26 @@ async fn main() -> Result<()> {
         .as_ref()
         .and_then(|k| memo::MemoSigner::from_hex(k).ok());
 
+    let config_view: serde_json::Value = near
+        .view_zns("get_config", serde_json::json!({}))
+        .await
+        .context("fetch ZNS contract config")?;
+    let treasury_ua = config_view["treasury_ua"]
+        .as_str()
+        .context("treasury_ua missing from contract config")?
+        .to_string();
+    let commission_bps = config_view["commission_bps"]
+        .as_u64()
+        .context("commission_bps missing from contract config")?;
+
     let http_state = Arc::new(http::AppState {
         cfg: cfg.clone(),
         store: store.clone(),
         near,
         watcher,
         memo_signer,
+        treasury_ua,
+        commission_bps,
     });
 
     tokio::spawn(funding::run_worker(http_state.clone()));
