@@ -1,33 +1,42 @@
 #![no_main]
 sp1_zkvm::entrypoint!(main);
 
-// Angle 2: run Sinsemilla CommitDomain (the actual NoteCommit primitive) and
-// measure cycle count via cargo prove execute.
-use ff::PrimeField;
-use group::Curve;
-use pasta_curves::arithmetic::CurveAffine;
-use pasta_curves::pallas;
-use sinsemilla::CommitDomain;
+// Angle 3: full orchard Note::from_parts -> note.commitment() end-to-end inside the zkVM.
+// We read all note fields from stdin, compute the NoteCommitment, and commit its x-coordinate.
+use orchard::{
+    note::{RandomSeed, Rho},
+    value::NoteValue,
+    Address, Note,
+};
 
 pub fn main() {
-    let msg_bytes = sp1_zkvm::io::read::<[u8; 8]>();
-    let rcm_bytes = sp1_zkvm::io::read::<[u8; 32]>();
+    // Recipient address: 43 bytes — read as a Vec then convert.
+    let addr_vec = sp1_zkvm::io::read::<Vec<u8>>();
+    let addr_bytes: [u8; 43] = addr_vec.try_into().expect("expected 43 addr bytes");
+    // Note value: raw u64 (zatoshi).
+    let value_raw = sp1_zkvm::io::read::<u64>();
+    // rho: 32-byte canonical LE Pallas base field element.
+    let rho_bytes = sp1_zkvm::io::read::<[u8; 32]>();
+    // rseed: 32-byte random seed.
+    let rseed_bytes = sp1_zkvm::io::read::<[u8; 32]>();
 
-    let msg_bits: Vec<bool> = msg_bytes
-        .iter()
-        .flat_map(|b| (0..8u8).map(move |i| (b >> i) & 1 == 1))
-        .collect();
+    let recipient = Address::from_raw_address_bytes(&addr_bytes)
+        .expect("invalid address bytes");
 
-    let domain = CommitDomain::new("z.cash:Orchard-NoteCommit");
+    let value = NoteValue::from_raw(value_raw);
 
-    let rcm = pallas::Scalar::from_repr(rcm_bytes).unwrap_or_else(|| pallas::Scalar::from(1u64));
+    let rho = Rho::from_bytes(&rho_bytes)
+        .expect("invalid rho bytes");
 
-    let commitment = domain
-        .commit(msg_bits.into_iter(), &rcm)
-        .expect("sinsemilla commit failed");
+    let rseed = RandomSeed::from_bytes(rseed_bytes, &rho)
+        .expect("invalid rseed bytes");
 
-    let affine = commitment.to_affine();
-    let x_bytes: [u8; 32] = affine.coordinates().unwrap().x().to_repr();
+    let note = Note::from_parts(recipient, value, rho, rseed)
+        .expect("invalid note");
 
-    sp1_zkvm::io::commit(&x_bytes);
+    let cmx = note.commitment();
+    // ExtractedNoteCommitment is the x-coordinate of the NoteCommitment point.
+    let cmx_bytes: [u8; 32] = orchard::note::ExtractedNoteCommitment::from(cmx).to_bytes();
+
+    sp1_zkvm::io::commit(&cmx_bytes);
 }

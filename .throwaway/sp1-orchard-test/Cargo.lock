@@ -4523,6 +4523,8 @@ dependencies = [
 name = "sp1-orchard-test-host"
 version = "0.1.0"
 dependencies = [
+ "orchard",
+ "rand 0.8.6",
  "sp1-sdk",
  "tokio",
 ]
