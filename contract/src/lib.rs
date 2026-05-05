@@ -3,6 +3,9 @@ use near_sdk::{
     env, ext_contract, near, near_bindgen, AccountId, Gas, NearToken, PanicOnDefault, Promise,
     PromiseError,
 };
+use near_mpc_contract_interface::types::{
+    DomainId, K256Signature, Payload, SignRequestArgs, SignatureResponse,
+};
 
 pub mod zcash;
 use zcash::{compute_sighash_all, derive_burner, parse_tx, sha256, validate_burner_script};
@@ -20,37 +23,10 @@ const MAX_TX_BYTES: usize = 20_000;
 const EVENT_STANDARD: &str = "zns";
 const EVENT_VERSION: &str = "1.0.0";
 
-#[derive(Clone, Debug)]
-#[near(serializers = [json, borsh])]
-pub struct AffinePoint {
-    pub affine_point: String,
-}
-
-#[derive(Clone, Debug)]
-#[near(serializers = [json, borsh])]
-pub struct ScalarHex {
-    pub scalar: String,
-}
-
-#[derive(Clone, Debug)]
-#[near(serializers = [json, borsh])]
-pub struct MpcSignature {
-    pub big_r: AffinePoint,
-    pub s: ScalarHex,
-    pub recovery_id: u8,
-}
-
-#[near(serializers = [json, borsh])]
-pub struct SignRequestArgs {
-    pub path: String,
-    pub payload: [u8; 32],
-    pub domain_id: u64,
-}
-
 #[ext_contract(ext_mpc)]
 #[allow(dead_code)]
 trait ExtMpc {
-    fn sign(&self, request: SignRequestArgs) -> MpcSignature;
+    fn sign(&self, request: SignRequestArgs) -> SignatureResponse;
 }
 
 #[ext_contract(ext_self)]
@@ -58,7 +34,7 @@ trait ExtMpc {
 trait ExtSelf {
     fn mpc_sign_callback(
         &mut self,
-        #[callback_result] result: Result<MpcSignature, PromiseError>,
+        #[callback_result] result: Result<SignatureResponse, PromiseError>,
         listing_id: u64,
     );
 }
@@ -84,7 +60,7 @@ pub struct Listing {
     pub utxo_value_zats: Option<u64>,
     pub payout_tx_hash: Option<[u8; 32]>,
     pub payout_sighash: Option<[u8; 32]>,
-    pub payout_signature: Option<MpcSignature>,
+    pub payout_signature: Option<K256Signature>,
 
     pub listing_pubkey: Option<[u8; 32]>,
 }
@@ -442,7 +418,7 @@ impl ZnsContract {
     #[private]
     pub fn mpc_sign_callback(
         &mut self,
-        #[callback_result] result: Result<MpcSignature, PromiseError>,
+        #[callback_result] result: Result<SignatureResponse, PromiseError>,
         listing_id: u64,
     ) {
         let gas_start = env::used_gas();
@@ -452,13 +428,23 @@ impl ZnsContract {
             .expect("listing not found")
             .clone();
         match result {
-            Ok(signature) => {
+            Ok(SignatureResponse::Secp256k1(signature)) => {
                 listing.payout_signature = Some(signature);
                 self.listings.insert(listing_id, listing);
                 emit_event(
                     "signature_ready",
                     serde_json::json!({
                         "listing_id": listing_id,
+                        "callback_gas_used": (env::used_gas().as_gas() - gas_start.as_gas()),
+                    }),
+                );
+            }
+            Ok(SignatureResponse::Ed25519 { .. }) => {
+                emit_event(
+                    "signature_failed",
+                    serde_json::json!({
+                        "listing_id": listing_id,
+                        "error": "MPC returned Ed25519 signature for ECDSA request",
                         "callback_gas_used": (env::used_gas().as_gas() - gas_start.as_gas()),
                     }),
                 );
@@ -487,7 +473,7 @@ impl ZnsContract {
             .cloned()
     }
 
-    pub fn get_payout_signature(&self, listing_id: u64) -> Option<MpcSignature> {
+    pub fn get_payout_signature(&self, listing_id: u64) -> Option<K256Signature> {
         self.listings
             .get(&listing_id)
             .and_then(|l| l.payout_signature.clone())
@@ -538,8 +524,8 @@ impl ZnsContract {
             .with_attached_deposit(MPC_DEPOSIT)
             .sign(SignRequestArgs {
                 path: mpc_path,
-                payload: sighash,
-                domain_id: 0,
+                payload: Payload::from_legacy_ecdsa(sighash),
+                domain_id: DomainId(0),
             })
             .then(
                 ext_self::ext(env::current_account_id())

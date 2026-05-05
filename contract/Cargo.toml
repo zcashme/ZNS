@@ -22,6 +22,9 @@ hex = { version = "0.4", default-features = false, features = ["alloc"] }
 k256 = { version = "0.13", default-features = false, features = ["arithmetic", "alloc"] }
 base64 = { version = "0.20", default-features = false, features = ["alloc"] }
 
+# NEAR MPC wire types — not published on crates.io; pinned to vendored workspace.
+near-mpc-contract-interface = { path = "../near-mpc/crates/near-mpc-contract-interface" }
+
 [dev-dependencies]
 near-sdk = { version = "5.8.0", features = ["unit-testing"] }
 

@@ -16,8 +16,8 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use near_mpc_crypto_types::K256Signature;
 use near_primitives::views::FinalExecutionStatus;
-use serde::Deserialize;
 use serde_json::json;
 use zcash_transparent as transparent;
 
@@ -30,22 +30,6 @@ use crate::{
 
 const SUBMIT_FUNDING_GAS: u64 = 150_000_000_000_000;
 const SIGN_REQUEST_GAS: u64 = 300_000_000_000_000;
-
-#[derive(Debug, Deserialize)]
-struct MpcSignature {
-    pub big_r: AffinePoint,
-    pub s: ScalarHex,
-}
-
-#[derive(Debug, Deserialize)]
-struct AffinePoint {
-    pub affine_point: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ScalarHex {
-    pub scalar: String,
-}
 
 pub async fn run_worker(state: Arc<AppState>) {
     let interval = Duration::from_secs(state.cfg.poll_interval_secs.max(1));
@@ -280,7 +264,7 @@ async fn fetch_contract_listing(
 async fn fetch_payout_signature(
     state: &Arc<AppState>,
     contract_listing_id: i64,
-) -> Result<Option<MpcSignature>> {
+) -> Result<Option<K256Signature>> {
     state
         .near
         .view_zns(
@@ -364,26 +348,10 @@ fn txid_le(txid_be_hex: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-fn signature_to_compact(sig: &MpcSignature) -> Result<[u8; 64]> {
-    let point_hex = sig.big_r.affine_point.trim_start_matches("0x");
-    let point_bytes = hex::decode(point_hex).context("decode big_r affine point")?;
-    // MPC returns big_r as either a 33-byte compressed point (03||x) or a 65-byte
-    // uncompressed point (04||x||y).  Either way, r is the x-coordinate.
-    let r_bytes: &[u8] = match point_bytes.len() {
-        33 => &point_bytes[1..], // compressed: skip 02/03 prefix
-        65 => &point_bytes[1..33], // uncompressed: skip 04 prefix, take x
-        64 => &point_bytes[..32], // raw affine coordinate pair
-        other => bail!("big_r unexpected length: {other}"),
-    };
-
-    let scalar_hex = sig.s.scalar.trim_start_matches("0x");
-    let scalar_bytes = hex::decode(scalar_hex).context("decode signature scalar")?;
-    if scalar_bytes.len() != 32 {
-        bail!("signature scalar must be 32 bytes");
-    }
-
+fn signature_to_compact(sig: &K256Signature) -> Result<[u8; 64]> {
     let mut compact = [0u8; 64];
-    compact[..32].copy_from_slice(r_bytes);
-    compact[32..].copy_from_slice(&scalar_bytes);
+    // K256AffinePoint stores a 33-byte compressed point (02/03 || x).
+    compact[..32].copy_from_slice(&sig.big_r.affine_point[1..]);
+    compact[32..].copy_from_slice(&sig.s.scalar);
     Ok(compact)
 }
