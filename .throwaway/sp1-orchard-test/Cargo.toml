@@ -1,0 +1,6 @@
+[workspace]
+members = ["program"]
+resolver = "2"
+
+[workspace.dependencies]
+sp1-zkvm = { path = "../../sp1/crates/zkvm/entrypoint", features = ["lib"] }
