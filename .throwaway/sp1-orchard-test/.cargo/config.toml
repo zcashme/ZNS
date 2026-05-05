@@ -1,2 +1,7 @@
 [target.riscv64im-succinct-zkvm-elf]
-rustflags = ['--cfg', 'getrandom_backend="custom"']
+rustflags = [
+    "--cfg", "getrandom_backend=\"custom\"",
+    "-C", "passes=lower-atomic",
+    "-C", "link-arg=--image-base=0x78000000",
+    "-C", "panic=abort",
+]

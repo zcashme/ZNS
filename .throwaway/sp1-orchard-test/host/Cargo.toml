@@ -1,0 +1,8 @@
+[package]
+name = "sp1-orchard-test-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sp1-sdk = { path = "../../../sp1/crates/sdk" }
+tokio = { version = "1", features = ["full"] }

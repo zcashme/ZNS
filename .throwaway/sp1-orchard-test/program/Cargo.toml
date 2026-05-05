@@ -7,3 +7,7 @@ edition = "2021"
 sp1-zkvm = { workspace = true }
 getrandom = { version = "0.3" }
 orchard = { version = "0.13", default-features = false }
+sinsemilla = { version = "0.1", default-features = false }
+pasta_curves = { version = "0.5", features = ["bits", "alloc"] }
+group = { version = "0.13" }
+ff = { version = "0.13" }
