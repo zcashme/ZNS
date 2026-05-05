@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::contract_view::ContractListingMeta;
 use crate::http::AppState;
 
 const LISTING_SYNC_INTERVAL: Duration = Duration::from_secs(60);
@@ -68,7 +69,7 @@ async fn sync_once(state: &Arc<AppState>, client: &reqwest::Client) -> Result<()
 
             let on_chain = state
                 .near
-                .view_zns::<Option<crate::http::ContractListingView>>(
+                .view_zns::<Option<ContractListingMeta>>(
                     "get_listing_by_name",
                     json!({ "name": item.name }),
                 )

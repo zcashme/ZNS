@@ -3,13 +3,15 @@ use clap::Parser;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
+mod burner;
 mod config;
+mod contract_view;
 mod db;
-mod memo;
 mod delists;
 mod funding;
 mod http;
 mod listings;
+mod memo;
 mod near;
 mod payout;
 mod zcash;
@@ -77,6 +79,14 @@ async fn main() -> Result<()> {
     let commission_bps = config_view["commission_bps"]
         .as_u64()
         .context("commission_bps missing from contract config")?;
+    let mpc_root_pubkey = config_view["mpc_root_pubkey"]
+        .as_str()
+        .context("mpc_root_pubkey missing from contract config")?
+        .to_string();
+    let mainnet = config_view["mainnet"]
+        .as_bool()
+        .context("mainnet missing from contract config")?;
+    let contract_account = cfg.zns_contract.clone();
 
     let http_state = Arc::new(http::AppState {
         cfg: cfg.clone(),
@@ -86,6 +96,9 @@ async fn main() -> Result<()> {
         memo_signer,
         treasury_ua,
         commission_bps,
+        mpc_root_pubkey,
+        contract_account,
+        mainnet,
     });
 
     tokio::spawn(funding::run_worker(http_state.clone()));
