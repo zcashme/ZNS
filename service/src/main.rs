@@ -53,14 +53,27 @@ async fn main() -> Result<()> {
         .as_ref()
         .and_then(|k| memo::MemoSigner::from_hex(k).ok());
 
+    let indexer_status: serde_json::Value = reqwest::Client::new()
+        .post(&cfg.indexer_rpc)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "status", "params": [],
+        }))
+        .send()
+        .await
+        .context("fetch indexer status")?
+        .json()
+        .await
+        .context("parse indexer status")?;
+    let treasury_ua = indexer_status["result"]["address"]
+        .as_str()
+        .context("indexer status missing address field")?
+        .to_string();
+
     let config_view: serde_json::Value = near
         .view_zns("get_config", serde_json::json!({}))
         .await
         .context("fetch ZNS contract config")?;
-    let treasury_ua = config_view["treasury_ua"]
-        .as_str()
-        .context("treasury_ua missing from contract config")?
-        .to_string();
     let commission_bps = config_view["commission_bps"]
         .as_u64()
         .context("commission_bps missing from contract config")?;

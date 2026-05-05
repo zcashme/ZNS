@@ -66,18 +66,6 @@ impl ContractListingView {
     pub fn burner_pubkey_hex(&self) -> String {
         hex::encode(&self.burner_pubkey)
     }
-    pub fn funding_outpoint_txid_hex(&self) -> Option<String> {
-        self.funding_outpoint.as_ref().map(|(txid, _)| hex::encode(txid))
-    }
-    pub fn funding_vout(&self) -> Option<u32> {
-        self.funding_outpoint.map(|(_, vout)| vout)
-    }
-    pub fn payout_tx_hash_hex(&self) -> Option<String> {
-        self.payout_tx_hash.map(|h| hex::encode(h))
-    }
-    pub fn payout_sighash_hex(&self) -> Option<String> {
-        self.payout_sighash.map(|h| hex::encode(h))
-    }
     pub fn commission_zat(&self, commission_bps: u64) -> u64 {
         self.price_zat * commission_bps / 10_000
     }
