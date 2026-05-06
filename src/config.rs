@@ -29,6 +29,10 @@ pub const DB_PATH: &str = "zns.db";
 pub const RPC_PORT: u16 = 3000;
 pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Block window during which a pending buy must be funded before expiring.
+/// 144 blocks ≈ 2 hours on Zcash (75s target).
+pub const BUY_WINDOW_BLOCKS: u64 = 144;
+
 /// Load the two deployment-specific secrets from environment variables.
 ///
 /// Required:

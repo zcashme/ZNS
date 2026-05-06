@@ -327,16 +327,56 @@ async fn handle_action(reg: &Registry, client: &mut decrypter::Client, action: M
                 Err(e) => eprintln!("DB error (update): {e}"),
             }
         }
-        ActionKind::Buy { buyer_ua: _, price: _ } => {
-            // Claim-first BUY handler — implemented in a later step.
-            // Memo format is now ZNS:BUY:<name>:<buyer_ua>:<price>:<sig>; the
-            // pending-buy lifecycle and transparent payment matcher land in
-            // the next commits.
-            let _ = client; // silence unused-mut warning until handler is filled in
-            eprintln!(
-                "BUY received for {} (height {height}, txid {txid}, note {note_value}) — handler not yet implemented",
-                action.name
-            );
+        ActionKind::Buy { buyer_ua, price } => {
+            const BUY_COMMISSION: u64 = 10_000; // 0.0001 ZEC dust to indexer
+            if note_value < BUY_COMMISSION {
+                eprintln!(
+                    "BUY: commission underpayment for {}: {note_value} < {BUY_COMMISSION}",
+                    action.name
+                );
+                return;
+            }
+            let Some(listing) = reg.get_listing(&action.name) else {
+                eprintln!("BUY for unlisted name {}", action.name);
+                return;
+            };
+            if *price != listing.price {
+                eprintln!(
+                    "BUY: price mismatch for {}: memo {price} != listing {}",
+                    action.name, listing.price
+                );
+                return;
+            }
+            if let Some(existing) = reg.get_pending_buy(&action.name)
+                && existing.expires_at >= height
+            {
+                eprintln!(
+                    "BUY: {} already has an active pending buy until height {}",
+                    action.name, existing.expires_at
+                );
+                return;
+            }
+            let expires_at = height + config::BUY_WINDOW_BLOCKS;
+            match reg.create_pending_buy(
+                &action.name,
+                buyer_ua,
+                *price,
+                &listing.pay_taddr,
+                height,
+                expires_at,
+                txid,
+                &action.signature,
+                pubkey,
+            ) {
+                Ok(true) => {
+                    println!(
+                        "Pending buy: {} → {buyer_ua} for {price} zats, awaiting payment to {} (expires {expires_at})",
+                        action.name, listing.pay_taddr
+                    );
+                }
+                Ok(false) => eprintln!("BUY ignored (conflict): {}", action.name),
+                Err(e) => eprintln!("DB error (pending buy): {e}"),
+            }
         }
     }
 }
