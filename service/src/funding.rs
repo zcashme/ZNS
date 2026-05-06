@@ -115,7 +115,7 @@ async fn submit_funding(
     let commission = reg.price_zat * state.commission_bps / 10_000;
     let seller_amount = reg.price_zat.saturating_sub(commission).saturating_sub(fee);
 
-    let payout_tx = payout::build_tx_bytes(PayoutInputs {
+    let plan = payout::build_unsigned(PayoutInputs {
         network: &state.cfg.zcash_network,
         target_height: build_height,
         utxo_outpoint: outpoint,
@@ -135,6 +135,10 @@ async fn submit_funding(
         ),
         fee: Some(fee),
     })?;
+    // Generate SP1 Groth16 proof that the payout notes commit to the correct
+    // seller/treasury addresses.  Phase 4 will pass proof + public values to
+    // submit_funding instead of the old payout_tx bytes.
+    let _sp1_proof = crate::sp1_prover::prove(&plan).await?;
 
     // Sovereign signatures are flagged in the DB so the contract can verify
     // them on chain. The admin signature is always in the memo for anti-forgery.
@@ -151,7 +155,6 @@ async fn submit_funding(
             "listing_id": reg.contract_listing_id,
             "utxo_value_zats": utxo.value_zats,
             "utxo_script_pubkey": utxo.script,
-            "payout_tx": payout_tx,
             "buyer_ua": reg.buyer_ua,
             "admin_signature_b64": reg.admin_signature_b64,
             "buyer_pubkey_b64": sovereign_pk,

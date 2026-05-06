@@ -21,7 +21,7 @@ pub const LWD_URL: &str = "https://testnet.zec.rocks:443";
 pub const LWD_URL: &str = "https://zec.rocks:443";
 
 #[cfg(feature = "testnet")]
-pub const BIRTHDAY: u64 = 1_842_420; // NU5 activation
+pub const BIRTHDAY: u64 = 3_995_000; // Temporarily raised for fast testing
 #[cfg(feature = "mainnet")]
 pub const BIRTHDAY: u64 = 2_726_400; // NU6 activation (Nov 23, 2024)
 

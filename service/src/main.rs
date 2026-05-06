@@ -14,6 +14,7 @@ mod listings;
 mod memo;
 mod near;
 mod payout;
+mod sp1_prover;
 mod zcash;
 
 use config::Config;

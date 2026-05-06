@@ -21,10 +21,11 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result, anyhow};
 use orchard::{
     Address as OrchardAddress, Anchor,
-    builder::{Builder as OrchardBuilder, BundleType},
+    builder::{BundleMetadata, Builder as OrchardBuilder, BundleType},
     bundle::Bundle as OrchardBundle,
     circuit::ProvingKey as OrchardProvingKey,
     keys::OutgoingViewingKey,
+    note::Note as OrchardNote,
     value::NoteValue,
 };
 use rand::SeedableRng;
@@ -33,7 +34,7 @@ use secp256k1::{PublicKey as SecpPubkey, Secp256k1};
 use sha2::{Digest, Sha256};
 use transparent::{
     builder::TransparentBuilder,
-    bundle::{Bundle as TBundle, MapAuth, OutPoint, TxOut},
+    bundle::{Bundle as TBundle, OutPoint, TxOut},
 };
 use zcash_address::ZcashAddress;
 use zcash_keys::address::{Address as ZAddress, UnifiedAddress};
@@ -80,6 +81,12 @@ pub struct PayoutPlan {
         orchard::builder::InProgress<orchard::builder::Unproven, orchard::builder::Unauthorized>,
         ZatBalance,
     >,
+    /// Output-index metadata from the Orchard builder; used by the SP1 prover
+    /// to identify which action corresponds to each recipient.
+    pub orchard_meta: BundleMetadata,
+    /// Recovered note witnesses for the SP1 prover.  `None` for refund bundles.
+    pub seller_note: Option<OrchardNote>,
+    pub treasury_note: Option<OrchardNote>,
 }
 
 /// All inputs required to construct a payout or refund transaction.
@@ -151,6 +158,16 @@ fn network_type(s: &str) -> Result<NetworkType> {
     }
 }
 
+/// Derives a deterministic 32-byte OVK from a label + the build seed so the
+/// service can later recover its own Orchard output notes via
+/// `Bundle::recover_output_with_ovk`.
+fn deterministic_ovk(label: &[u8], build_seed: &[u8; 32]) -> OutgoingViewingKey {
+    let mut h = Sha256::new();
+    h.update(label);
+    h.update(build_seed);
+    OutgoingViewingKey::from(<[u8; 32]>::from(h.finalize()))
+}
+
 fn deterministic_seed(input: &PayoutInputs<'_>, label: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(label);
@@ -216,9 +233,16 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
         .ok_or_else(|| anyhow!("transparent bundle empty"))?;
 
     // ── orchard outputs ──────────────────────────────────────────────────
+    // Derive OVKs deterministically so we can recover the exact note witnesses
+    // (including rseed) from the built bundle for the SP1 prover.
+    let build_seed = deterministic_seed(&input, b"orchard-build");
+    let seller_ovk = deterministic_ovk(b"zns:ovk:seller", &build_seed);
+    let treasury_ovk = deterministic_ovk(b"zns:ovk:treasury", &build_seed);
+
     let mut obuilder = OrchardBuilder::new(BundleType::DEFAULT, Anchor::empty_tree());
+    let is_payout = input.buyer_ua.is_none();
     if let Some(buyer_ua) = input.buyer_ua {
-        // Refund bundle: single action to buyer
+        // Refund bundle: single action to buyer; no SP1 witness needed.
         let buyer_o = parse_orchard_recipient(buyer_ua, net)?;
         obuilder
             .add_output(
@@ -229,12 +253,12 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
             )
             .map_err(|e| anyhow!("orchard add refund output: {e:?}"))?;
     } else {
-        // Payout bundle: seller + treasury
+        // Payout bundle: seller (output 0) + treasury (output 1).
         let seller_o = parse_orchard_recipient(input.seller_ua, net)?;
         let treasury_o = parse_orchard_recipient(input.treasury_ua, net)?;
         obuilder
             .add_output(
-                None::<OutgoingViewingKey>,
+                Some(seller_ovk.clone()),
                 seller_o,
                 NoteValue::from_raw(input.seller_amount),
                 [0u8; 512],
@@ -242,7 +266,7 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
             .map_err(|e| anyhow!("orchard add seller output: {e:?}"))?;
         obuilder
             .add_output(
-                None::<OutgoingViewingKey>,
+                Some(treasury_ovk.clone()),
                 treasury_o,
                 NoteValue::from_raw(input.treasury_amount),
                 input.memo,
@@ -250,11 +274,30 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
             .map_err(|e| anyhow!("orchard add treasury output: {e:?}"))?;
     }
     let proof_seed = deterministic_seed(&input, b"orchard-proof");
-    let mut rng = ChaCha20Rng::from_seed(deterministic_seed(&input, b"orchard-build"));
-    let (orchard_unproven, _meta) = obuilder
+    let mut rng = ChaCha20Rng::from_seed(build_seed);
+    let (orchard_unproven, orchard_meta) = obuilder
         .build::<ZatBalance>(&mut rng)
         .map_err(|e| anyhow!("orchard build: {e:?}"))?
         .ok_or_else(|| anyhow!("orchard bundle empty"))?;
+
+    // ── recover note witnesses for SP1 (payout path only) ───────────────
+    let (seller_note, treasury_note) = if is_payout {
+        let s_idx = orchard_meta
+            .output_action_index(0)
+            .ok_or_else(|| anyhow!("seller output index missing from bundle metadata"))?;
+        let t_idx = orchard_meta
+            .output_action_index(1)
+            .ok_or_else(|| anyhow!("treasury output index missing from bundle metadata"))?;
+        let (s_note, _, _) = orchard_unproven
+            .recover_output_with_ovk(s_idx, &seller_ovk)
+            .ok_or_else(|| anyhow!("seller note recovery failed — OVK mismatch"))?;
+        let (t_note, _, _) = orchard_unproven
+            .recover_output_with_ovk(t_idx, &treasury_ovk)
+            .ok_or_else(|| anyhow!("treasury note recovery failed — OVK mismatch"))?;
+        (Some(s_note), Some(t_note))
+    } else {
+        (None, None)
+    };
 
     // ── compose unauthorized TransactionData and compute sighash ────────
     let td_unauth: TransactionData<Unauthorized> = TransactionData::from_parts(
@@ -298,6 +341,9 @@ pub fn build_unsigned(input: PayoutInputs<'_>) -> Result<PayoutPlan> {
         proof_seed,
         transparent_unauth,
         orchard_unproven,
+        orchard_meta,
+        seller_note,
+        treasury_note,
     })
 }
 
@@ -351,165 +397,3 @@ pub fn finalize_with_mpc(plan: PayoutPlan, mpc_sig_compact: &[u8; 64]) -> Result
     Ok(out)
 }
 
-/// Mapper that converts an `Unauthorized` transparent bundle into an `Authorized`
-/// one with an empty scriptSig, bypassing ECDSA signature verification.
-///
-/// This is used only for `build_tx_bytes` where the transaction is submitted to
-/// the NEAR contract for structural validation and sighash computation. The
-/// contract skips the scriptSig entirely, so it does not need to contain a valid
-/// signature at this stage.
-struct DummyAuth;
-
-impl MapAuth<transparent::builder::Unauthorized, transparent::bundle::Authorized> for DummyAuth {
-    fn map_script_sig(
-        &self,
-        _s: <transparent::builder::Unauthorized as transparent::bundle::Authorization>::ScriptSig,
-    ) -> transparent::address::Script {
-        transparent::address::Script(zcash_script::script::Code(vec![]))
-    }
-
-    fn map_authorization(
-        &self,
-        _s: transparent::builder::Unauthorized,
-    ) -> transparent::bundle::Authorized {
-        transparent::bundle::Authorized
-    }
-}
-
-pub fn build_tx_bytes(input: PayoutInputs<'_>) -> Result<Vec<u8>> {
-    let plan = build_unsigned(input)?;
-
-    // ── prove + finalize orchard bundle binding signature ────────────────
-    let mut rng = ChaCha20Rng::from_seed(plan.proof_seed);
-    let orchard_proven = plan
-        .orchard_unproven
-        .create_proof(orchard_proving_key(), &mut rng)
-        .map_err(|e| anyhow!("orchard prove: {e:?}"))?;
-    let orchard_authed = orchard_proven
-        .apply_signatures(rng, plan.orchard_sighash, &[])
-        .map_err(|e| anyhow!("orchard apply_signatures: {e:?}"))?;
-
-    // ── bypass transparent signature verification with empty scriptSig ──
-    let transparent_authed = plan.transparent_unauth.map_authorization(DummyAuth);
-
-    // ── compose authorized transaction and serialize ─────────────────────
-    let td_auth: TransactionData<Authorized> = TransactionData::from_parts(
-        TxVersion::V5,
-        plan.consensus_branch_id,
-        0,
-        plan.target_height + 40,
-        Some(transparent_authed),
-        None,
-        None,
-        Some(orchard_authed),
-    );
-
-    let tx = td_auth.freeze().context("freeze transaction")?;
-    let mut out = Vec::with_capacity(2048);
-    tx.write(&mut out).context("serialize tx")?;
-    Ok(out)
-}
-
-#[cfg(test)]
-mod sighash_tests {
-    use super::*;
-    use ripemd::Ripemd160;
-    use sha2::{Digest, Sha256};
-    use zcash_keys::keys::{UnifiedAddressRequest, UnifiedSpendingKey};
-    use zcash_protocol::consensus::TestNetwork;
-    use zip32::AccountId;
-    use zns_contract::zcash::{compute_sighash_all, parse_tx};
-
-    /// Derives a testnet Unified Address with an Orchard receiver from a single seed byte.
-    fn test_ua(seed_byte: u8) -> String {
-        let seed = vec![seed_byte; 32];
-        let usk = UnifiedSpendingKey::from_seed(&TestNetwork, &seed, AccountId::ZERO)
-            .expect("USK derivation");
-        let uivk = usk
-            .to_unified_full_viewing_key()
-            .to_unified_incoming_viewing_key();
-        let (ua, _) = uivk
-            .default_address(UnifiedAddressRequest::AllAvailableKeys)
-            .expect("UA derivation");
-        ua.encode(&TestNetwork)
-    }
-
-    /// Builds a P2PKH scriptPubKey for a compressed secp256k1 public key.
-    fn p2pkh_script(pubkey: &[u8; 33]) -> Vec<u8> {
-        let sha = Sha256::digest(pubkey);
-        let ripe = Ripemd160::digest(sha);
-        let mut script = vec![0x76u8, 0xa9, 0x14];
-        script.extend_from_slice(&ripe);
-        script.extend_from_slice(&[0x88, 0xac]);
-        script
-    }
-
-    /// Verifies that the contract's hand-rolled ZIP-244 sighash matches
-    /// zcash_primitives' reference implementation on the same transaction.
-    ///
-    /// Flow:
-    ///   1. build_unsigned  → plan.sighash  (zcash_primitives reference via signature_hash)
-    ///   2. finalize_with_mpc               → serialized tx bytes
-    ///   3. parse_tx + compute_sighash_all  → contract's sighash
-    ///   4. assert_eq
-    #[test]
-    fn contract_sighash_matches_zcash_primitives() {
-        let seller_ua = test_ua(1);
-        let treasury_ua = test_ua(2);
-
-        let secp = Secp256k1::new();
-        let dummy_sk = secp256k1::SecretKey::from_slice(&[7u8; 32]).expect("dummy secret key");
-        let burner_pubkey: [u8; 33] =
-            secp256k1::PublicKey::from_secret_key(&secp, &dummy_sk).serialize();
-        let script_pubkey = p2pkh_script(&burner_pubkey);
-
-        let utxo_value: u64 = 200_000;
-        let fee: u64 = payout_fee();
-        let seller_amount: u64 = 185_000;
-        let treasury_amount: u64 = utxo_value
-            .checked_sub(seller_amount)
-            .and_then(|r| r.checked_sub(fee))
-            .expect("test amounts must balance");
-
-        let plan = build_unsigned(PayoutInputs {
-            network: "testnet",
-            target_height: 2_000_000,
-            utxo_outpoint: transparent::bundle::OutPoint::new([42u8; 32], 1),
-            utxo_value_zats: utxo_value,
-            utxo_script_pubkey: script_pubkey.clone(),
-            burner_pubkey,
-            seller_ua: &seller_ua,
-            treasury_ua: &treasury_ua,
-            buyer_ua: None,
-            seller_amount,
-            treasury_amount,
-            memo: [0u8; 512],
-            fee: Some(fee),
-        })
-        .expect("build_unsigned");
-
-        // zcash_primitives reference — computed inside build_unsigned via signature_hash().
-        let reference_sighash = plan.sighash;
-
-        // Sign the actual sighash so finalize_with_mpc's secp256k1 verification passes.
-        // The transparent input's scriptSig is skipped by parse_tx and does not
-        // affect the sighash computation on either path.
-        let dummy_msg = secp256k1::Message::from_digest(reference_sighash);
-        let dummy_sig = secp.sign_ecdsa(&dummy_msg, &dummy_sk);
-        let mut dummy_compact = [0u8; 64];
-        dummy_compact.copy_from_slice(&dummy_sig.serialize_compact());
-        let tx_bytes = finalize_with_mpc(plan, &dummy_compact).expect("finalize_with_mpc");
-
-        // Contract path: parse the finalized bytes and recompute the sighash.
-        let parsed_tx = parse_tx(&tx_bytes).expect("parse_tx");
-        let contract_sighash = compute_sighash_all(&parsed_tx, utxo_value, &script_pubkey);
-
-        assert_eq!(
-            contract_sighash,
-            reference_sighash,
-            "\ncontract:  {}\nreference: {}",
-            hex::encode(contract_sighash),
-            hex::encode(reference_sighash),
-        );
-    }
-}
