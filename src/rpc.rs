@@ -306,11 +306,11 @@ pub async fn serve(addr: String, state: RpcState) {
     let server = match Server::builder().build(&addr).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("RPC server failed to bind {addr}: {e}");
+            tracing::error!(%addr, error = %e, "RPC server failed to bind");
             return;
         }
     };
     let handle = server.start(state.into_rpc());
-    println!("RPC server listening on {addr}");
+    tracing::info!(%addr, "RPC server listening");
     handle.stopped().await;
 }
