@@ -21,7 +21,12 @@ mod rpc;
 use base64::Engine;
 use orchard::keys::PreparedIncomingViewingKey;
 use tokio::sync::watch;
+use zcash_client_backend::proto::service::TxFilter;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedIncomingViewingKey};
+use zcash_primitives::consensus::BranchId;
+use zcash_primitives::legacy::TransparentAddress;
+use zcash_primitives::transaction::Transaction;
+use zcash_protocol::consensus::BlockHeight;
 
 use crate::memo::{ActionKind, MemoAction};
 use crate::registry::Registry;
@@ -91,11 +96,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             handle_action(
                 &reg,
+                &mut client,
                 action,
                 note.value,
                 &note.txid.to_string(),
                 note.height,
-            );
+            ).await;
         }
 
         last_scanned = scanned_to;
@@ -159,7 +165,27 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
 
 // ── Action dispatch ──────────────────────────────────────────────────────────
 
-fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str, height: u64) {
+// ── Address encoding helper ──────────────────────────────────────────────────
+
+fn encode_taddr(addr: &TransparentAddress) -> String {
+    let (prefix, data) = match addr {
+        TransparentAddress::PublicKeyHash(hash) => (
+            if matches!(config::NETWORK, zcash_protocol::consensus::Network::TestNetwork) { [0x1D, 0x25] } else { [0x1C, 0xB8] },
+            hash,
+        ),
+        TransparentAddress::ScriptHash(hash) => (
+            if matches!(config::NETWORK, zcash_protocol::consensus::Network::TestNetwork) { [0x1C, 0xBA] } else { [0x1C, 0xBD] },
+            hash,
+        ),
+    };
+    let mut payload = Vec::with_capacity(2 + 20);
+    payload.extend_from_slice(&prefix);
+    payload.extend_from_slice(data);
+    bs58::encode(&payload).with_check().into_string()
+}
+
+
+async fn handle_action(reg: &Registry, client: &mut decrypter::Client, action: MemoAction, note_value: u64, txid: &str, height: u64) {
     let pubkey_b64 = action
         .user_pubkey
         .as_ref()
@@ -216,7 +242,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 Err(e) => eprintln!("DB error (claim): {e}"),
             }
         }
-        ActionKind::List { price, nonce } => {
+        ActionKind::List { price, pay_taddr, nonce } => {
             if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
                 eprintln!("LIST: {e}");
                 return;
@@ -226,7 +252,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 .user_pubkey
                 .as_ref()
                 .map(|k| base64::engine::general_purpose::STANDARD.encode(k));
-            match reg.create_listing(&action.name, *price, *nonce, &action.signature, txid, height, listing_pubkey_b64.as_deref()) {
+            match reg.create_listing(&action.name, *price, pay_taddr, *nonce, &action.signature, txid, height, listing_pubkey_b64.as_deref()) {
                 Ok(()) => {
                     let _ = reg.insert_event(
                         &action,
@@ -238,7 +264,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                         Some(*nonce),
                         pubkey,
                     );
-                    println!("Listed: {} for {price} zats (height {height})", action.name)
+                    println!("Listed: {} for {price} zats → {pay_taddr} (height {height})", action.name)
                 }
                 Err(e) => eprintln!("DB error (list): {e}"),
             }
@@ -290,29 +316,16 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 Err(e) => eprintln!("DB error (update): {e}"),
             }
         }
-        ActionKind::Buy { buyer_ua } => {
-            let Some(price) = reg.get_listing_price(&action.name) else {
-                eprintln!("BUY for unlisted name {}", action.name);
-                return;
-            };
-            if note_value < price {
-                eprintln!(
-                    "BUY underpayment for {}: {note_value} < {price}",
-                    action.name
-                );
-                return;
-            }
-            match reg.process_buy(&action.name, buyer_ua, &action.signature, txid, height, pubkey) {
-                Ok(()) => {
-                    let _ =
-                        reg.insert_event(&action, action.kind.label(), txid, height, Some(buyer_ua), Some(price), None, pubkey);
-                    println!(
-                        "Sold: {} → {buyer_ua} for {price} zats (height {height})",
-                        action.name
-                    )
-                }
-                Err(e) => eprintln!("DB error (buy): {e}"),
-            }
+        ActionKind::Buy { buyer_ua: _, price: _ } => {
+            // Claim-first BUY handler — implemented in a later step.
+            // Memo format is now ZNS:BUY:<name>:<buyer_ua>:<price>:<sig>; the
+            // pending-buy lifecycle and transparent payment matcher land in
+            // the next commits.
+            let _ = client; // silence unused-mut warning until handler is filled in
+            eprintln!(
+                "BUY received for {} (height {height}, txid {txid}, note {note_value}) — handler not yet implemented",
+                action.name
+            );
         }
     }
 }
