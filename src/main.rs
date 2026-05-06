@@ -243,6 +243,17 @@ async fn handle_action(reg: &Registry, client: &mut decrypter::Client, action: M
             }
         }
         ActionKind::List { price, pay_taddr, nonce } => {
+            // Listing commission: seller prepays 10% of the asking price as the
+            // indexer's note value. Covers the registry's per-sale work and is
+            // forfeited if the listing never completes.
+            let commission = price / 10;
+            if note_value < commission {
+                eprintln!(
+                    "LIST: commission underpayment for {}: {note_value} < {commission} (10% of {price})",
+                    action.name
+                );
+                return;
+            }
             if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
                 eprintln!("LIST: {e}");
                 return;
