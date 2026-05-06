@@ -187,6 +187,10 @@ async fn resolve_pending_buys(reg: &Registry, client: &mut decrypter::Client, cu
         };
 
         let pubkey = pending.pubkey.as_deref();
+        // TODO: process_buy + insert_event below are not atomic. A crash between them
+        // finalizes the name transfer but loses the BUY event forever. On restart/rebuild
+        // the sale is already done so the event can't be reconstructed. Fix by wrapping
+        // both calls in one DB transaction, or moving insert_event into process_buy.
         if let Err(e) = reg.process_buy(
             &pending.name,
             &pending.buyer_ua,
