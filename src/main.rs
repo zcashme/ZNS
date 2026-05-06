@@ -15,18 +15,14 @@
 mod config;
 mod decrypter;
 mod memo;
+mod payments;
 mod registry;
 mod rpc;
 
 use base64::Engine;
 use orchard::keys::PreparedIncomingViewingKey;
 use tokio::sync::watch;
-use zcash_client_backend::proto::service::TxFilter;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedIncomingViewingKey};
-use zcash_primitives::consensus::BranchId;
-use zcash_primitives::legacy::TransparentAddress;
-use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::BlockHeight;
 
 use crate::memo::{ActionKind, MemoAction};
 use crate::registry::Registry;
@@ -104,6 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ).await;
         }
 
+        resolve_pending_buys(&reg, &mut client, scanned_to).await;
+
         last_scanned = scanned_to;
         height_tx.send(last_scanned).ok();
         println!("Synced to {}.", last_scanned);
@@ -163,29 +161,73 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
     }
 }
 
-// ── Action dispatch ──────────────────────────────────────────────────────────
+// ── Pending buy resolution ───────────────────────────────────────────────────
+//
+// On each scan tick: drop expired pending buys, then look for transparent
+// payments to each active pending buy's pay_taddr. The first matching tx
+// finalizes the sale.
 
-// ── Address encoding helper ──────────────────────────────────────────────────
+async fn resolve_pending_buys(reg: &Registry, client: &mut decrypter::Client, current_height: u64) {
+    for name in reg.expire_pending_buys(current_height) {
+        println!("Pending buy expired: {name}");
+    }
 
-fn encode_taddr(addr: &TransparentAddress) -> String {
-    let (prefix, data) = match addr {
-        TransparentAddress::PublicKeyHash(hash) => (
-            if matches!(config::NETWORK, zcash_protocol::consensus::Network::TestNetwork) { [0x1D, 0x25] } else { [0x1C, 0xB8] },
-            hash,
-        ),
-        TransparentAddress::ScriptHash(hash) => (
-            if matches!(config::NETWORK, zcash_protocol::consensus::Network::TestNetwork) { [0x1C, 0xBA] } else { [0x1C, 0xBD] },
-            hash,
-        ),
-    };
-    let mut payload = Vec::with_capacity(2 + 20);
-    payload.extend_from_slice(&prefix);
-    payload.extend_from_slice(data);
-    bs58::encode(&payload).with_check().into_string()
+    for pending in reg.list_active_pending_buys(current_height) {
+        let Some(payment) = payments::find_payment(
+            client,
+            config::NETWORK,
+            &pending.pay_taddr,
+            pending.price,
+            pending.claim_height,
+            current_height,
+        )
+        .await
+        else {
+            continue;
+        };
+
+        let pubkey = pending.pubkey.as_deref();
+        if let Err(e) = reg.process_buy(
+            &pending.name,
+            &pending.buyer_ua,
+            &pending.signature,
+            &payment.txid,
+            payment.height,
+            pubkey,
+        ) {
+            eprintln!("DB error (finalize buy {}): {e}", pending.name);
+            continue;
+        }
+        // Reconstruct a MemoAction shell purely for insert_event field shape.
+        let memo_action = MemoAction {
+            name: pending.name.clone(),
+            signature: pending.signature.clone(),
+            user_pubkey: None,
+            kind: ActionKind::Buy {
+                buyer_ua: pending.buyer_ua.clone(),
+                price: pending.price,
+            },
+        };
+        let _ = reg.insert_event(
+            &memo_action,
+            "BUY",
+            &payment.txid,
+            payment.height,
+            Some(&pending.buyer_ua),
+            Some(pending.price),
+            None,
+            pubkey,
+        );
+        println!(
+            "Sold: {} → {} for {} zats (payment txid {}, height {})",
+            pending.name, pending.buyer_ua, pending.price, payment.txid, payment.height
+        );
+    }
 }
 
+// ── Action dispatch ──────────────────────────────────────────────────────────
 
-async fn handle_action(reg: &Registry, client: &mut decrypter::Client, action: MemoAction, note_value: u64, txid: &str, height: u64) {
+async fn handle_action(reg: &Registry, _client: &mut decrypter::Client, action: MemoAction, note_value: u64, txid: &str, height: u64) {
     let pubkey_b64 = action
         .user_pubkey
         .as_ref()
