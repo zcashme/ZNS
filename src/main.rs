@@ -285,6 +285,15 @@ async fn handle_action(reg: &Registry, client: &mut decrypter::Client, action: M
                 eprintln!("DELIST for unlisted name {}", action.name);
                 return;
             }
+            if let Some(pending) = reg.get_pending_buy(&action.name)
+                && pending.expires_at >= height
+            {
+                eprintln!(
+                    "DELIST rejected for {}: pending buy active until height {}",
+                    action.name, pending.expires_at
+                );
+                return;
+            }
             if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
                 eprintln!("DELIST: {e}");
                 return;
