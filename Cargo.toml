@@ -4,11 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
-[features]
-testnet = []
-mainnet = []
-
 [dependencies]
+hex = "0.4"
+bs58 = "0.5"
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"
 zcash_client_backend = { version = "0.21", features = ["lightwalletd-tonic-transport", "lightwalletd-tonic-tls-webpki-roots", "orchard"] }

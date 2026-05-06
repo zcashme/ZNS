@@ -149,7 +149,7 @@ impl ZnsApiServer for RpcState {
 
         // Empty query = list all registrations
         if query.is_empty() {
-            let (registrations, _total) = reg.list_registrations(limit, offset, 0);
+            let registrations = reg.list_registrations(limit, offset);
             let entries: Vec<RegistrationEntry> = registrations
                 .into_iter()
                 .map(|r| {
@@ -162,8 +162,7 @@ impl ZnsApiServer for RpcState {
 
         // Address query = list names for address
         if query.parse::<ZcashAddress>().is_ok() {
-            let (registrations, _total) =
-                reg.resolve_by_address_paginated(&query, limit, offset, 0);
+            let registrations = reg.list_registrations_by_address(&query, limit, offset);
             let entries: Vec<RegistrationEntry> = registrations
                 .into_iter()
                 .map(|r| {
@@ -190,9 +189,9 @@ impl ZnsApiServer for RpcState {
         let reg = open_registry(&self.db_path)?;
         let limit = limit.unwrap_or(50).min(500);
         let offset = offset.unwrap_or(0);
-        let count = reg.count_listings();
-        let (listings, total) = reg.list_listings_paginated(limit, offset, count);
-        let listings: Vec<ListingEntry> = listings
+        let total = reg.count_listings();
+        let listings: Vec<ListingEntry> = reg
+            .list_listings(limit, offset)
             .into_iter()
             .map(|l| listing_entry(l, &reg))
             .collect();

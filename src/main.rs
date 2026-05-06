@@ -24,6 +24,7 @@ use orchard::keys::PreparedIncomingViewingKey;
 use tokio::sync::watch;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedIncomingViewingKey};
 
+use crate::config::Config;
 use crate::memo::{ActionKind, MemoAction};
 use crate::registry::Registry;
 
@@ -33,17 +34,16 @@ use crate::registry::Registry;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (uivk_str, admin_pubkey) =
-        config::load_secrets().map_err(|e| format!("config error: {e}"))?;
+    let cfg = Config::from_env().map_err(|e| format!("config error: {e}"))?;
 
-    let uivk = UnifiedIncomingViewingKey::decode(&config::NETWORK, &uivk_str)
+    let uivk = UnifiedIncomingViewingKey::decode(&cfg.network, &cfg.uivk)
         .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
     let orchard_ivk = uivk.orchard().as_ref().expect("UIVK has no Orchard key");
     let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
     let (ua, _) = uivk
         .default_address(UnifiedAddressRequest::AllAvailableKeys)
         .map_err(|e| format!("Failed to derive address from UIVK: {e}"))?;
-    let ua_str = ua.encode(&config::NETWORK);
+    let ua_str = ua.encode(&cfg.network);
     let reg = Registry::open(config::DB_PATH)?;
 
     let (height_tx, height_rx) = watch::channel(0u64);
@@ -51,15 +51,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rpc_state = rpc::RpcState {
         db_path: config::DB_PATH.to_string(),
         synced_height: height_rx,
-        admin_pubkey: base64::engine::general_purpose::STANDARD.encode(admin_pubkey),
-        uivk: uivk_str,
+        admin_pubkey: base64::engine::general_purpose::STANDARD.encode(cfg.admin_pubkey),
+        uivk: cfg.uivk.clone(),
         address: ua_str,
     };
     tokio::spawn(rpc::serve(format!("0.0.0.0:{}", config::RPC_PORT), rpc_state));
 
-    println!("Connecting to {}...", config::LWD_URL);
-    let mut client = decrypter::Client::connect(config::LWD_URL.to_string()).await?;
-    let mut last_scanned = config::BIRTHDAY - 100;
+    println!("Connecting to {}...", cfg.lwd_url);
+    let mut client = decrypter::Client::connect(cfg.lwd_url.clone()).await?;
+    let mut last_scanned = cfg.birthday.saturating_sub(100);
 
     loop {
         let Some(tip) = decrypter::get_chain_tip(&mut client).await else {
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (notes, scanned_to) = decrypter::scan_range(
             &mut client,
             &pivk,
-            &config::NETWORK,
+            &cfg.network,
             start,
             tip,
         )
@@ -87,20 +87,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(action) = memo::parse_memo(&note.memo) else {
                 continue;
             };
-            if !verify_and_authorize(&reg, &action, &admin_pubkey) {
+            if !verify_and_authorize(&reg, &action, &cfg.admin_pubkey) {
                 continue;
             }
             handle_action(
                 &reg,
-                &mut client,
                 action,
                 note.value,
                 &note.txid.to_string(),
                 note.height,
-            ).await;
+            );
         }
 
-        resolve_pending_buys(&reg, &mut client, scanned_to).await;
+        resolve_pending_buys(&reg, &mut client, cfg.network, scanned_to).await;
 
         last_scanned = scanned_to;
         height_tx.send(last_scanned).ok();
@@ -138,19 +137,29 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
         true
     } else {
         // Admin path: first check sovereignty, then verify sig.
-        if !matches!(
+        let is_establishing = matches!(
             action.kind,
-            memo::ActionKind::SetPrice { .. } | memo::ActionKind::Claim { .. } | memo::ActionKind::Buy { .. }
-        ) && let Some((stored_sig, stored_ua, stored_action)) =
-            reg.get_claim_sig_for_ownership(&action.name)
-        {
-            let Some(payload) = memo::ownership_payload(&stored_action, &action.name, &stored_ua) else {
-                eprintln!("Invalid stored action '{}' for ownership proof on '{}'", stored_action, action.name);
-                return false;
-            };
-            if !memo::verify_signature(&payload, &stored_sig, admin_pubkey) {
-                eprintln!("Admin rejected: '{}' is sovereign", action.name);
-                return false;
+            memo::ActionKind::SetPrice { .. }
+                | memo::ActionKind::Claim { .. }
+                | memo::ActionKind::Buy { .. }
+        );
+        if !is_establishing {
+            if let Some((stored_sig, stored_ua, stored_action)) =
+                reg.get_claim_sig_for_ownership(&action.name)
+            {
+                let Some(payload) =
+                    memo::ownership_payload(&stored_action, &action.name, &stored_ua)
+                else {
+                    eprintln!(
+                        "Invalid stored action '{}' for ownership proof on '{}'",
+                        stored_action, action.name
+                    );
+                    return false;
+                };
+                if !memo::verify_signature(&payload, &stored_sig, admin_pubkey) {
+                    eprintln!("Admin rejected: '{}' is sovereign", action.name);
+                    return false;
+                }
             }
         }
         if !memo::verify_action(action, admin_pubkey) {
@@ -167,7 +176,12 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
 // payments to each active pending buy's pay_taddr. The first matching tx
 // finalizes the sale.
 
-async fn resolve_pending_buys(reg: &Registry, client: &mut decrypter::Client, current_height: u64) {
+async fn resolve_pending_buys(
+    reg: &Registry,
+    client: &mut decrypter::Client,
+    network: zcash_protocol::consensus::Network,
+    current_height: u64,
+) {
     for name in reg.expire_pending_buys(current_height) {
         println!("Pending buy expired: {name}");
     }
@@ -175,7 +189,7 @@ async fn resolve_pending_buys(reg: &Registry, client: &mut decrypter::Client, cu
     for pending in reg.list_active_pending_buys(current_height) {
         let Some(payment) = payments::find_payment(
             client,
-            config::NETWORK,
+            network,
             &pending.pay_taddr,
             pending.price,
             pending.claim_height,
@@ -187,41 +201,18 @@ async fn resolve_pending_buys(reg: &Registry, client: &mut decrypter::Client, cu
         };
 
         let pubkey = pending.pubkey.as_deref();
-        // TODO: process_buy + insert_event below are not atomic. A crash between them
-        // finalizes the name transfer but loses the BUY event forever. On restart/rebuild
-        // the sale is already done so the event can't be reconstructed. Fix by wrapping
-        // both calls in one DB transaction, or moving insert_event into process_buy.
-        if let Err(e) = reg.process_buy(
+        if let Err(e) = reg.finalize_buy(
             &pending.name,
             &pending.buyer_ua,
             &pending.signature,
             &payment.txid,
             payment.height,
+            pending.price,
             pubkey,
         ) {
             eprintln!("DB error (finalize buy {}): {e}", pending.name);
             continue;
         }
-        // Reconstruct a MemoAction shell purely for insert_event field shape.
-        let memo_action = MemoAction {
-            name: pending.name.clone(),
-            signature: pending.signature.clone(),
-            user_pubkey: None,
-            kind: ActionKind::Buy {
-                buyer_ua: pending.buyer_ua.clone(),
-                price: pending.price,
-            },
-        };
-        let _ = reg.insert_event(
-            &memo_action,
-            "BUY",
-            &payment.txid,
-            payment.height,
-            Some(&pending.buyer_ua),
-            Some(pending.price),
-            None,
-            pubkey,
-        );
         println!(
             "Sold: {} → {} for {} zats (payment txid {}, height {})",
             pending.name, pending.buyer_ua, pending.price, payment.txid, payment.height
@@ -231,7 +222,7 @@ async fn resolve_pending_buys(reg: &Registry, client: &mut decrypter::Client, cu
 
 // ── Action dispatch ──────────────────────────────────────────────────────────
 
-async fn handle_action(reg: &Registry, _client: &mut decrypter::Client, action: MemoAction, note_value: u64, txid: &str, height: u64) {
+fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str, height: u64) {
     let pubkey_b64 = action
         .user_pubkey
         .as_ref()
@@ -239,11 +230,11 @@ async fn handle_action(reg: &Registry, _client: &mut decrypter::Client, action: 
     let pubkey = pubkey_b64.as_deref();
     match &action.kind {
         ActionKind::SetPrice { prices, nonce } => {
-            if let Some(current) = reg.get_pricing_nonce()
-                && nonce <= &current
-            {
-                eprintln!("SETPRICE: nonce {nonce} <= current {current}");
-                return;
+            if let Some(current) = reg.get_pricing_nonce() {
+                if nonce <= &current {
+                    eprintln!("SETPRICE: nonce {nonce} <= current {current}");
+                    return;
+                }
             }
             let tiers_str: String = prices
                 .iter()
@@ -330,14 +321,14 @@ async fn handle_action(reg: &Registry, _client: &mut decrypter::Client, action: 
                 eprintln!("DELIST for unlisted name {}", action.name);
                 return;
             }
-            if let Some(pending) = reg.get_pending_buy(&action.name)
-                && pending.expires_at >= height
-            {
-                eprintln!(
-                    "DELIST rejected for {}: pending buy active until height {}",
-                    action.name, pending.expires_at
-                );
-                return;
+            if let Some(pending) = reg.get_pending_buy(&action.name) {
+                if pending.expires_at >= height {
+                    eprintln!(
+                        "DELIST rejected for {}: pending buy active until height {}",
+                        action.name, pending.expires_at
+                    );
+                    return;
+                }
             }
             if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
                 eprintln!("DELIST: {e}");
@@ -401,14 +392,14 @@ async fn handle_action(reg: &Registry, _client: &mut decrypter::Client, action: 
                 );
                 return;
             }
-            if let Some(existing) = reg.get_pending_buy(&action.name)
-                && existing.expires_at >= height
-            {
-                eprintln!(
-                    "BUY: {} already has an active pending buy until height {}",
-                    action.name, existing.expires_at
-                );
-                return;
+            if let Some(existing) = reg.get_pending_buy(&action.name) {
+                if existing.expires_at >= height {
+                    eprintln!(
+                        "BUY: {} already has an active pending buy until height {}",
+                        action.name, existing.expires_at
+                    );
+                    return;
+                }
             }
             let expires_at = height + config::BUY_WINDOW_BLOCKS;
             match reg.create_pending_buy(

@@ -3222,7 +3222,9 @@ name = "zns-indexer"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bs58",
  "ed25519-dalek",
+ "hex",
  "jsonrpsee",
  "orchard",
  "rusqlite",

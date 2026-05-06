@@ -153,22 +153,31 @@ impl Registry {
             .ok()
     }
 
-    pub fn process_buy(
+    /// Finalize a sale atomically: transfer ownership, drop the listing and
+    /// pending buy, and record the BUY event in a single transaction so a
+    /// crash mid-finalize cannot lose the event after the transfer is durable.
+    pub fn finalize_buy(
         &self,
         name: &str,
         new_ua: &str,
         signature: &str,
-        txid: &str,
-        height: u64,
+        payment_txid: &str,
+        payment_height: u64,
+        price: u64,
         pubkey: Option<&str>,
     ) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute(
             "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, nonce = 0, signature = ?4, last_action = 'BUY', pubkey = ?5 WHERE name = ?6",
-            rusqlite::params![new_ua, txid, height as i64, signature, pubkey, name],
+            rusqlite::params![new_ua, payment_txid, payment_height as i64, signature, pubkey, name],
         )?;
         tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
         tx.execute("DELETE FROM pending_buys WHERE name = ?1", [name])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, price, nonce, signature, pubkey)
+             VALUES (?1, 'BUY', ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
+            rusqlite::params![name, payment_txid, payment_height as i64, new_ua, price as i64, signature, pubkey],
+        )?;
         tx.commit()
     }
 
@@ -466,16 +475,15 @@ impl Registry {
             .unwrap_or(0)
     }
 
-    pub fn list_registrations(&self, limit: u64, offset: u64, total: u64) -> (Vec<Registration>, u64) {
-        let mut stmt = match self.db.prepare(
-            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey 
-             FROM registrations 
+    pub fn list_registrations(&self, limit: u64, offset: u64) -> Vec<Registration> {
+        let Ok(mut stmt) = self.db.prepare(
+            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey
+             FROM registrations
              ORDER BY height DESC LIMIT ?1 OFFSET ?2",
-        ) {
-            Ok(s) => s,
-            Err(_) => return (vec![], total),
+        ) else {
+            return vec![];
         };
-        let rows = stmt.query_map([limit as i64, offset as i64], |row| {
+        let Ok(rows) = stmt.query_map([limit as i64, offset as i64], |row| {
             Ok(Registration {
                 name: row.get(0)?,
                 address: row.get(1)?,
@@ -486,31 +494,27 @@ impl Registry {
                 last_action: row.get(6)?,
                 pubkey: row.get(7)?,
             })
-        });
-        let registrations = match rows {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => vec![],
+        }) else {
+            return vec![];
         };
-        (registrations, total)
+        rows.filter_map(|r| r.ok()).collect()
     }
 
-    pub fn resolve_by_address_paginated(
+    pub fn list_registrations_by_address(
         &self,
         address: &str,
         limit: u64,
         offset: u64,
-        total: u64,
-    ) -> (Vec<Registration>, u64) {
-        let mut stmt = match self.db.prepare(
-            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey 
-             FROM registrations 
-             WHERE ua = ?1 
+    ) -> Vec<Registration> {
+        let Ok(mut stmt) = self.db.prepare(
+            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey
+             FROM registrations
+             WHERE ua = ?1
              ORDER BY height DESC LIMIT ?2 OFFSET ?3",
-        ) {
-            Ok(s) => s,
-            Err(_) => return (vec![], total),
+        ) else {
+            return vec![];
         };
-        let rows = stmt.query_map(
+        let Ok(rows) = stmt.query_map(
             rusqlite::params![address, limit as i64, offset as i64],
             |row| {
                 Ok(Registration {
@@ -524,24 +528,21 @@ impl Registry {
                     pubkey: row.get(7)?,
                 })
             },
-        );
-        let registrations = match rows {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => vec![],
+        ) else {
+            return vec![];
         };
-        (registrations, total)
+        rows.filter_map(|r| r.ok()).collect()
     }
 
-    pub fn list_listings_paginated(&self, limit: u64, offset: u64, total: u64) -> (Vec<Listing>, u64) {
-        let mut stmt = match self.db.prepare(
-            "SELECT l.name, l.price, l.pay_taddr, l.nonce, l.txid, l.height, l.signature, l.pubkey
-             FROM listings l
-             ORDER BY l.height DESC LIMIT ?1 OFFSET ?2",
-        ) {
-            Ok(s) => s,
-            Err(_) => return (vec![], total),
+    pub fn list_listings(&self, limit: u64, offset: u64) -> Vec<Listing> {
+        let Ok(mut stmt) = self.db.prepare(
+            "SELECT name, price, pay_taddr, nonce, txid, height, signature, pubkey
+             FROM listings
+             ORDER BY height DESC LIMIT ?1 OFFSET ?2",
+        ) else {
+            return vec![];
         };
-        let rows = stmt.query_map([limit as i64, offset as i64], |row| {
+        let Ok(rows) = stmt.query_map([limit as i64, offset as i64], |row| {
             Ok(Listing {
                 name: row.get(0)?,
                 price: row.get::<_, i64>(1)? as u64,
@@ -552,12 +553,10 @@ impl Registry {
                 signature: row.get(6)?,
                 pubkey: row.get(7)?,
             })
-        });
-        let listings = match rows {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => vec![],
+        }) else {
+            return vec![];
         };
-        (listings, total)
+        rows.filter_map(|r| r.ok()).collect()
     }
 
     pub fn get_pricing(&self) -> Option<Pricing> {

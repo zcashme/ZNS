@@ -79,7 +79,7 @@ pub async fn find_payment(
                     .map(|a| encode_taddr(&a, network) == pay_taddr)
                     .unwrap_or(false)
             })
-            .map(|out| u64::from(out.value))
+            .map(|out| u64::from(out.value()))
             .sum();
         if total >= min_amount {
             return Some(PaymentMatch {
