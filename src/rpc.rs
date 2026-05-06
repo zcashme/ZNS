@@ -39,11 +39,22 @@ pub(crate) struct RegistrationEntry {
 pub(crate) struct ListingEntry {
     name: String,
     price: u64,
+    pay_taddr: String,
     nonce: u64,
     txid: String,
     height: u64,
     signature: String,
     pubkey: Option<String>,
+    pending_buy: Option<PendingBuyEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PendingBuyEntry {
+    buyer_ua: String,
+    price: u64,
+    claim_height: u64,
+    expires_at: u64,
+    txid: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,7 +153,7 @@ impl ZnsApiServer for RpcState {
             let entries: Vec<RegistrationEntry> = registrations
                 .into_iter()
                 .map(|r| {
-                    let listing = reg.get_listing(&r.name).map(listing_entry);
+                    let listing = reg.get_listing(&r.name).map(|l| listing_entry(l, &reg));
                     registration_entry(r, listing)
                 })
                 .collect();
@@ -156,7 +167,7 @@ impl ZnsApiServer for RpcState {
             let entries: Vec<RegistrationEntry> = registrations
                 .into_iter()
                 .map(|r| {
-                    let listing = reg.get_listing(&r.name).map(listing_entry);
+                    let listing = reg.get_listing(&r.name).map(|l| listing_entry(l, &reg));
                     registration_entry(r, listing)
                 })
                 .collect();
@@ -165,7 +176,7 @@ impl ZnsApiServer for RpcState {
 
         // Exact name query = single registration
         let entry = reg.resolve_by_name(&query).map(|r| {
-            let listing = reg.get_listing(&r.name).map(listing_entry);
+            let listing = reg.get_listing(&r.name).map(|l| listing_entry(l, &reg));
             registration_entry(r, listing)
         });
         Ok(serde_json::to_value(entry).unwrap())
@@ -181,7 +192,10 @@ impl ZnsApiServer for RpcState {
         let offset = offset.unwrap_or(0);
         let count = reg.count_listings();
         let (listings, total) = reg.list_listings_paginated(limit, offset, count);
-        let listings: Vec<ListingEntry> = listings.into_iter().map(listing_entry).collect();
+        let listings: Vec<ListingEntry> = listings
+            .into_iter()
+            .map(|l| listing_entry(l, &reg))
+            .collect();
         Ok(ListingsResult { listings, total })
     }
 
@@ -266,15 +280,24 @@ fn registration_entry(
     }
 }
 
-fn listing_entry(l: crate::registry::Listing) -> ListingEntry {
+fn listing_entry(l: crate::registry::Listing, reg: &Registry) -> ListingEntry {
+    let pending_buy = reg.get_pending_buy(&l.name).map(|p| PendingBuyEntry {
+        buyer_ua: p.buyer_ua,
+        price: p.price,
+        claim_height: p.claim_height,
+        expires_at: p.expires_at,
+        txid: p.txid,
+    });
     ListingEntry {
         name: l.name,
         price: l.price,
+        pay_taddr: l.pay_taddr,
         nonce: l.nonce,
         txid: l.txid,
         height: l.height,
         signature: l.signature,
         pubkey: l.pubkey,
+        pending_buy,
     }
 }
 
