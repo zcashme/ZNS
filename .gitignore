@@ -29,3 +29,7 @@ zingolib-testnet/
 
 # Rust SDK build artifacts (root /target only catches the workspace target)
 sdk/rust/target/
+
+# Ignore all nested Rust build artifacts (e.g. throwaway experiments)
+**/*.rs.bk
+**/target/
