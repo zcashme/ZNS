@@ -27,6 +27,7 @@ impl Registry {
             CREATE TABLE IF NOT EXISTS listings (
                 name      TEXT PRIMARY KEY REFERENCES registrations(name),
                 price     INTEGER NOT NULL,
+                pay_taddr TEXT NOT NULL DEFAULT '',
                 nonce     INTEGER NOT NULL,
                 txid      TEXT NOT NULL,
                 height    INTEGER NOT NULL,
@@ -48,6 +49,19 @@ impl Registry {
             CREATE INDEX IF NOT EXISTS idx_events_name   ON events(name);
             CREATE INDEX IF NOT EXISTS idx_events_action ON events(action);
             CREATE INDEX IF NOT EXISTS idx_events_height ON events(height);
+            CREATE TABLE IF NOT EXISTS pending_buys (
+                name        TEXT PRIMARY KEY REFERENCES registrations(name),
+                buyer_ua    TEXT NOT NULL,
+                price       INTEGER NOT NULL,
+                pay_taddr   TEXT NOT NULL,
+                claim_height INTEGER NOT NULL,
+                expires_at  INTEGER NOT NULL,
+                txid        TEXT NOT NULL,
+                signature   TEXT NOT NULL,
+                pubkey      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_pending_buys_pay_taddr ON pending_buys(pay_taddr);
+            CREATE INDEX IF NOT EXISTS idx_pending_buys_expires ON pending_buys(expires_at);
             CREATE TABLE IF NOT EXISTS pricing (
                 id        INTEGER PRIMARY KEY CHECK (id = 1),
                 nonce     INTEGER NOT NULL,
@@ -115,6 +129,7 @@ impl Registry {
         &self,
         name: &str,
         price: u64,
+        pay_taddr: &str,
         nonce: u64,
         signature: &str,
         txid: &str,
@@ -122,8 +137,8 @@ impl Registry {
         pubkey: Option<&str>,
     ) -> rusqlite::Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO listings (name, price, nonce, signature, txid, height, pubkey) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![name, price as i64, nonce as i64, signature, txid, height as i64, pubkey],
+            "INSERT OR REPLACE INTO listings (name, price, pay_taddr, nonce, signature, txid, height, pubkey) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![name, price as i64, pay_taddr, nonce as i64, signature, txid, height as i64, pubkey],
         )?;
         Ok(())
     }
@@ -153,7 +168,110 @@ impl Registry {
             rusqlite::params![new_ua, txid, height as i64, signature, pubkey, name],
         )?;
         tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
+        tx.execute("DELETE FROM pending_buys WHERE name = ?1", [name])?;
         tx.commit()
+    }
+
+    // ── Pending buy lifecycle ───────────────────────────────────────────────
+
+    pub fn create_pending_buy(
+        &self,
+        name: &str,
+        buyer_ua: &str,
+        price: u64,
+        pay_taddr: &str,
+        claim_height: u64,
+        expires_at: u64,
+        txid: &str,
+        signature: &str,
+        pubkey: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO pending_buys
+             (name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature, pubkey)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                name,
+                buyer_ua,
+                price as i64,
+                pay_taddr,
+                claim_height as i64,
+                expires_at as i64,
+                txid,
+                signature,
+                pubkey,
+            ],
+        )?;
+        Ok(self.db.changes() > 0)
+    }
+
+    pub fn get_pending_buy(&self, name: &str) -> Option<PendingBuy> {
+        self.db
+            .query_row(
+                "SELECT name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature, pubkey
+                 FROM pending_buys WHERE name = ?1",
+                [name],
+                |row| {
+                    Ok(PendingBuy {
+                        name: row.get(0)?,
+                        buyer_ua: row.get(1)?,
+                        price: row.get::<_, i64>(2)? as u64,
+                        pay_taddr: row.get(3)?,
+                        claim_height: row.get::<_, i64>(4)? as u64,
+                        expires_at: row.get::<_, i64>(5)? as u64,
+                        txid: row.get(6)?,
+                        signature: row.get(7)?,
+                        pubkey: row.get(8)?,
+                    })
+                },
+            )
+            .ok()
+    }
+
+    pub fn list_active_pending_buys(&self, current_height: u64) -> Vec<PendingBuy> {
+        let Ok(mut stmt) = self.db.prepare(
+            "SELECT name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature, pubkey
+             FROM pending_buys WHERE expires_at >= ?1",
+        ) else {
+            return vec![];
+        };
+        let rows = stmt.query_map([current_height as i64], |row| {
+            Ok(PendingBuy {
+                name: row.get(0)?,
+                buyer_ua: row.get(1)?,
+                price: row.get::<_, i64>(2)? as u64,
+                pay_taddr: row.get(3)?,
+                claim_height: row.get::<_, i64>(4)? as u64,
+                expires_at: row.get::<_, i64>(5)? as u64,
+                txid: row.get(6)?,
+                signature: row.get(7)?,
+                pubkey: row.get(8)?,
+            })
+        });
+        match rows {
+            Ok(r) => r.filter_map(|r| r.ok()).collect(),
+            Err(_) => vec![],
+        }
+    }
+
+    /// Removes pending buys whose `expires_at` is below `current_height`.
+    /// Returns the names that were dropped, for logging.
+    pub fn expire_pending_buys(&self, current_height: u64) -> Vec<String> {
+        let Ok(mut stmt) = self
+            .db
+            .prepare("SELECT name FROM pending_buys WHERE expires_at < ?1")
+        else {
+            return vec![];
+        };
+        let names: Vec<String> = match stmt.query_map([current_height as i64], |row| row.get(0)) {
+            Ok(r) => r.filter_map(|r| r.ok()).collect(),
+            Err(_) => return vec![],
+        };
+        let _ = self.db.execute(
+            "DELETE FROM pending_buys WHERE expires_at < ?1",
+            [current_height as i64],
+        );
+        names
     }
 
     pub fn delete_listing(&self, name: &str, signature: &str) -> rusqlite::Result<()> {
@@ -314,17 +432,18 @@ impl Registry {
     pub fn get_listing(&self, name: &str) -> Option<Listing> {
         self.db
             .query_row(
-                "SELECT name, price, nonce, txid, height, signature, pubkey FROM listings WHERE name = ?1",
+                "SELECT name, price, pay_taddr, nonce, txid, height, signature, pubkey FROM listings WHERE name = ?1",
                 [name],
                 |row| {
                     Ok(Listing {
                         name: row.get(0)?,
                         price: row.get::<_, i64>(1)? as u64,
-                        nonce: row.get::<_, i64>(2)? as u64,
-                        txid: row.get(3)?,
-                        height: row.get::<_, i64>(4)? as u64,
-                        signature: row.get(5)?,
-                        pubkey: row.get(6)?,
+                        pay_taddr: row.get(2)?,
+                        nonce: row.get::<_, i64>(3)? as u64,
+                        txid: row.get(4)?,
+                        height: row.get::<_, i64>(5)? as u64,
+                        signature: row.get(6)?,
+                        pubkey: row.get(7)?,
                     })
                 },
             )
@@ -415,7 +534,7 @@ impl Registry {
 
     pub fn list_listings_paginated(&self, limit: u64, offset: u64, total: u64) -> (Vec<Listing>, u64) {
         let mut stmt = match self.db.prepare(
-            "SELECT l.name, l.price, l.nonce, l.txid, l.height, l.signature, l.pubkey
+            "SELECT l.name, l.price, l.pay_taddr, l.nonce, l.txid, l.height, l.signature, l.pubkey
              FROM listings l
              ORDER BY l.height DESC LIMIT ?1 OFFSET ?2",
         ) {
@@ -426,11 +545,12 @@ impl Registry {
             Ok(Listing {
                 name: row.get(0)?,
                 price: row.get::<_, i64>(1)? as u64,
-                nonce: row.get::<_, i64>(2)? as u64,
-                txid: row.get(3)?,
-                height: row.get::<_, i64>(4)? as u64,
-                signature: row.get(5)?,
-                pubkey: row.get(6)?,
+                pay_taddr: row.get(2)?,
+                nonce: row.get::<_, i64>(3)? as u64,
+                txid: row.get(4)?,
+                height: row.get::<_, i64>(5)? as u64,
+                signature: row.get(6)?,
+                pubkey: row.get(7)?,
             })
         });
         let listings = match rows {
@@ -568,9 +688,23 @@ pub struct Registration {
 pub struct Listing {
     pub name: String,
     pub price: u64,
+    pub pay_taddr: String,
     pub nonce: u64,
     pub txid: String,
     pub height: u64,
+    pub signature: String,
+    pub pubkey: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingBuy {
+    pub name: String,
+    pub buyer_ua: String,
+    pub price: u64,
+    pub pay_taddr: String,
+    pub claim_height: u64,
+    pub expires_at: u64,
+    pub txid: String,
     pub signature: String,
     pub pubkey: Option<String>,
 }
