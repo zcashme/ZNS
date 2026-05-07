@@ -6,10 +6,9 @@
 // in the (claim_height, current_tip] window finalizes the sale.
 
 use zcash_client_backend::proto::service::{BlockId, BlockRange, TransparentAddressBlockFilter};
-use zcash_primitives::consensus::BranchId;
-use zcash_primitives::legacy::TransparentAddress;
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight, Network};
+use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
+use zcash_transparent::address::TransparentAddress;
 
 use crate::decrypter::Client;
 
@@ -56,6 +55,7 @@ pub async fn find_payment(
         range: Some(BlockRange {
             start: Some(BlockId { height: start_height, hash: vec![] }),
             end: Some(BlockId { height: end_height, hash: vec![] }),
+            pool_types: vec![],
         }),
     };
     let mut stream = client

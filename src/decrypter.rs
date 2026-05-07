@@ -6,10 +6,9 @@ use orchard::note_encryption::{CompactAction, OrchardDomain};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
 use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, TxFilter};
-use zcash_primitives::consensus::BranchId;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::TxId;
-use zcash_protocol::consensus::{BlockHeight, Network};
+use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 
 pub type Client = CompactTxStreamerClient<tonic::transport::Channel>;
 
@@ -52,6 +51,7 @@ pub async fn scan_range(
             height: end,
             hash: vec![],
         }),
+        pool_types: vec![],
     };
     let Ok(mut stream) = client.get_block_range(range).await.map(|r| r.into_inner()) else {
         return (notes, last_scanned);
@@ -84,7 +84,7 @@ async fn scan_block(
             tx.actions.iter().filter_map(move |a| {
                 CompactAction::try_from(a)
                     .ok()
-                    .map(|ca| (ca, tx.hash.clone(), idx))
+                    .map(|ca| (ca, tx.txid.clone(), idx))
             })
         })
         .collect();

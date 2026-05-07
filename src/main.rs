@@ -22,42 +22,32 @@ mod rpc;
 use base64::Engine;
 use orchard::keys::PreparedIncomingViewingKey;
 use tokio::sync::watch;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedIncomingViewingKey};
 
 use crate::config::Config;
 use crate::memo::{ActionKind, MemoAction};
 use crate::registry::Registry;
 
-// ── Tracing init ─────────────────────────────────────────────────────────────
-
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("zns_indexer=info,warn"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
-}
-
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_tracing();
+    tracing_subscriber::fmt()
+        .with_max_level(config::LOG_LEVEL)
+        .init();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let cfg = Config::from_env().map_err(|e| format!("config error: {e}"))?;
 
-    let uivk = UnifiedIncomingViewingKey::decode(&cfg.network, &cfg.uivk)
+    let uivk = UnifiedIncomingViewingKey::decode(&config::NETWORK, &cfg.uivk)
         .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
     let orchard_ivk = uivk.orchard().as_ref().expect("UIVK has no Orchard key");
     let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
     let (ua, _) = uivk
         .default_address(UnifiedAddressRequest::AllAvailableKeys)
         .map_err(|e| format!("Failed to derive address from UIVK: {e}"))?;
-    let ua_str = ua.encode(&cfg.network);
+    let ua_str = ua.encode(&config::NETWORK);
     let reg = Registry::open(config::DB_PATH)?;
 
     let (height_tx, height_rx) = watch::channel(0u64);
@@ -71,9 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     tokio::spawn(rpc::serve(format!("0.0.0.0:{}", config::RPC_PORT), rpc_state));
 
-    info!(network = ?cfg.network, lwd_url = %cfg.lwd_url, "connecting to lightwalletd");
-    let mut client = decrypter::Client::connect(cfg.lwd_url.clone()).await?;
-    let mut last_scanned = cfg.birthday.saturating_sub(100);
+    info!(network = ?config::NETWORK, lwd_url = %config::LWD_URL, "connecting to lightwalletd");
+    let mut client = decrypter::Client::connect(config::LWD_URL).await?;
+    let mut last_scanned = config::BIRTHDAY.saturating_sub(100);
 
     loop {
         let Some(tip) = decrypter::get_chain_tip(&mut client).await else {
@@ -86,12 +76,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let start = last_scanned + 1;
-        debug!(start, tip, "scanning range");
+        info!("Scanning {start}..={tip}");
 
         let (notes, scanned_to) = decrypter::scan_range(
             &mut client,
             &pivk,
-            &cfg.network,
+            &config::NETWORK,
             start,
             tip,
         )
@@ -113,11 +103,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        resolve_pending_buys(&reg, &mut client, cfg.network, scanned_to).await;
+        resolve_pending_buys(&reg, &mut client, config::NETWORK, scanned_to).await;
 
         last_scanned = scanned_to;
         height_tx.send(last_scanned).ok();
-        debug!(height = last_scanned, "synced");
+        info!("Synced to {}.", last_scanned);
     }
 }
 
@@ -127,7 +117,7 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
     if let Some(user_pk) = action.user_pubkey {
         // Sovereign path: user signed this action, verify against their pubkey.
         if !memo::verify_action(action, &user_pk) {
-            warn!(name = %action.name, "invalid user signature");
+            warn!("Invalid user sig for '{}'", action.name);
             return false;
         }
         // For non-establishing actions, prove ownership: stored CLAIM/BUY sig
@@ -136,15 +126,15 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
             let Some((stored_sig, stored_ua, stored_action)) =
                 reg.get_claim_sig_for_ownership(&action.name)
             else {
-                warn!(name = %action.name, "no claim record for sovereign action");
+                warn!("No claim record for sovereign action on '{}'", action.name);
                 return false;
             };
             let Some(payload) = memo::ownership_payload(&stored_action, &action.name, &stored_ua) else {
-                error!(name = %action.name, stored_action = %stored_action, "invalid stored action for ownership proof");
+                warn!("Invalid stored action '{}' for ownership proof on '{}'", stored_action, action.name);
                 return false;
             };
             if !memo::verify_signature(&payload, &stored_sig, &user_pk) {
-                warn!(name = %action.name, "ownership proof failed");
+                warn!("Ownership proof failed for '{}'", action.name);
                 return false;
             }
         }
@@ -164,17 +154,20 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
                 let Some(payload) =
                     memo::ownership_payload(&stored_action, &action.name, &stored_ua)
                 else {
-                    error!(name = %action.name, stored_action = %stored_action, "invalid stored action for ownership proof");
+                    warn!(
+                        "Invalid stored action '{}' for ownership proof on '{}'",
+                        stored_action, action.name
+                    );
                     return false;
                 };
                 if !memo::verify_signature(&payload, &stored_sig, admin_pubkey) {
-                    warn!(name = %action.name, "admin rejected: name is sovereign");
+                    warn!("Admin rejected: '{}' is sovereign", action.name);
                     return false;
                 }
             }
         }
         if !memo::verify_action(action, admin_pubkey) {
-            warn!(name = %action.name, "invalid admin signature");
+            warn!("Invalid admin sig for '{}'", action.name);
             return false;
         }
         true
@@ -194,7 +187,7 @@ async fn resolve_pending_buys(
     current_height: u64,
 ) {
     for name in reg.expire_pending_buys(current_height) {
-        info!(%name, "pending buy expired");
+        info!("Pending buy expired: {name}");
     }
 
     for pending in reg.list_active_pending_buys(current_height) {
@@ -221,16 +214,12 @@ async fn resolve_pending_buys(
             pending.price,
             pubkey,
         ) {
-            error!(name = %pending.name, error = %e, "db error finalizing buy");
+            error!("DB error (finalize buy {}): {e}", pending.name);
             continue;
         }
         info!(
-            name = %pending.name,
-            buyer_ua = %pending.buyer_ua,
-            price_zats = pending.price,
-            txid = %payment.txid,
-            height = payment.height,
-            "name sold"
+            "Sold: {} → {} for {} zats (payment txid {}, height {})",
+            pending.name, pending.buyer_ua, pending.price, payment.txid, payment.height
         );
     }
 }
@@ -247,7 +236,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
         ActionKind::SetPrice { prices, nonce } => {
             if let Some(current) = reg.get_pricing_nonce() {
                 if nonce <= &current {
-                    warn!(nonce, current, "SETPRICE: stale nonce");
+                    warn!("SETPRICE: nonce {nonce} <= current {current}");
                     return;
                 }
             }
@@ -259,9 +248,12 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             match reg.store_pricing(*nonce, height, &tiers_str, txid, &action.signature) {
                 Ok(()) => {
                     let _ = reg.insert_event(&action, action.kind.label(), txid, height, None, None, Some(*nonce), None);
-                    info!(tiers = prices.len(), nonce, height, "pricing set");
+                    info!(
+                        "Pricing set: {} tiers, nonce {nonce} (height {height})",
+                        prices.len()
+                    );
                 }
-                Err(e) => error!(error = %e, "db error (setprice)"),
+                Err(e) => error!("DB error (setprice): {e}"),
             }
         }
         ActionKind::Claim { ua } => {
@@ -269,20 +261,26 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 return;
             }
             let Some(cost) = reg.lookup_claim_cost(action.name.len()) else {
-                warn!(name = %action.name, "CLAIM rejected: no pricing set");
+                warn!("CLAIM rejected for {}: no pricing set", action.name);
                 return;
             };
             if cost > 0 && note_value < cost {
-                warn!(name = %action.name, note_value, cost, "CLAIM underpayment");
+                warn!(
+                    "CLAIM underpayment for {}: {note_value} < {cost} zats",
+                    action.name
+                );
                 return;
             }
             match reg.create_registration(&action.name, ua, &action.signature, txid, height, pubkey) {
                 Ok(true) => {
                     let _ = reg.insert_event(&action, action.kind.label(), txid, height, Some(ua), None, None, pubkey);
-                    info!(name = %action.name, %ua, value_zats = note_value, height, "name claimed");
+                    info!(
+                        "Claimed: {} → {ua} for {note_value} zats (height {height})",
+                        action.name
+                    )
                 }
-                Ok(false) => warn!(name = %action.name, "claim ignored: conflict"),
-                Err(e) => error!(error = %e, "db error (claim)"),
+                Ok(false) => warn!("Claim ignored (conflict): {}", action.name),
+                Err(e) => error!("DB error (claim): {e}"),
             }
         }
         ActionKind::List { price, pay_taddr, nonce } => {
@@ -290,11 +288,14 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             // value. Forfeited if the listing never completes.
             const LIST_COMMISSION: u64 = 1_000_000;
             if note_value < LIST_COMMISSION {
-                warn!(name = %action.name, note_value, required = LIST_COMMISSION, "LIST: commission underpayment");
+                warn!(
+                    "LIST: commission underpayment for {}: {note_value} < {LIST_COMMISSION}",
+                    action.name
+                );
                 return;
             }
             if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
-                warn!(reason = %e, "LIST rejected");
+                warn!("LIST: {e}");
                 return;
             }
             let owner_ua = reg.get_owner_ua(&action.name);
@@ -314,81 +315,93 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                         Some(*nonce),
                         pubkey,
                     );
-                    info!(name = %action.name, price_zats = price, %pay_taddr, height, "name listed");
+                    info!("Listed: {} for {price} zats → {pay_taddr} (height {height})", action.name)
                 }
-                Err(e) => error!(error = %e, "db error (list)"),
+                Err(e) => error!("DB error (list): {e}"),
             }
         }
         ActionKind::Delist { nonce } => {
             if reg.get_listing_price(&action.name).is_none() {
-                warn!(name = %action.name, "DELIST for unlisted name");
+                warn!("DELIST for unlisted name {}", action.name);
                 return;
             }
             if let Some(pending) = reg.get_pending_buy(&action.name) {
                 if pending.expires_at >= height {
-                    warn!(name = %action.name, pending_expires_at = pending.expires_at, "DELIST rejected: pending buy active");
+                    warn!(
+                        "DELIST rejected for {}: pending buy active until height {}",
+                        action.name, pending.expires_at
+                    );
                     return;
                 }
             }
             if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
-                warn!(reason = %e, "DELIST rejected");
+                warn!("DELIST: {e}");
                 return;
             }
             match reg.delete_listing(&action.name, &action.signature) {
                 Ok(()) => {
                     let _ = reg.insert_event(&action, action.kind.label(), txid, height, None, None, Some(*nonce), pubkey);
-                    info!(name = %action.name, height, "name delisted");
+                    info!("Delisted: {} (height {height})", action.name)
                 }
-                Err(e) => error!(error = %e, "db error (delist)"),
+                Err(e) => error!("DB error (delist): {e}"),
             }
         }
         ActionKind::Release { nonce } => {
             if reg.get_owner_ua(&action.name).is_none() {
-                warn!(name = %action.name, "RELEASE for unregistered name");
+                warn!("RELEASE for unregistered name {}", action.name);
                 return;
             }
             if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
-                warn!(reason = %e, "RELEASE rejected");
+                warn!("RELEASE: {e}");
                 return;
             }
             match reg.delete_registration(&action.name) {
                 Ok(()) => {
                     let _ = reg.insert_event(&action, action.kind.label(), txid, height, None, None, Some(*nonce), pubkey);
-                    info!(name = %action.name, height, "name released");
+                    info!("Released: {} (height {height})", action.name)
                 }
-                Err(e) => error!(error = %e, "db error (release)"),
+                Err(e) => error!("DB error (release): {e}"),
             }
         }
         ActionKind::Update { new_ua, nonce } => {
             if let Err(e) = reg.validate_and_increment_nonce(&action.name, *nonce) {
-                warn!(reason = %e, "UPDATE rejected");
+                warn!("UPDATE: {e}");
                 return;
             }
             match reg.update_address(&action.name, new_ua, &action.signature, txid, height) {
                 Ok(()) => {
                     let _ = reg.insert_event(&action, action.kind.label(), txid, height, Some(new_ua), None, Some(*nonce), pubkey);
-                    info!(name = %action.name, %new_ua, height, "name updated");
+                    info!("Updated: {} → {new_ua} (height {height})", action.name)
                 }
-                Err(e) => error!(error = %e, "db error (update)"),
+                Err(e) => error!("DB error (update): {e}"),
             }
         }
         ActionKind::Buy { buyer_ua, price } => {
             const BUY_COMMISSION: u64 = 10_000; // 0.0001 ZEC dust to indexer
             if note_value < BUY_COMMISSION {
-                warn!(name = %action.name, note_value, required = BUY_COMMISSION, "BUY: commission underpayment");
+                warn!(
+                    "BUY: commission underpayment for {}: {note_value} < {BUY_COMMISSION}",
+                    action.name
+                );
                 return;
             }
             let Some(listing) = reg.get_listing(&action.name) else {
-                warn!(name = %action.name, "BUY for unlisted name");
+                warn!("BUY for unlisted name {}", action.name);
                 return;
             };
             if *price != listing.price {
-                warn!(name = %action.name, memo_price = price, listing_price = listing.price, "BUY: price mismatch");
+                warn!(
+                    "BUY: price mismatch for {}: memo {price} != listing {}",
+                    action.name, listing.price
+                );
                 return;
             }
             if let Some(existing) = reg.get_pending_buy(&action.name) {
                 if existing.expires_at >= height {
-                    warn!(name = %action.name, pending_expires_at = existing.expires_at, "BUY: pending buy already active");
+                    warn!(
+                        "BUY: {} already has an active pending buy until height {}",
+                        action.name, existing.expires_at
+                    );
                     return;
                 }
             }
@@ -406,16 +419,12 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             ) {
                 Ok(true) => {
                     info!(
-                        name = %action.name,
-                        %buyer_ua,
-                        price_zats = price,
-                        pay_taddr = %listing.pay_taddr,
-                        expires_at,
-                        "pending buy registered"
+                        "Pending buy: {} → {buyer_ua} for {price} zats, awaiting payment to {} (expires {expires_at})",
+                        action.name, listing.pay_taddr
                     );
                 }
-                Ok(false) => warn!(name = %action.name, "BUY ignored: conflict"),
-                Err(e) => error!(error = %e, "db error (pending buy)"),
+                Ok(false) => warn!("BUY ignored (conflict): {}", action.name),
+                Err(e) => error!("DB error (pending buy): {e}"),
             }
         }
     }

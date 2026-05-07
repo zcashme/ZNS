@@ -4,25 +4,33 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[features]
+default = ["mainnet"]
+testnet = []
+mainnet = []
+verbose-logs = []
+quiet-logs = []
+
 [dependencies]
 hex = "0.4"
 bs58 = "0.5"
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"
-zcash_client_backend = { version = "0.21", features = ["lightwalletd-tonic-transport", "lightwalletd-tonic-tls-webpki-roots", "orchard"] }
-orchard = { version = "0.11", default-features = false }
+zcash_client_backend = { version = "0.22", features = ["lightwalletd-tonic-transport", "lightwalletd-tonic-tls-webpki-roots", "orchard"] }
+orchard = { version = "0.13", default-features = false }
 zcash_note_encryption = "0.4"
-zcash_keys = { version = "0.12", features = ["orchard"] }
-zcash_primitives = "0.26"
-zcash_protocol = "0.7"
+zcash_keys = { version = "0.13", features = ["orchard"] }
+zcash_primitives = "0.27"
+zcash_protocol = "0.8"
+zcash_transparent = "0.7"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 zip32 = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", features = ["ring"], default-features = false }
-zcash_address = "0.10"
+zcash_address = "0.11"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jsonrpsee = { version = "0.26", features = ["server", "macros"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }

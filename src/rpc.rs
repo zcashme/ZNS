@@ -8,6 +8,7 @@ use jsonrpsee::server::Server;
 use jsonrpsee::types::ErrorObjectOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{self, Value};
+use tracing::{error, info};
 use zcash_address::ZcashAddress;
 
 use crate::registry::Registry;
@@ -306,11 +307,11 @@ pub async fn serve(addr: String, state: RpcState) {
     let server = match Server::builder().build(&addr).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!(%addr, error = %e, "RPC server failed to bind");
+            error!("RPC server failed to bind {addr}: {e}");
             return;
         }
     };
     let handle = server.start(state.into_rpc());
-    tracing::info!(%addr, "RPC server listening");
+    info!("RPC server listening on {addr}");
     handle.stopped().await;
 }
