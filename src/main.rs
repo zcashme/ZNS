@@ -15,12 +15,10 @@
 mod config;
 mod decrypter;
 mod memo;
-mod payments;
 mod registry;
 mod rpc;
 
 use base64::Engine;
-use orchard::keys::PreparedIncomingViewingKey;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedIncomingViewingKey};
@@ -42,8 +40,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let uivk = UnifiedIncomingViewingKey::decode(&config::NETWORK, &cfg.uivk)
         .map_err(|e| format!("Failed to decode UIVK: {e}"))?;
-    let orchard_ivk = uivk.orchard().as_ref().expect("UIVK has no Orchard key");
-    let pivk = PreparedIncomingViewingKey::new(orchard_ivk);
     let (ua, _) = uivk
         .default_address(UnifiedAddressRequest::AllAvailableKeys)
         .map_err(|e| format!("Failed to derive address from UIVK: {e}"))?;
@@ -62,30 +58,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(rpc::serve(format!("0.0.0.0:{}", config::RPC_PORT), rpc_state));
 
     info!(network = ?config::NETWORK, lwd_url = %config::LWD_URL, "connecting to lightwalletd");
-    let mut client = decrypter::Client::connect(config::LWD_URL).await?;
-    let mut last_scanned = config::BIRTHDAY.saturating_sub(100);
+    let mut indexer = decrypter::IndexerState::connect(
+        config::LWD_URL,
+        &uivk,
+        config::NETWORK,
+        config::BIRTHDAY,
+    )
+    .await?;
 
     loop {
-        let Some(tip) = decrypter::get_chain_tip(&mut client).await else {
+        let Some(tip) = indexer.chain_tip().await else {
             tokio::time::sleep(config::POLL_INTERVAL).await;
             continue;
         };
-        if last_scanned >= tip {
+        if indexer.height() >= tip {
             tokio::time::sleep(config::POLL_INTERVAL).await;
             continue;
         }
 
-        let start = last_scanned + 1;
-        info!("Scanning {start}..={tip}");
-
-        let (notes, scanned_to) = decrypter::scan_range(
-            &mut client,
-            &pivk,
-            &config::NETWORK,
-            start,
-            tip,
-        )
-        .await;
+        info!("Scanning {}..={tip}", indexer.height() + 1);
+        let notes = indexer.scan_to(tip).await;
 
         for note in notes {
             let Some(action) = memo::parse_memo(&note.memo) else {
@@ -103,11 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        resolve_pending_buys(&reg, &mut client, config::NETWORK, scanned_to).await;
+        resolve_pending_buys(&reg, &mut indexer).await;
 
-        last_scanned = scanned_to;
-        height_tx.send(last_scanned).ok();
-        info!("Synced to {}.", last_scanned);
+        height_tx.send(indexer.height()).ok();
+        info!("Synced to {}.", indexer.height());
     }
 }
 
@@ -180,26 +171,21 @@ fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8;
 // payments to each active pending buy's pay_taddr. The first matching tx
 // finalizes the sale.
 
-async fn resolve_pending_buys(
-    reg: &Registry,
-    client: &mut decrypter::Client,
-    network: zcash_protocol::consensus::Network,
-    current_height: u64,
-) {
+async fn resolve_pending_buys(reg: &Registry, indexer: &mut decrypter::IndexerState) {
+    let current_height = indexer.height();
     for name in reg.expire_pending_buys(current_height) {
         info!("Pending buy expired: {name}");
     }
 
     for pending in reg.list_active_pending_buys(current_height) {
-        let Some(payment) = payments::find_payment(
-            client,
-            network,
-            &pending.pay_taddr,
-            pending.price,
-            pending.claim_height,
-            current_height,
-        )
-        .await
+        let Some(payment) = indexer
+            .find_payment(
+                &pending.pay_taddr,
+                pending.price,
+                pending.claim_height,
+                current_height,
+            )
+            .await
         else {
             continue;
         };
