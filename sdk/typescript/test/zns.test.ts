@@ -1,10 +1,26 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { ZNS, DEFAULT_URL, TESTNET_UIVK } from "../src/zns.js";
+import { ZNS, DEFAULT_URL, TESTNET_UIVK, BUY_COMMISSION } from "../src/zns.js";
 
 // Valid testnet unified address (bech32m format)
 const VALID_TESTNET_ADDR = "utest100qlkeru5c3m5kfrwe2hsmcfzmusreaza2prdyelg2kd2tr2842nceq952vay3gpmgky09fgft4z57h4z2zqzz5rcwgd4q90u54ek5yyca4s6e6y2jja9sww27kzedzznjcupcu0svq2exvq995c0lhl5zm53g4ksnm2xuwt3snv4dgh";
 
+// CamelCase mock status (what SDK now returns)
 const mockStatus = {
+  syncedHeight: 3902500,
+  adminPubkey: "YCsjrC6I8UFsWwGJIpCQx9FI98Q4g3E7+8CQ3E8M9OE=",
+  uivk: TESTNET_UIVK,
+  address: VALID_TESTNET_ADDR,
+  registered: 42,
+  listed: 3,
+  pricing: {
+    nonce: 1,
+    height: 3900000,
+    tiers: [600_000_000, 425_000_000, 300_000_000, 150_000_000, 75_000_000, 50_000_000],
+  },
+};
+
+// Snake_case mock (what RPC actually returns - used for mocking)
+const mockRpcStatus = {
   synced_height: 3902500,
   admin_pubkey: "YCsjrC6I8UFsWwGJIpCQx9FI98Q4g3E7+8CQ3E8M9OE=",
   uivk: TESTNET_UIVK,
@@ -56,14 +72,14 @@ describe("ZNS constructor", () => {
 
 describe("ZNS.verify", () => {
   it("verifies server UIVK", async () => {
-    globalThis.fetch = mockRpc(mockStatus);
+    globalThis.fetch = mockRpc(mockRpcStatus);
     const zns = new ZNS();
     await zns.verify();
     expect(zns.verified).toBe(true);
   });
 
   it("throws on UIVK mismatch", async () => {
-    globalThis.fetch = mockRpc({ ...mockStatus, uivk: "wrong" });
+    globalThis.fetch = mockRpc({ ...mockRpcStatus, uivk: "wrong" });
     const zns = new ZNS();
     await expect(zns.verify()).rejects.toThrow("UIVK mismatch");
     expect(zns.verified).toBe(false);
@@ -71,13 +87,16 @@ describe("ZNS.verify", () => {
 });
 
 describe("ZNS.status", () => {
-  it("fetches server status", async () => {
-    globalThis.fetch = mockRpc(mockStatus);
+  it("fetches server status with camelCase fields", async () => {
+    globalThis.fetch = mockRpc(mockRpcStatus);
     const zns = new ZNS();
     const status = await zns.status();
-    expect(status.admin_pubkey).toBe(mockStatus.admin_pubkey);
-    expect(status.pricing).toEqual(mockStatus.pricing);
+
+    // Now returns camelCase
+    expect(status.adminPubkey).toBe(mockRpcStatus.admin_pubkey);
+    expect(status.syncedHeight).toBe(3902500);
     expect(status.address).toBe(VALID_TESTNET_ADDR);
+    expect(status.pricing?.tiers).toEqual(mockRpcStatus.pricing.tiers);
   });
 });
 
@@ -92,7 +111,7 @@ describe("resolveName", () => {
       signature: null,
       last_action: "CLAIM",
       pubkey: null,
-      listing: { name: "alice", price: 100_000, nonce: 1, txid: "tx2", height: 200, signature: "sig1", pubkey: null },
+      listing: { name: "alice", price: 100_000, pay_taddr: "t1testaddr", nonce: 1, txid: "tx2", height: 200, signature: "sig1", pubkey: null, pending_buy: null },
     };
     globalThis.fetch = mockRpc(reg);
 
@@ -103,8 +122,9 @@ describe("resolveName", () => {
     if (result) {
       expect(result.name).toBe("alice");
       expect(result.address).toBe("utest1addr");
+      expect(result.lastAction).toBe("CLAIM"); // camelCase
       expect(result.listing).not.toBeNull();
-      expect(result.listing?.name).toBe("alice");
+      expect(result.listing?.payTaddr).toBe("t1testaddr"); // camelCase
     }
   });
 
@@ -188,45 +208,77 @@ describe("isAvailable", () => {
 });
 
 describe("listings", () => {
-  it("returns listings with total", async () => {
+  it("returns listings with camelCase fields", async () => {
     const listings = {
       listings: [
-        { name: "bob", price: 100_000, nonce: 1, txid: "tx1", height: 200, signature: "sig1", pubkey: null },
+        { name: "bob", price: 100_000, pay_taddr: "t1testaddr", nonce: 1, txid: "tx1", height: 200, signature: "sig1", pubkey: null, pending_buy: null },
       ],
       total: 1,
     };
     globalThis.fetch = mockRpc(listings);
     const zns = new ZNS();
     const result = await zns.listings();
+
     expect(result.listings).toHaveLength(1);
     expect(result.listings[0].name).toBe("bob");
-    expect(result.listings[0].pubkey).toBeNull();
+    expect(result.listings[0].payTaddr).toBe("t1testaddr"); // camelCase
+    expect(result.listings[0].pendingBuy).toBeUndefined(); // camelCase
+    expect(result.total).toBe(1);
+  });
+
+  it("returns pendingBuy with camelCase fields", async () => {
+    const listings = {
+      listings: [
+        { name: "bob", price: 100_000, pay_taddr: "t1testaddr", nonce: 1, txid: "tx1", height: 200, signature: "sig1", pubkey: null, pending_buy: { buyer_ua: "u1buyer", price: 50_000, claim_height: 200, expires_at: 300, txid: "tx3" } },
+      ],
+      total: 1,
+    };
+    globalThis.fetch = mockRpc(listings);
+    const zns = new ZNS();
+    const result = await zns.listings();
+
+    expect(result.listings[0].pendingBuy).toBeDefined();
+    expect(result.listings[0].pendingBuy?.buyer).toBe("u1buyer"); // camelCase
+    expect(result.listings[0].pendingBuy?.claimHeight).toBe(200); // camelCase
+    expect(result.listings[0].pendingBuy?.expiresAt).toBe(300); // camelCase
+  });
+});
+
+describe("events", () => {
+  it("returns events with camelCase fields", async () => {
+    const events = {
+      events: [
+        { id: 1, name: "alice", action: "CLAIM", txid: "tx1", height: 100, ua: "u1addr", price: null, nonce: null, signature: null, pubkey: null },
+      ],
+      total: 1,
+    };
+    globalThis.fetch = mockRpc(events);
+    const zns = new ZNS();
+    const result = await zns.events();
+
+    expect(result.events).toHaveLength(1);
     expect(result.total).toBe(1);
   });
 });
 
 describe("verification", () => {
   it("verifyListing returns true with valid admin pubkey", async () => {
-    globalThis.fetch = mockRpc(mockStatus);
+    globalThis.fetch = mockRpc(mockRpcStatus);
     const zns = new ZNS();
     const status = await zns.status();
-    
-    const listing = { name: "bob", price: 100_000, nonce: 1, txid: "tx1", height: 200, signature: "sig1", pubkey: null };
-    // Note: This will likely fail signature verification with mock data,
-    // but we're testing that it accepts the adminPubkey parameter
-    const result = await zns.verifyListing(listing, status.admin_pubkey);
-    // We can't verify the actual signature without proper keypair,
-    // but we can verify the function accepts the adminPubkey parameter
+
+    const listing = { name: "bob", price: 100_000, payTaddr: "t1testaddr", nonce: 1, txid: "tx1", height: 200, signature: "sig1", pubkey: null, pendingBuy: undefined };
+    const result = await zns.verifyListing(listing, status.adminPubkey);
     expect(typeof result).toBe("boolean");
   });
 
   it("verifyRegistration returns false when no signature", async () => {
-    globalThis.fetch = mockRpc(mockStatus);
+    globalThis.fetch = mockRpc(mockRpcStatus);
     const zns = new ZNS();
     const status = await zns.status();
-    
-    const reg = { name: "alice", address: "u1", txid: "tx1", height: 100, nonce: 0, signature: null, last_action: "CLAIM", pubkey: null };
-    const result = await zns.verifyRegistration(reg, status.admin_pubkey);
+
+    const reg = { name: "alice", address: "u1", txid: "tx1", height: 100, nonce: 0, signature: null, lastAction: "CLAIM", pubkey: null, listing: null };
+    const result = await zns.verifyRegistration(reg, status.adminPubkey);
     expect(result).toBe(false);
   });
 });
@@ -235,14 +287,14 @@ describe("action flows", () => {
   let zns: ZNS;
   let mockPricing: typeof mockStatus.pricing;
   beforeEach(async () => {
-    globalThis.fetch = mockRpc(mockStatus);
+    globalThis.fetch = mockRpc(mockRpcStatus);
     zns = new ZNS();
     mockPricing = mockStatus.pricing;
   });
 
-  describe("prepareClaim / completeClaim", () => {
+  describe("prepareClaim / complete", () => {
     const validTestnetAddr = VALID_TESTNET_ADDR;
-    
+
     it("prepareClaim returns payload, cost, and complete method", () => {
       const cost = zns.claimCost(5, mockPricing);
       const result = zns.prepareClaim("alice", validTestnetAddr, cost!);
@@ -272,19 +324,20 @@ describe("action flows", () => {
   });
 
   describe("prepareList / complete", () => {
-    it("returns correct payload and memo", () => {
-      const pre = zns.prepareList("alice", 100_000, 1);
-      expect(pre.payload).toBe("LIST:alice:100000:1");
+    it("returns correct payload with camelCase param", () => {
+      const pre = zns.prepareList("alice", 100_000, "t1testaddr", 1);
+      expect(pre.payload).toBe("LIST:alice:100000:t1testaddr:1");
+      expect(pre.payTaddr).toBe("t1testaddr"); // camelCase
 
       const post = pre.complete("dummySig");
-      expect(post.memo).toBe("ZNS:LIST:alice:100000:1:dummySig");
+      expect(post.memo).toBe("ZNS:LIST:alice:100000:t1testaddr:1:dummySig");
       expect(post.uri).toContain("memo=");
     });
 
     it("supports sovereign userPubkey", () => {
-      const action = zns.prepareList("alice", 100_000, 1);
+      const action = zns.prepareList("alice", 100_000, "t1testaddr", 1);
       const result = action.complete("dummySig", "mypk");
-      expect(result.memo).toBe("ZNS:LIST:alice:100000:1:dummySig:mypk");
+      expect(result.memo).toBe("ZNS:LIST:alice:100000:t1testaddr:1:dummySig:mypk");
     });
   });
 
@@ -310,11 +363,24 @@ describe("action flows", () => {
 
   describe("prepareBuy / complete", () => {
     it("returns correct payload and memo", () => {
-      const pre = zns.prepareBuy("alice", VALID_TESTNET_ADDR);
+      const pre = zns.prepareBuy("alice", VALID_TESTNET_ADDR, 100_000);
       expect(pre.payload).toBe(`BUY:alice:${VALID_TESTNET_ADDR}`);
+      expect(pre.buyerAddress).toBe(VALID_TESTNET_ADDR); // camelCase
 
       const post = pre.complete("dummySig");
-      expect(post.memo).toBe(`ZNS:BUY:alice:${VALID_TESTNET_ADDR}:dummySig`);
+      expect(post.memo).toBe(`ZNS:BUY:alice:${VALID_TESTNET_ADDR}:100000:dummySig`);
+    });
+
+    it("supports sovereign userPubkey", () => {
+      const action = zns.prepareBuy("alice", VALID_TESTNET_ADDR, 100_000);
+      const result = action.complete("dummySig", "mypk");
+      expect(result.memo).toBe(`ZNS:BUY:alice:${VALID_TESTNET_ADDR}:100000:dummySig:mypk`);
+    });
+
+    it("includes BUY_COMMISSION in the URI amount", () => {
+      const action = zns.prepareBuy("alice", VALID_TESTNET_ADDR, 100_000);
+      const result = action.complete("dummySig");
+      expect(result.uri).toContain("amount=0.0001");
     });
   });
 
@@ -356,6 +422,186 @@ describe("isValidName", () => {
   });
 });
 
+describe("validatePayload", () => {
+  let zns: ZNS;
+  beforeEach(() => { zns = new ZNS(); });
+
+  // ── Empty / malformed ───────────────────────────────────────────────────────
+
+  it("rejects empty payload", () => {
+    const r = zns.validatePayload("");
+    expect(r.valid).toBe(false);
+    expect(r.level).toBe("invalid");
+    expect(r.action).toBe("");
+    expect(r.canonicalAction).toBeNull();
+  });
+
+  it("rejects whitespace-only payload", () => {
+    const r = zns.validatePayload("   ");
+    expect(r.valid).toBe(false);
+    expect(r.level).toBe("invalid");
+  });
+
+  it("rejects payload with no colon", () => {
+    const r = zns.validatePayload("CLAIM");
+    expect(r.valid).toBe(false);
+    expect(r.level).toBe("invalid");
+    expect(r.message).toContain("Missing colon");
+  });
+
+  it("returns unrecognized for unknown action", () => {
+    const r = zns.validatePayload("FOO:bar:baz");
+    expect(r.valid).toBe(false);
+    expect(r.level).toBe("unrecognized");
+    expect(r.action).toBe("FOO");
+    expect(r.canonicalAction).toBeNull();
+  });
+
+  it("is case-insensitive for action", () => {
+    const r = zns.validatePayload("claim:a:u1abc");
+    expect(r.valid).toBe(true);
+    expect(r.action).toBe("CLAIM");
+    expect(r.canonicalAction).toBe("claim");
+  });
+
+  // ── CLAIM ─────────────────────────────────────────────────────────────────
+
+  it("accepts valid CLAIM payload", () => {
+    const r = zns.validatePayload(`CLAIM:alice:${VALID_TESTNET_ADDR}`);
+    expect(r.valid).toBe(true);
+    expect(r.action).toBe("CLAIM");
+    expect(r.level).toBe("valid");
+  });
+
+  it("rejects CLAIM with wrong part count", () => {
+    const r = zns.validatePayload("CLAIM:alice");
+    expect(r.valid).toBe(false);
+    expect(r.level).toBe("invalid");
+    expect(r.message).toContain("Expected CLAIM");
+  });
+
+  it("rejects CLAIM with invalid name", () => {
+    const r = zns.validatePayload(`CLAIM:UPPER:${VALID_TESTNET_ADDR}`);
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("lowercase");
+  });
+
+  it("rejects CLAIM with non-unified address", () => {
+    const r = zns.validatePayload("CLAIM:alice:zs1notunified");
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("Invalid unified address");
+  });
+
+  // ── BUY ───────────────────────────────────────────────────────────────────
+
+  it("accepts valid BUY payload", () => {
+    const r = zns.validatePayload(`BUY:alice:${VALID_TESTNET_ADDR}`);
+    expect(r.valid).toBe(true);
+    expect(r.action).toBe("BUY");
+  });
+
+  it("rejects BUY with wrong part count", () => {
+    const r = zns.validatePayload(`BUY:alice:${VALID_TESTNET_ADDR}:extra`);
+    expect(r.valid).toBe(false);
+    expect(r.level).toBe("invalid");
+  });
+
+  // ── UPDATE ────────────────────────────────────────────────────────────────
+
+  it("accepts valid UPDATE payload", () => {
+    const r = zns.validatePayload(`UPDATE:alice:${VALID_TESTNET_ADDR}:1`);
+    expect(r.valid).toBe(true);
+    expect(r.action).toBe("UPDATE");
+  });
+
+  it("rejects UPDATE with non-numeric nonce", () => {
+    const r = zns.validatePayload(`UPDATE:alice:${VALID_TESTNET_ADDR}:abc`);
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("Nonce must be a whole number");
+  });
+
+  it("rejects UPDATE with wrong part count", () => {
+    const r = zns.validatePayload(`UPDATE:alice:${VALID_TESTNET_ADDR}`);
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("Expected UPDATE");
+  });
+
+  // ── LIST ──────────────────────────────────────────────────────────────────
+
+  it("accepts valid LIST payload", () => {
+    const r = zns.validatePayload("LIST:alice:100000000:t1test123456789012345678:1");
+    expect(r.valid).toBe(true);
+    expect(r.action).toBe("LIST");
+  });
+
+  it("rejects LIST with wrong part count", () => {
+    const r = zns.validatePayload("LIST:alice:100000000:1");
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("Expected LIST");
+  });
+
+  it("rejects LIST with negative price", () => {
+    const r = zns.validatePayload("LIST:alice:-1:t1test:1");
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("positive whole number in zats");
+  });
+
+  it("rejects LIST with zero price", () => {
+    const r = zns.validatePayload("LIST:alice:0:t1test:1");
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("positive whole number in zats");
+  });
+
+  // ── DELIST ─────────────────────────────────────────────────────────────────
+
+  it("accepts valid DELIST payload", () => {
+    const r = zns.validatePayload("DELIST:alice:2");
+    expect(r.valid).toBe(true);
+    expect(r.action).toBe("DELIST");
+  });
+
+  it("rejects DELIST with wrong part count", () => {
+    const r = zns.validatePayload("DELIST:alice");
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("Expected DELIST");
+  });
+
+  // ── RELEASE ───────────────────────────────────────────────────────────────
+
+  it("accepts valid RELEASE payload", () => {
+    const r = zns.validatePayload("RELEASE:alice:3");
+    expect(r.valid).toBe(true);
+    expect(r.action).toBe("RELEASE");
+  });
+
+  it("rejects RELEASE with wrong part count", () => {
+    const r = zns.validatePayload("RELEASE:alice");
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("Expected RELEASE");
+  });
+
+  // ── Name length edge cases ─────────────────────────────────────────────────
+
+  it("accepts 62-char name", () => {
+    const name62 = "a".repeat(62);
+    const r = zns.validatePayload(`CLAIM:${name62}:${VALID_TESTNET_ADDR}`);
+    expect(r.valid).toBe(true);
+  });
+
+  it("rejects 63-char name", () => {
+    const name63 = "a".repeat(63);
+    const r = zns.validatePayload(`CLAIM:${name63}:${VALID_TESTNET_ADDR}`);
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("62 chars");
+  });
+
+  it("rejects empty name", () => {
+    const r = zns.validatePayload(`CLAIM::${VALID_TESTNET_ADDR}`);
+    expect(r.valid).toBe(false);
+    expect(r.message).toContain("lowercase");
+  });
+});
+
 describe("claimCost", () => {
   it("returns cost based on pricing tiers", () => {
     const zns = new ZNS();
@@ -374,6 +620,21 @@ describe("claimCost", () => {
     const zns = new ZNS();
     const emptyPricing = { ...mockStatus.pricing, tiers: [] };
     expect(zns.claimCost(1, emptyPricing)).toBeNull();
+  });
+
+  it("BUY_COMMISSION is 10,000 zats", () => {
+    expect(BUY_COMMISSION).toBe(10_000);
+  });
+
+  it("listCommission returns 10% of minimum tier", () => {
+    const zns = new ZNS();
+    expect(zns.listCommission(mockStatus.pricing)).toBe(5_000_000);
+  });
+
+  it("listCommission returns null when no tiers", () => {
+    const zns = new ZNS();
+    const emptyPricing = { ...mockStatus.pricing, tiers: [] };
+    expect(zns.listCommission(emptyPricing)).toBeNull();
   });
 });
 

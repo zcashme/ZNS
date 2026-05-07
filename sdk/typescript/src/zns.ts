@@ -17,7 +17,23 @@ import type {
   PreparedBuy,
   PreparedRelease,
   PreparedSetPrice,
+  PendingBuy,
+  PayloadValidationResult,
+  RawRegistration,
+  RawListing,
+  RawStatus,
+  RawEventsFilter,
+  RawEventsResult,
 } from "./types.js";
+import {
+  BUY_COMMISSION,
+  LIST_COMMISSION,
+  toRegistration,
+  toStatus,
+  toEvent,
+  toEventsResult,
+} from "./types.js";
+import { toEventsFilter } from "./types.js";
 
 export type {
   Zats,
@@ -36,17 +52,22 @@ export type {
   PreparedBuy,
   PreparedRelease,
   PreparedSetPrice,
+  PayloadValidationResult,
+  PayloadValidationLevel,
   LastAction,
   EventAction,
+  PendingBuy,
 } from "./types.js";
+
+export { BUY_COMMISSION, LIST_COMMISSION } from "./types.js";
 
 export const DEFAULT_URL = "https://light.zcash.me/zns-testnet";
 
 export const TESTNET_UIVK =
-  "uivktest1hzw7wyadutvzfgpna80yftsk5l7jeyu2p5me5quvp28tytxueta00cx4068wnlzcv7tx9n3t3gfhsy83pe4y6jrhxtzaq0hj6xtg5zrk2dn7zen3vns2a5pgs4fxdjlletmqrhfa42";
+  "utest1hzw7wyadutvzfgpna80yftsk5l7jeyu2p5me5quvp28tytxueta00cx4068wnlzcv7tx9n3t3gfhsy83pe4y6jrhxtzaq0hj6xtg5zrk2dn7zen3vns2a5pgs4fxdjlletmqrhfa42";
 
 export const MAINNET_UIVK =
-  "uivk1gl26qy0xjja7lqhyg3pf0x4j4j66kqwewrjkdcg28eqq4wgtzjmujpee7x9cs2ec9xhnlgrm8ptlw8z80j2aryw8nqtssser2ys778a0s00uvgkdjnfr58sndhfvc3f4zqjs6ywva6";
+  "u1k0evt0ahj5qdt6y9ftsxndl8lrkm4ff6rp00u04cjpmqj6hxl9t8hfsxftmn3ht34e03lljh89czn2h8qn67rwrs8x0hm3lsxsucp9q9";
 
 const KNOWN_UIVKS = [TESTNET_UIVK, MAINNET_UIVK];
 
@@ -56,7 +77,26 @@ const REGISTRY_ADDRESSES: Record<string, string> = {
   mainnet: "u1k0evt0ahj5qdt6y9ftsxndl8lrkm4ff6rp00u04cjpmqj6hxl9t8hfsxftmn3ht34e03lljh89czn2h8qn67rwrs8x0hm3lsxsucp9q9",
 };
 
+/** Actions accepted by {@link validatePayload}. Exposed for consumers who need
+ *  to build action selectors or dynamic validation. */
+export const ZNS_ACTIONS = ["CLAIM", "BUY", "UPDATE", "LIST", "DELIST", "RELEASE"] as const;
+
 const NAME_RE = /^[a-z0-9]{1,62}$/;
+
+function isWholeNumber(value: string): boolean {
+  return /^\d+$/.test(value) && !value.startsWith("0") || value === "0";
+}
+
+type MkLevel = "valid" | "invalid" | "unrecognized";
+
+function mk(
+  level: MkLevel,
+  action: string,
+  canonical: string,
+  message: string,
+): PayloadValidationResult {
+  return { valid: level === "valid", action, canonicalAction: canonical, message, level };
+}
 
 export type Network = "testnet" | "mainnet";
 
@@ -82,7 +122,7 @@ export class ZNS {
    * @throws Error if the server's UIVK is not recognized
    */
   async verify(): Promise<void> {
-    const status = await this.rpc<Status>("status");
+    const status = await this.status();
     if (!KNOWN_UIVKS.includes(status.uivk)) {
       throw new Error(
         `UIVK mismatch: indexer returned "${status.uivk.slice(0, 20)}..." which is not a known ZNS instance`,
@@ -107,32 +147,36 @@ export class ZNS {
 
   /** Fetch current server status including pricing and configuration. */
   async status(): Promise<Status> {
-    return this.rpc<Status>("status");
+    const raw = await this.rpc<RawStatus>("status");
+    return toStatus(raw);
   }
 
   /** Resolve a ZNS name to its registration. Returns null if not registered. */
   async resolveName(name: string): Promise<Registration | null> {
-    return this.rpc<Registration | null>("resolve", { query: name });
+    const raw = await this.rpc<RawRegistration | null>("resolve", { query: name });
+    return raw ? toRegistration(raw) : null;
   }
 
   /** Resolve a Zcash Unified Address to all names pointing to it. Returns empty array if none.
    *  Supports pagination with limit (default 50, max 500) and offset (default 0). */
   async resolveAddress(address: string, limit?: number, offset?: number): Promise<Registration[]> {
-    return this.rpc<Registration[]>("resolve", {
+    const raw = await this.rpc<RawRegistration[]>("resolve", {
       query: address,
       limit,
       offset,
     });
+    return raw.map(toRegistration);
   }
 
   /** List all registered names. Useful for explorers or browsers.
    *  Supports pagination with limit (default 50, max 500) and offset (default 0). */
   async listAllRegistrations(limit?: number, offset?: number): Promise<Registration[]> {
-    return this.rpc<Registration[]>("resolve", {
+    const raw = await this.rpc<RawRegistration[]>("resolve", {
       query: "",
       limit,
       offset,
     });
+    return raw.map(toRegistration);
   }
 
   /** Check if a name is available for registration.
@@ -163,18 +207,40 @@ export class ZNS {
   }
 
   async listings(limit?: number, offset?: number): Promise<{ listings: Listing[]; total: number }> {
-    const result = await this.rpc<{ listings: Listing[]; total: number }>("listings", {
+    const result = await this.rpc<{ listings: RawListing[]; total: number }>("listings", {
       limit,
       offset,
     });
-    return result;
+    return {
+      listings: result.listings.map((l) => ({
+        name: l.name,
+        price: l.price,
+        payTaddr: l.pay_taddr,
+        nonce: l.nonce,
+        txid: l.txid,
+        height: l.height,
+        signature: l.signature,
+        pubkey: l.pubkey,
+        pendingBuy: l.pending_buy
+          ? {
+              buyer: l.pending_buy.buyer_ua,
+              price: l.pending_buy.price,
+              claimHeight: l.pending_buy.claim_height,
+              expiresAt: l.pending_buy.expires_at,
+              txid: l.pending_buy.txid,
+            }
+          : undefined,
+      })),
+      total: result.total,
+    };
   }
 
   async events(filter?: EventsFilter): Promise<EventsResult> {
-    return this.rpc<EventsResult>(
+    const raw = await this.rpc<RawEventsResult>(
       "events",
-      (filter ?? {}) as Record<string, unknown>,
+      toEventsFilter(filter ?? {}) as Record<string, unknown>,
     );
+    return toEventsResult(raw);
   }
 
   /**
@@ -185,7 +251,8 @@ export class ZNS {
    */
   async verifyListing(listing: Listing, adminPubkey: string): Promise<boolean> {
     const pubkey = listing.pubkey ?? adminPubkey;
-    const payload = `LIST:${listing.name}:${listing.price}:${listing.nonce}`;
+    // Use snake_case internally for signature verification (matches Rust)
+    const payload = `LIST:${listing.name}:${listing.price}:${listing.payTaddr}:${listing.nonce}`;
     return this.verifyEd25519(payload, listing.signature, pubkey);
   }
 
@@ -212,6 +279,137 @@ export class ZNS {
   }
 
   /**
+   * Validate a signing payload string against the ZNS memo format spec.
+   *
+   * This is the single source of truth for payload format validation —
+   * it mirrors the Rust indexer's `parse_memo` and `signing_payload` logic.
+   *
+   * Does NOT validate the signature (see {@link verifyEd25519} for that).
+   * Does NOT validate the name against the blockchain (see {@link isAvailable} for that).
+   *
+   * @param payload - Raw payload string, e.g. `CLAIM:foo:u1abc`
+   * @returns Validation result with level and human-readable message
+   *
+   * @example
+   * ```ts
+   * const result = zns.validatePayload("CLAIM:alice:u1qvs2...");
+   * if (!result.valid) {
+   *   console.error(result.message);
+   * }
+   * ```
+   */
+  validatePayload(payload: string): PayloadValidationResult {
+    const raw = String(payload ?? "").trim();
+    if (!raw) {
+      return {
+        valid: false,
+        action: "",
+        canonicalAction: null,
+        message: "Empty payload.",
+        level: "invalid",
+      };
+    }
+
+    const colonIdx = raw.indexOf(":");
+    if (colonIdx === -1) {
+      return {
+        valid: false,
+        action: raw.toUpperCase(),
+        canonicalAction: null,
+        message: "Missing colon separator. Expected format: ACTION:field1:field2:...",
+        level: "invalid",
+      };
+    }
+
+    const actionUpper = raw.slice(0, colonIdx).toUpperCase();
+    const actionLower = raw.slice(0, colonIdx).toLowerCase();
+    const rest = raw.slice(colonIdx + 1);
+
+    const parts = rest.split(":");
+
+    switch (actionLower) {
+      case "claim": {
+        // CLAIM:<name>:<ua>
+        if (parts.length !== 2)
+          return mk("invalid", actionUpper, "claim", `Expected CLAIM:<name>:<ua>.`);
+        if (!NAME_RE.test(parts[0]))
+          return mk("invalid", actionUpper, "claim", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+        if (!this.isValidUnifiedAddress(parts[1]))
+          return mk("invalid", actionUpper, "claim", `Invalid unified address: "${parts[1]}".`);
+        return mk("valid", actionUpper, "claim", "Valid CLAIM payload.");
+      }
+
+      case "buy": {
+        // BUY:<name>:<buyer_ua>
+        if (parts.length !== 2)
+          return mk("invalid", actionUpper, "buy", `Expected BUY:<name>:<buyer_ua>.`);
+        if (!NAME_RE.test(parts[0]))
+          return mk("invalid", actionUpper, "buy", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+        if (!this.isValidUnifiedAddress(parts[1]))
+          return mk("invalid", actionUpper, "buy", `Invalid unified address: "${parts[1]}".`);
+        return mk("valid", actionUpper, "buy", "Valid BUY payload.");
+      }
+
+      case "update": {
+        // UPDATE:<name>:<new_ua>:<nonce>
+        if (parts.length !== 3)
+          return mk("invalid", actionUpper, "update", `Expected UPDATE:<name>:<ua>:<nonce>.`);
+        if (!NAME_RE.test(parts[0]))
+          return mk("invalid", actionUpper, "update", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+        if (!this.isValidUnifiedAddress(parts[1]))
+          return mk("invalid", actionUpper, "update", `Invalid unified address: "${parts[1]}".`);
+        if (!isWholeNumber(parts[2]))
+          return mk("invalid", actionUpper, "update", `Nonce must be a whole number.`);
+        return mk("valid", actionUpper, "update", "Valid UPDATE payload.");
+      }
+
+      case "list": {
+        // LIST:<name>:<price>:<pay_taddr>:<nonce> — per ZNS spec §4
+        if (parts.length !== 4)
+          return mk("invalid", actionUpper, "list", `Expected LIST:<name>:<price_zats>:<pay_taddr>:<nonce>.`);
+        if (!NAME_RE.test(parts[0]))
+          return mk("invalid", actionUpper, "list", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+        if (!isWholeNumber(parts[1]) || Number(parts[1]) <= 0)
+          return mk("invalid", actionUpper, "list", `Price must be a positive whole number in zats.`);
+        if (!isWholeNumber(parts[3]))
+          return mk("invalid", actionUpper, "list", `Nonce must be a whole number.`);
+        return mk("valid", actionUpper, "list", "Valid LIST payload.");
+      }
+
+      case "delist": {
+        // DELIST:<name>:<nonce>
+        if (parts.length !== 2)
+          return mk("invalid", actionUpper, "delist", `Expected DELIST:<name>:<nonce>.`);
+        if (!NAME_RE.test(parts[0]))
+          return mk("invalid", actionUpper, "delist", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+        if (!isWholeNumber(parts[1]))
+          return mk("invalid", actionUpper, "delist", `Nonce must be a whole number.`);
+        return mk("valid", actionUpper, "delist", "Valid DELIST payload.");
+      }
+
+      case "release": {
+        // RELEASE:<name>:<nonce>
+        if (parts.length !== 2)
+          return mk("invalid", actionUpper, "release", `Expected RELEASE:<name>:<nonce>.`);
+        if (!NAME_RE.test(parts[0]))
+          return mk("invalid", actionUpper, "release", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+        if (!isWholeNumber(parts[1]))
+          return mk("invalid", actionUpper, "release", `Nonce must be a whole number.`);
+        return mk("valid", actionUpper, "release", "Valid RELEASE payload.");
+      }
+
+      default:
+        return {
+          valid: false,
+          action: actionUpper,
+          canonicalAction: null,
+          message: `Unrecognized action "${actionUpper}". Valid actions: ${ZNS_ACTIONS.join(", ")}.`,
+          level: "unrecognized",
+        };
+    }
+  }
+
+  /**
    * Get the claim cost in zatoshis for a name of given length.
    * @param nameLength The length of the name (1-62)
    * @param pricing The pricing configuration - obtain from {@link status}
@@ -221,6 +419,16 @@ export class ZNS {
     if (pricing.tiers.length === 0) return null;
     const idx = Math.min(Math.max(nameLength - 1, 0), pricing.tiers.length - 1);
     return pricing.tiers[idx];
+  }
+
+  /**
+   * Get the listing commission in zatoshis (10% of the minimum pricing tier).
+   * @param pricing The pricing configuration - obtain from {@link status}
+   * @returns The commission in zatoshis, or null if pricing is unavailable
+   */
+  listCommission(pricing: Pricing): Zats | null {
+    if (pricing.tiers.length === 0) return null;
+    return Math.min(...pricing.tiers) * 0.1;
   }
 
   /** Parse a ZIP-321 URI into its components. */
@@ -277,6 +485,7 @@ export class ZNS {
   prepareList(
     name: string,
     price: Zats,
+    payTaddr: string,
     nonce: number,
   ): PreparedList {
     this.requireValidName(name);
@@ -284,13 +493,14 @@ export class ZNS {
     return {
       name,
       price,
+      payTaddr,
       nonce,
-      payload: `LIST:${name}:${price}:${nonce}`,
+      payload: `LIST:${name}:${price}:${payTaddr}:${nonce}`,
       complete: (signature: string, userPubkey?: string): CompletedAction => {
         const memo = userPubkey
-          ? `ZNS:LIST:${name}:${price}:${nonce}:${signature}:${userPubkey}`
-          : `ZNS:LIST:${name}:${price}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
+          ? `ZNS:LIST:${name}:${price}:${payTaddr}:${nonce}:${signature}:${userPubkey}`
+          : `ZNS:LIST:${name}:${price}:${payTaddr}:${nonce}:${signature}`;
+        return { memo, uri: this.buildZcashUri(this.registryAddress, LIST_COMMISSION, memo) };
       },
     };
   }
@@ -341,6 +551,7 @@ export class ZNS {
   prepareBuy(
     name: string,
     buyerAddress: string,
+    price: Zats,
   ): PreparedBuy {
     this.requireValidName(name);
     if (!this.isValidUnifiedAddress(buyerAddress)) {
@@ -350,12 +561,13 @@ export class ZNS {
     return {
       name,
       buyerAddress,
+      price,
       payload: `BUY:${name}:${buyerAddress}`,
       complete: (signature: string, userPubkey?: string): CompletedAction => {
         const memo = userPubkey
-          ? `ZNS:BUY:${name}:${buyerAddress}:${signature}:${userPubkey}`
-          : `ZNS:BUY:${name}:${buyerAddress}:${signature}`;
-        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
+          ? `ZNS:BUY:${name}:${buyerAddress}:${price}:${signature}:${userPubkey}`
+          : `ZNS:BUY:${name}:${buyerAddress}:${price}:${signature}`;
+        return { memo, uri: this.buildZcashUri(this.registryAddress, BUY_COMMISSION, memo) };
       },
     };
   }
@@ -397,7 +609,7 @@ export class ZNS {
   // ── Private helpers ────────────────────────────────────────────────────────
 
   private registrationPayload(reg: Registration): string {
-    switch (reg.last_action) {
+    switch (reg.lastAction) {
       case "CLAIM":
         return `CLAIM:${reg.name}:${reg.address}`;
       case "BUY":
