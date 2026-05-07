@@ -13,14 +13,6 @@ use zcash_address::ZcashAddress;
 
 use crate::registry::Registry;
 
-pub struct RpcState {
-    pub db_path: String,
-    pub synced_height: watch::Receiver<u64>,
-    pub admin_pubkey: String,
-    pub uivk: String,
-    pub address: String,
-}
-
 // ── Response types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,7 +129,16 @@ pub trait ZnsApi {
 
 // ── Implementation ──────────────────────────────────────────────────────────
 
-impl ZnsApiServer for RpcState {
+/// Lightweight context passed to each RPC handler — just enough to read the DB.
+pub struct RpcContext {
+    pub db_path: String,
+    pub synced_height: watch::Receiver<u64>,
+    pub admin_pubkey: String,
+    pub uivk: String,
+    pub address: String,
+}
+
+impl ZnsApiServer for RpcContext {
     fn resolve(
         &self,
         query: String,
@@ -303,7 +304,7 @@ fn listing_entry(l: crate::registry::Listing, reg: &Registry) -> ListingEntry {
 
 // ── Server ──────────────────────────────────────────────────────────────────
 
-pub async fn serve(addr: String, state: RpcState) {
+pub async fn serve(addr: String, ctx: RpcContext) {
     let server = match Server::builder().build(&addr).await {
         Ok(s) => s,
         Err(e) => {
@@ -311,7 +312,7 @@ pub async fn serve(addr: String, state: RpcState) {
             return;
         }
     };
-    let handle = server.start(state.into_rpc());
+    let handle = server.start(ctx.into_rpc());
     info!("RPC server listening on {addr}");
     handle.stopped().await;
 }

@@ -48,14 +48,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (height_tx, height_rx) = watch::channel(0u64);
 
-    let rpc_state = rpc::RpcState {
+    let rpc_ctx = rpc::RpcContext {
         db_path: config::DB_PATH.to_string(),
         synced_height: height_rx,
         admin_pubkey: base64::engine::general_purpose::STANDARD.encode(cfg.admin_pubkey),
         uivk: cfg.uivk.clone(),
         address: ua_str,
     };
-    tokio::spawn(rpc::serve(format!("0.0.0.0:{}", config::RPC_PORT), rpc_state));
+    tokio::spawn(rpc::serve(format!("0.0.0.0:{}", config::RPC_PORT), rpc_ctx));
 
     info!(network = ?config::NETWORK, lwd_url = %config::LWD_URL, "connecting to lightwalletd");
     let mut indexer = decrypter::IndexerState::connect(
