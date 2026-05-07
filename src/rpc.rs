@@ -8,17 +8,10 @@ use jsonrpsee::server::Server;
 use jsonrpsee::types::ErrorObjectOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{self, Value};
+use tracing::{error, info};
 use zcash_address::ZcashAddress;
 
 use crate::registry::Registry;
-
-pub struct RpcState {
-    pub db_path: String,
-    pub synced_height: watch::Receiver<u64>,
-    pub admin_pubkey: String,
-    pub uivk: String,
-    pub address: String,
-}
 
 // ── Response types ──────────────────────────────────────────────────────────
 
@@ -39,11 +32,22 @@ pub(crate) struct RegistrationEntry {
 pub(crate) struct ListingEntry {
     name: String,
     price: u64,
+    pay_taddr: String,
     nonce: u64,
     txid: String,
     height: u64,
     signature: String,
     pubkey: Option<String>,
+    pending_buy: Option<PendingBuyEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PendingBuyEntry {
+    buyer_ua: String,
+    price: u64,
+    claim_height: u64,
+    expires_at: u64,
+    txid: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +129,16 @@ pub trait ZnsApi {
 
 // ── Implementation ──────────────────────────────────────────────────────────
 
-impl ZnsApiServer for RpcState {
+/// Lightweight context passed to each RPC handler — just enough to read the DB.
+pub struct RpcContext {
+    pub db_path: String,
+    pub synced_height: watch::Receiver<u64>,
+    pub admin_pubkey: String,
+    pub uivk: String,
+    pub address: String,
+}
+
+impl ZnsApiServer for RpcContext {
     fn resolve(
         &self,
         query: String,
@@ -138,11 +151,11 @@ impl ZnsApiServer for RpcState {
 
         // Empty query = list all registrations
         if query.is_empty() {
-            let (registrations, _total) = reg.list_registrations(limit, offset, 0);
+            let registrations = reg.list_registrations(limit, offset);
             let entries: Vec<RegistrationEntry> = registrations
                 .into_iter()
                 .map(|r| {
-                    let listing = reg.get_listing(&r.name).map(listing_entry);
+                    let listing = reg.get_listing(&r.name).map(|l| listing_entry(l, &reg));
                     registration_entry(r, listing)
                 })
                 .collect();
@@ -151,12 +164,11 @@ impl ZnsApiServer for RpcState {
 
         // Address query = list names for address
         if query.parse::<ZcashAddress>().is_ok() {
-            let (registrations, _total) =
-                reg.resolve_by_address_paginated(&query, limit, offset, 0);
+            let registrations = reg.list_registrations_by_address(&query, limit, offset);
             let entries: Vec<RegistrationEntry> = registrations
                 .into_iter()
                 .map(|r| {
-                    let listing = reg.get_listing(&r.name).map(listing_entry);
+                    let listing = reg.get_listing(&r.name).map(|l| listing_entry(l, &reg));
                     registration_entry(r, listing)
                 })
                 .collect();
@@ -165,7 +177,7 @@ impl ZnsApiServer for RpcState {
 
         // Exact name query = single registration
         let entry = reg.resolve_by_name(&query).map(|r| {
-            let listing = reg.get_listing(&r.name).map(listing_entry);
+            let listing = reg.get_listing(&r.name).map(|l| listing_entry(l, &reg));
             registration_entry(r, listing)
         });
         Ok(serde_json::to_value(entry).unwrap())
@@ -179,9 +191,12 @@ impl ZnsApiServer for RpcState {
         let reg = open_registry(&self.db_path)?;
         let limit = limit.unwrap_or(50).min(500);
         let offset = offset.unwrap_or(0);
-        let count = reg.count_listings();
-        let (listings, total) = reg.list_listings_paginated(limit, offset, count);
-        let listings: Vec<ListingEntry> = listings.into_iter().map(listing_entry).collect();
+        let total = reg.count_listings();
+        let listings: Vec<ListingEntry> = reg
+            .list_listings(limit, offset)
+            .into_iter()
+            .map(|l| listing_entry(l, &reg))
+            .collect();
         Ok(ListingsResult { listings, total })
     }
 
@@ -266,29 +281,38 @@ fn registration_entry(
     }
 }
 
-fn listing_entry(l: crate::registry::Listing) -> ListingEntry {
+fn listing_entry(l: crate::registry::Listing, reg: &Registry) -> ListingEntry {
+    let pending_buy = reg.get_pending_buy(&l.name).map(|p| PendingBuyEntry {
+        buyer_ua: p.buyer_ua,
+        price: p.price,
+        claim_height: p.claim_height,
+        expires_at: p.expires_at,
+        txid: p.txid,
+    });
     ListingEntry {
         name: l.name,
         price: l.price,
+        pay_taddr: l.pay_taddr,
         nonce: l.nonce,
         txid: l.txid,
         height: l.height,
         signature: l.signature,
         pubkey: l.pubkey,
+        pending_buy,
     }
 }
 
 // ── Server ──────────────────────────────────────────────────────────────────
 
-pub async fn serve(addr: String, state: RpcState) {
+pub async fn serve(addr: String, ctx: RpcContext) {
     let server = match Server::builder().build(&addr).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("RPC server failed to bind {addr}: {e}");
+            error!("RPC server failed to bind {addr}: {e}");
             return;
         }
     };
-    let handle = server.start(state.into_rpc());
-    println!("RPC server listening on {addr}");
+    let handle = server.start(ctx.into_rpc());
+    info!("RPC server listening on {addr}");
     handle.stopped().await;
 }

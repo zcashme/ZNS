@@ -15,28 +15,15 @@ pub struct MemoAction {
 #[derive(Debug, Clone)]
 pub enum ActionKind {
     Claim { ua: String },
-    List { price: u64, nonce: u64 },
+    List { price: u64, pay_taddr: String, nonce: u64 },
     Delist { nonce: u64 },
     Release { nonce: u64 },
     Update { new_ua: String, nonce: u64 },
-    Buy { buyer_ua: String },
+    Buy { buyer_ua: String, price: u64 },
     SetPrice { prices: Vec<u64>, nonce: u64 },
 }
 
-impl ActionKind {
-    /// Returns the wire-format action label used in events and signing payloads.
-    pub fn label(&self) -> &'static str {
-        match self {
-            ActionKind::Claim { .. } => "CLAIM",
-            ActionKind::List { .. } => "LIST",
-            ActionKind::Delist { .. } => "DELIST",
-            ActionKind::Release { .. } => "RELEASE",
-            ActionKind::Update { .. } => "UPDATE",
-            ActionKind::Buy { .. } => "BUY",
-            ActionKind::SetPrice { .. } => "SETPRICE",
-        }
-    }
-}
+impl ActionKind {}
 
 /// Constructs the ownership payload for a CLAIM or BUY establishing action.
 ///
@@ -85,11 +72,11 @@ pub fn validate_name(name: &str) -> bool {
 pub fn signing_payload(action: &MemoAction) -> String {
     match &action.kind {
         ActionKind::Claim { ua } => format!("CLAIM:{}:{ua}", action.name),
-        ActionKind::List { price, nonce } => format!("LIST:{}:{price}:{nonce}", action.name),
+        ActionKind::List { price, pay_taddr, nonce } => format!("LIST:{}:{price}:{pay_taddr}:{nonce}", action.name),
         ActionKind::Delist { nonce } => format!("DELIST:{}:{nonce}", action.name),
         ActionKind::Release { nonce } => format!("RELEASE:{}:{nonce}", action.name),
         ActionKind::Update { new_ua, nonce } => format!("UPDATE:{}:{new_ua}:{nonce}", action.name),
-        ActionKind::Buy { buyer_ua } => format!("BUY:{}:{buyer_ua}", action.name),
+        ActionKind::Buy { buyer_ua, .. } => format!("BUY:{}:{buyer_ua}", action.name),
         ActionKind::SetPrice { prices, nonce } => {
             let count = prices.len();
             let prices_str: String = prices
@@ -194,19 +181,20 @@ fn parse_claim(rest: &str) -> Option<MemoAction> {
 }
 
 fn parse_list(rest: &str) -> Option<MemoAction> {
-    // ZNS:LIST:<name>:<price>:<nonce>:<sig>[:<user_pubkey>]
-    let parts: Vec<&str> = rest.splitn(5, ':').collect();
-    if parts.len() < 4 || !validate_name(parts[0]) {
+    // ZNS:LIST:<name>:<price>:<pay_taddr>:<nonce>:<sig>[:<user_pubkey>]
+    let parts: Vec<&str> = rest.splitn(6, ':').collect();
+    if parts.len() < 5 || !validate_name(parts[0]) {
         return None;
     }
     let price: u64 = parts[1].parse().ok()?;
-    let nonce: u64 = parts[2].parse().ok()?;
-    let (sig, pk) = extract_sig_and_pubkey(&parts, 3)?;
+    let pay_taddr = parts[2].to_string();
+    let nonce: u64 = parts[3].parse().ok()?;
+    let (sig, pk) = extract_sig_and_pubkey(&parts, 4)?;
     Some(MemoAction {
         name: parts[0].into(),
         signature: sig,
         user_pubkey: pk,
-        kind: ActionKind::List { price, nonce },
+        kind: ActionKind::List { price, pay_taddr, nonce },
     })
 }
 
@@ -259,16 +247,18 @@ fn parse_update(rest: &str) -> Option<MemoAction> {
 }
 
 fn parse_buy(rest: &str) -> Option<MemoAction> {
-    // ZNS:BUY:<name>:<buyer_ua>:<sig>[:<user_pubkey>]
-    let parts: Vec<&str> = rest.splitn(4, ':').collect();
-    if parts.len() < 3 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
+    // ZNS:BUY:<name>:<buyer_ua>:<price>:<sig>[:<user_pubkey>]
+    let parts: Vec<&str> = rest.splitn(5, ':').collect();
+    if parts.len() < 4 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
         return None;
     }
-    let (sig, pk) = extract_sig_and_pubkey(&parts, 2)?;
+    let buyer_ua = parts[1].to_string();
+    let price: u64 = parts[2].parse().ok()?;
+    let (sig, pk) = extract_sig_and_pubkey(&parts, 3)?;
     Some(MemoAction {
         name: parts[0].into(),
         signature: sig,
         user_pubkey: pk,
-        kind: ActionKind::Buy { buyer_ua: parts[1].into() },
+        kind: ActionKind::Buy { buyer_ua, price },
     })
 }
