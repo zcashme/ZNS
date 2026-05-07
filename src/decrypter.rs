@@ -177,6 +177,17 @@ impl IndexerState {
 
     /// Scan for the first transparent transaction in `[start_height, end_height]`
     /// that pays at least `min_amount` zatoshis to `pay_taddr`.
+    ///
+    /// Uses a two-pass approach:
+    ///   1. Stream all raw transactions and collect them in a Vec. No
+    ///      deserialization during this pass — only I/O.
+    ///   2. Deserialize each transaction and check transparent outputs for a
+    ///      matching payment.
+    ///
+    /// GetAddressUtxos is intentionally not used as a fast-path — the UTXO set
+    /// is always moving and cannot serve as a source of truth for recovery or
+    /// historical verification. GetTaddressTransactions is always the source of
+    /// truth.
     pub async fn find_payment(
         &mut self,
         pay_taddr: &str,
@@ -199,10 +210,17 @@ impl IndexerState {
             .ok()?
             .into_inner();
 
+        // Pass 1: collect all raw transactions. No deserialization yet.
+        let mut txs: Vec<(Vec<u8>, u64)> = Vec::new();
         while let Ok(Some(raw)) = stream.message().await {
-            let tx_height = raw.height;
-            let branch = BranchId::for_height(&self.network, BlockHeight::from_u32(tx_height as u32));
-            let Ok(tx) = Transaction::read(&raw.data[..], branch) else {
+            txs.push((raw.data, raw.height));
+        }
+
+        // Pass 2: deserialize each tx and check for a matching payment.
+        for (raw_data, tx_height) in txs {
+            let branch =
+                BranchId::for_height(&self.network, BlockHeight::from_u32(tx_height as u32));
+            let Ok(tx) = Transaction::read(&raw_data[..], branch) else {
                 continue;
             };
             let total: u64 = tx
