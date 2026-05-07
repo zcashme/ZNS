@@ -595,6 +595,21 @@ impl Registry {
             .ok()
     }
 
+    /// Returns the minimum raw pricing tier in zatoshis (before scaling), or `None`
+    /// if no pricing is set. Multiply by 10_000 to get the actual zatoshi amount.
+    pub fn min_tier(&self) -> Option<u64> {
+        let tiers_str: String = self
+            .db
+            .query_row("SELECT tiers FROM pricing WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .ok()?;
+        tiers_str
+            .split(':')
+            .filter_map(|s| s.parse::<u64>().ok())
+            .min()
+    }
+
     pub fn query_events(
         &self,
         name: Option<&str>,

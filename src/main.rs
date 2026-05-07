@@ -268,12 +268,15 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
         }
         ActionKind::List { price, pay_taddr, nonce } => {
-            // Flat 0.01 ZEC listing commission, prepaid as the indexer's note
-            // value. Forfeited if the listing never completes.
-            const LIST_COMMISSION: u64 = 1_000_000;
-            if note_value < LIST_COMMISSION {
+            // 10% of the minimum pricing tier as listing commission, prepaid as the
+            // indexer's note value. Forfeited if the listing never completes.
+            let Some(commission) = reg.min_tier().map(|t| t * 1_000) else {
+                warn!("LIST rejected for {}: no pricing set", action.name);
+                return;
+            };
+            if note_value < commission {
                 warn!(
-                    "LIST: commission underpayment for {}: {note_value} < {LIST_COMMISSION}",
+                    "LIST: commission underpayment for {}: {note_value} < {commission}",
                     action.name
                 );
                 return;
