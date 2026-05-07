@@ -2,8 +2,6 @@
 
 use rusqlite::Connection;
 
-use crate::memo::MemoAction;
-
 pub struct Registry {
     db: Connection,
 }
@@ -118,11 +116,22 @@ impl Registry {
         height: u64,
         pubkey: Option<&str>,
     ) -> rusqlite::Result<bool> {
-        self.db.execute(
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute(
             "INSERT OR IGNORE INTO registrations (name, ua, signature, txid, height, last_action, pubkey) VALUES (?1, ?2, ?3, ?4, ?5, 'CLAIM', ?6)",
             rusqlite::params![name, ua, signature, txid, height as i64, pubkey],
         )?;
-        Ok(self.db.changes() > 0)
+        if tx.changes() == 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, price, nonce, signature, pubkey)
+             VALUES (?1, 'CLAIM', ?2, ?3, ?4, NULL, NULL, ?5, ?6)",
+            rusqlite::params![name, txid, height as i64, ua, signature, pubkey],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn create_listing(
@@ -136,10 +145,17 @@ impl Registry {
         height: u64,
         pubkey: Option<&str>,
     ) -> rusqlite::Result<()> {
-        self.db.execute(
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute(
             "INSERT OR REPLACE INTO listings (name, price, pay_taddr, nonce, signature, txid, height, pubkey) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![name, price as i64, pay_taddr, nonce as i64, signature, txid, height as i64, pubkey],
         )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO events (name, action, txid, height, price, nonce, signature, pubkey)
+             VALUES (?1, 'LIST', ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![name, txid, height as i64, price as i64, nonce as i64, signature, pubkey],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -283,21 +299,33 @@ impl Registry {
         names
     }
 
-    pub fn delete_listing(&self, name: &str, signature: &str) -> rusqlite::Result<()> {
-        self.db.execute(
+    pub fn delete_listing(&self, name: &str, signature: &str, txid: &str, height: u64, nonce: u64, pubkey: Option<&str>) -> rusqlite::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute(
             "UPDATE registrations SET signature = ?1, last_action = 'DELIST' WHERE name = ?2",
             rusqlite::params![signature, name],
         )?;
-        self.db
-            .execute("DELETE FROM listings WHERE name = ?1", [name])?;
+        tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO events (name, action, txid, height, nonce, signature, pubkey)
+             VALUES (?1, 'DELIST', ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![name, txid, height as i64, nonce as i64, signature, pubkey],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
-    pub fn delete_registration(&self, name: &str) -> rusqlite::Result<()> {
+    pub fn delete_registration(&self, name: &str, txid: &str, height: u64, nonce: u64, signature: &str, pubkey: Option<&str>) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
         tx.execute("DELETE FROM registrations WHERE name = ?1", [name])?;
-        tx.commit()
+        tx.execute(
+            "INSERT OR IGNORE INTO events (name, action, txid, height, nonce, signature, pubkey)
+             VALUES (?1, 'RELEASE', ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![name, txid, height as i64, nonce as i64, signature, pubkey],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn update_address(
@@ -307,11 +335,19 @@ impl Registry {
         signature: &str,
         txid: &str,
         height: u64,
+        pubkey: Option<&str>,
     ) -> rusqlite::Result<()> {
-        self.db.execute(
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute(
             "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, signature = ?4, last_action = 'UPDATE' WHERE name = ?5",
             rusqlite::params![new_ua, txid, height as i64, signature, name],
         )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, nonce, signature, pubkey)
+             VALUES (?1, 'UPDATE', ?2, ?3, ?4, NULL, ?5, ?6)",
+            rusqlite::params![name, txid, height as i64, new_ua, signature, pubkey],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -361,10 +397,17 @@ impl Registry {
         txid: &str,
         signature: &str,
     ) -> rusqlite::Result<()> {
-        self.db.execute(
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute(
             "INSERT OR REPLACE INTO pricing (id, nonce, tiers, height, txid, signature) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![nonce as i64, tiers_json, height as i64, txid, signature],
         )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO events (name, action, txid, height, nonce, signature)
+             VALUES ('SETPRICE', 'SETPRICE', ?1, ?2, ?3, ?4)",
+            rusqlite::params![txid, height as i64, nonce as i64, signature],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -384,35 +427,6 @@ impl Registry {
         }
         let idx = (name_len.saturating_sub(1)).min(tiers.len() - 1);
         Some(tiers[idx] * 10_000)
-    }
-
-    pub fn insert_event(
-        &self,
-        memo: &MemoAction,
-        action_label: &str,
-        txid: &str,
-        height: u64,
-        ua: Option<&str>,
-        price: Option<u64>,
-        nonce: Option<u64>,
-        pubkey: Option<&str>,
-    ) -> rusqlite::Result<()> {
-        self.db.execute(
-            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, price, nonce, signature, pubkey)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![
-                memo.name,
-                action_label,
-                txid,
-                height as i64,
-                ua,
-                price.map(|p| p as i64),
-                nonce.map(|n| n as i64),
-                memo.signature,
-                pubkey,
-            ],
-        )?;
-        Ok(())
     }
 
     // ── Reads ───────────────────────────────────────────────────────────────

@@ -233,7 +233,6 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 .join(":");
             match reg.store_pricing(*nonce, height, &tiers_str, txid, &action.signature) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, action.kind.label(), txid, height, None, None, Some(*nonce), None);
                     info!(
                         "Pricing set: {} tiers, nonce {nonce} (height {height})",
                         prices.len()
@@ -259,7 +258,6 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
             match reg.create_registration(&action.name, ua, &action.signature, txid, height, pubkey) {
                 Ok(true) => {
-                    let _ = reg.insert_event(&action, action.kind.label(), txid, height, Some(ua), None, None, pubkey);
                     info!(
                         "Claimed: {} → {ua} for {note_value} zats (height {height})",
                         action.name
@@ -284,23 +282,12 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 warn!("LIST: {e}");
                 return;
             }
-            let owner_ua = reg.get_owner_ua(&action.name);
             let listing_pubkey_b64 = action
                 .user_pubkey
                 .as_ref()
                 .map(|k| base64::engine::general_purpose::STANDARD.encode(k));
             match reg.create_listing(&action.name, *price, pay_taddr, *nonce, &action.signature, txid, height, listing_pubkey_b64.as_deref()) {
                 Ok(()) => {
-                    let _ = reg.insert_event(
-                        &action,
-                        action.kind.label(),
-                        txid,
-                        height,
-                        owner_ua.as_deref(),
-                        Some(*price),
-                        Some(*nonce),
-                        pubkey,
-                    );
                     info!("Listed: {} for {price} zats → {pay_taddr} (height {height})", action.name)
                 }
                 Err(e) => error!("DB error (list): {e}"),
@@ -324,9 +311,8 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 warn!("DELIST: {e}");
                 return;
             }
-            match reg.delete_listing(&action.name, &action.signature) {
+            match reg.delete_listing(&action.name, &action.signature, txid, height, *nonce, pubkey) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, action.kind.label(), txid, height, None, None, Some(*nonce), pubkey);
                     info!("Delisted: {} (height {height})", action.name)
                 }
                 Err(e) => error!("DB error (delist): {e}"),
@@ -341,9 +327,8 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 warn!("RELEASE: {e}");
                 return;
             }
-            match reg.delete_registration(&action.name) {
+            match reg.delete_registration(&action.name, txid, height, *nonce, &action.signature, pubkey) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, action.kind.label(), txid, height, None, None, Some(*nonce), pubkey);
                     info!("Released: {} (height {height})", action.name)
                 }
                 Err(e) => error!("DB error (release): {e}"),
@@ -354,9 +339,8 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 warn!("UPDATE: {e}");
                 return;
             }
-            match reg.update_address(&action.name, new_ua, &action.signature, txid, height) {
+            match reg.update_address(&action.name, new_ua, &action.signature, txid, height, pubkey) {
                 Ok(()) => {
-                    let _ = reg.insert_event(&action, action.kind.label(), txid, height, Some(new_ua), None, Some(*nonce), pubkey);
                     info!("Updated: {} → {new_ua} (height {height})", action.name)
                 }
                 Err(e) => error!("DB error (update): {e}"),

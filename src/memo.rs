@@ -23,20 +23,7 @@ pub enum ActionKind {
     SetPrice { prices: Vec<u64>, nonce: u64 },
 }
 
-impl ActionKind {
-    /// Returns the wire-format action label used in events and signing payloads.
-    pub fn label(&self) -> &'static str {
-        match self {
-            ActionKind::Claim { .. } => "CLAIM",
-            ActionKind::List { .. } => "LIST",
-            ActionKind::Delist { .. } => "DELIST",
-            ActionKind::Release { .. } => "RELEASE",
-            ActionKind::Update { .. } => "UPDATE",
-            ActionKind::Buy { .. } => "BUY",
-            ActionKind::SetPrice { .. } => "SETPRICE",
-        }
-    }
-}
+impl ActionKind {}
 
 /// Constructs the ownership payload for a CLAIM or BUY establishing action.
 ///

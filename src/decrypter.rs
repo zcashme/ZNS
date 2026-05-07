@@ -64,14 +64,6 @@ impl IndexerState {
         self.height
     }
 
-    pub fn network(&self) -> Network {
-        self.network
-    }
-
-    pub fn client_mut(&mut self) -> &mut Client {
-        &mut self.client
-    }
-
     /// Ask lightwalletd for the current chain tip height.
     pub async fn chain_tip(&mut self) -> Option<u64> {
         self.client
