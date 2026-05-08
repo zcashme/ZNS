@@ -63,7 +63,7 @@ pub fn validate_name(name: &str) -> bool {
 /// | Action    | Signing payload format                    |
 /// |-----------|-----------------------------------------|
 /// | CLAIM     | `CLAIM:{name}:{ua}`                     |
-/// | LIST      | `LIST:{name}:{price}:{nonce}`           |
+/// | LIST      | `LIST:{name}:{price}:{pay_taddr}:{nonce}` |
 /// | DELIST    | `DELIST:{name}:{nonce}`                  |
 /// | RELEASE   | `RELEASE:{name}:{nonce}`                 |
 /// | UPDATE    | `UPDATE:{name}:{new_ua}:{nonce}`         |
