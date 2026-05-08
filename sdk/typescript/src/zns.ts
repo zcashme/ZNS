@@ -1,7 +1,9 @@
 import * as ed25519 from "@noble/ed25519";
 import { bech32m } from "bech32";
+import { ZNS_ACTIONS } from "./types.js";
 import type {
   Zats,
+  ZnsAction,
   Registration,
   Listing,
   Status,
@@ -19,69 +21,59 @@ import type {
   PreparedSetPrice,
   PendingBuy,
   PayloadValidationResult,
-  RawRegistration,
-  RawListing,
-  RawStatus,
-  RawEventsFilter,
-  RawEventsResult,
 } from "./types.js";
-import {
-  BUY_COMMISSION,
-  LIST_COMMISSION,
-  toRegistration,
-  toStatus,
-  toEvent,
-  toEventsResult,
-} from "./types.js";
-import { toEventsFilter } from "./types.js";
-
-export type {
-  Zats,
-  Registration,
-  Listing,
-  Status,
-  Event,
-  EventsFilter,
-  EventsResult,
-  Pricing,
-  CompletedAction,
-  PreparedClaim,
-  PreparedList,
-  PreparedDelist,
-  PreparedUpdate,
-  PreparedBuy,
-  PreparedRelease,
-  PreparedSetPrice,
-  PayloadValidationResult,
-  PayloadValidationLevel,
-  LastAction,
-  EventAction,
-  PendingBuy,
-} from "./types.js";
-
-export { BUY_COMMISSION, LIST_COMMISSION } from "./types.js";
 
 export const DEFAULT_URL = "https://light.zcash.me/zns-testnet";
 
-export const TESTNET_UIVK =
-  "utest1hzw7wyadutvzfgpna80yftsk5l7jeyu2p5me5quvp28tytxueta00cx4068wnlzcv7tx9n3t3gfhsy83pe4y6jrhxtzaq0hj6xtg5zrk2dn7zen3vns2a5pgs4fxdjlletmqrhfa42";
+/** Commission sent with a BUY claim memo (0.0001 ZEC = 10,000 zats). */
+export const BUY_COMMISSION: Zats = 10_000;
 
-export const MAINNET_UIVK =
-  "u1k0evt0ahj5qdt6y9ftsxndl8lrkm4ff6rp00u04cjpmqj6hxl9t8hfsxftmn3ht34e03lljh89czn2h8qn67rwrs8x0hm3lsxsucp9q9";
+/** Listing commission sent with a LIST memo (0.01 ZEC = 1,000,000 zats).
+ *  Mirrors the indexer's formula: min_tier × 1000. */
+export const LIST_COMMISSION: Zats = 1_000_000;
 
-const KNOWN_UIVKS = [TESTNET_UIVK, MAINNET_UIVK];
+/** Network-specific configuration for ZNS. */
+export const NETWORKS = {
+  testnet: {
+    url: "https://light.zcash.me/zns-testnet",
+    registryAddress: "utest1f32kn6c4zvn54xr8wfsnxmj9hzpu2mwgtxzpzwcw34906tdccdvzs0z2dx38lly7tpan77x6udt8pjczqm22ymsdhlz9j0tk5yq664nl",
+    uivk: "utest1hzw7wyadutvzfgpna80yftsk5l7jeyu2p5me5quvp28tytxueta00cx4068wnlzcv7tx9n3t3gfhsy83pe4y6jrhxtzaq0hj6xtg5zrk2dn7zen3vns2a5pgs4fxdjlletmqrhfa42",
+  },
+  mainnet: {
+    url: "https://light.zcash.me/zns",
+    registryAddress: "u1k0evt0ahj5qdt6y9ftsxndl8lrkm4ff6rp00u04cjpmqj6hxl9t8hfsxftmn3ht34e03lljh89czn2h8qn67rwrs8x0hm3lsxsucp9q9",
+    uivk: "u1k0evt0ahj5qdt6y9ftsxndl8lrkm4ff6rp00u04cjpmqj6hxl9t8hfsxftmn3ht34e03lljh89czn2h8qn67rwrs8x0hm3lsxsucp9q9",
+  },
+} as const;
 
-// Registry addresses where ZNS memos are sent
-const REGISTRY_ADDRESSES: Record<string, string> = {
-  testnet: "utest1f32kn6c4zvn54xr8wfsnxmj9hzpu2mwgtxzpzwcw34906tdccdvzs0z2dx38lly7tpan77x6udt8pjczqm22ymsdhlz9j0tk5yq664nl",
-  mainnet: "u1k0evt0ahj5qdt6y9ftsxndl8lrkm4ff6rp00u04cjpmqj6hxl9t8hfsxftmn3ht34e03lljh89czn2h8qn67rwrs8x0hm3lsxsucp9q9",
-};
+// Derived exports
+export const TESTNET_URL = NETWORKS.testnet.url;
+export const MAINNET_URL = NETWORKS.mainnet.url;
+export const TESTNET_REGISTRY_ADDRESS = NETWORKS.testnet.registryAddress;
+export const MAINNET_REGISTRY_ADDRESS = NETWORKS.mainnet.registryAddress;
+export const TESTNET_UIVK = NETWORKS.testnet.uivk;
+export const MAINNET_UIVK = NETWORKS.mainnet.uivk;
 
-/** Actions accepted by {@link validatePayload}. Exposed for consumers who need
- *  to build action selectors or dynamic validation. */
-export const ZNS_ACTIONS = ["CLAIM", "BUY", "UPDATE", "LIST", "DELIST", "RELEASE"] as const;
+export { ZNS_ACTIONS };
 
+/** Valid ZNS name pattern: 1-62 lowercase alphanumeric chars. */
 const NAME_RE = /^[a-z0-9]{1,62}$/;
+
+/**
+ * Normalizes indexer API responses from snake_case (Rust) to camelCase (TypeScript).
+ */
+function normalizeApiResponse<T>(obj: unknown): T {
+  if (Array.isArray(obj)) return obj.map((item) => normalizeApiResponse(item)) as T;
+  if (obj && typeof obj === "object") {
+    return Object.fromEntries(
+      Object.entries(obj).map(([k, v]) => [
+        k.replace(/_([a-z])/g, (_, c) => c.toUpperCase()),
+        normalizeApiResponse(v),
+      ]),
+    ) as T;
+  }
+  return obj as T;
+}
 
 function isWholeNumber(value: string): boolean {
   return /^\d+$/.test(value) && !value.startsWith("0") || value === "0";
@@ -89,13 +81,13 @@ function isWholeNumber(value: string): boolean {
 
 type MkLevel = "valid" | "invalid" | "unrecognized";
 
+/** Helper to construct PayloadValidationResult from validatePayload(). */
 function mk(
   level: MkLevel,
-  action: string,
-  canonical: string,
+  action: ZnsAction,
   message: string,
 ): PayloadValidationResult {
-  return { valid: level === "valid", action, canonicalAction: canonical, message, level };
+  return { valid: level === "valid", action, canonicalAction: action, message, level };
 }
 
 export type Network = "testnet" | "mainnet";
@@ -114,7 +106,7 @@ export class ZNS {
    */
   constructor(options?: { network?: Network; url?: string }) {
     this.network = options?.network ?? "testnet";
-    this.url = options?.url ?? DEFAULT_URL;
+    this.url = options?.url ?? NETWORKS[this.network].url;
   }
 
   /**
@@ -123,7 +115,7 @@ export class ZNS {
    */
   async verify(): Promise<void> {
     const status = await this.status();
-    if (!KNOWN_UIVKS.includes(status.uivk)) {
+    if (status.uivk !== NETWORKS[this.network].uivk) {
       throw new Error(
         `UIVK mismatch: indexer returned "${status.uivk.slice(0, 20)}..." which is not a known ZNS instance`,
       );
@@ -138,45 +130,41 @@ export class ZNS {
 
   /** Get the registry address for the current network. */
   get registryAddress(): string {
-    const addr = REGISTRY_ADDRESSES[this.network];
-    if (!addr) {
-      throw new Error(`Unknown network: ${this.network}`);
-    }
-    return addr;
+    return NETWORKS[this.network].registryAddress;
   }
 
   /** Fetch current server status including pricing and configuration. */
   async status(): Promise<Status> {
-    const raw = await this.rpc<RawStatus>("status");
-    return toStatus(raw);
+    const raw = await this.rpc<Record<string, unknown>>("status");
+    return normalizeApiResponse<Status>(raw);
   }
 
   /** Resolve a ZNS name to its registration. Returns null if not registered. */
   async resolveName(name: string): Promise<Registration | null> {
-    const raw = await this.rpc<RawRegistration | null>("resolve", { query: name });
-    return raw ? toRegistration(raw) : null;
+    const raw = await this.rpc<Record<string, unknown> | null>("resolve", { query: name });
+    return raw ? normalizeApiResponse<Registration>(raw) : null;
   }
 
   /** Resolve a Zcash Unified Address to all names pointing to it. Returns empty array if none.
    *  Supports pagination with limit (default 50, max 500) and offset (default 0). */
   async resolveAddress(address: string, limit?: number, offset?: number): Promise<Registration[]> {
-    const raw = await this.rpc<RawRegistration[]>("resolve", {
+    const raw = await this.rpc<Record<string, unknown>[]>("resolve", {
       query: address,
       limit,
       offset,
     });
-    return raw.map(toRegistration);
+    return raw.map((r) => normalizeApiResponse<Registration>(r));
   }
 
   /** List all registered names. Useful for explorers or browsers.
    *  Supports pagination with limit (default 50, max 500) and offset (default 0). */
   async listAllRegistrations(limit?: number, offset?: number): Promise<Registration[]> {
-    const raw = await this.rpc<RawRegistration[]>("resolve", {
+    const raw = await this.rpc<Record<string, unknown>[]>("resolve", {
       query: "",
       limit,
       offset,
     });
-    return raw.map(toRegistration);
+    return raw.map((r) => normalizeApiResponse<Registration>(r));
   }
 
   /** Check if a name is available for registration.
@@ -190,7 +178,13 @@ export class ZNS {
   /** Validate a Zcash Unified Address format.
    *  Accepts both mainnet ('u') and testnet ('utest') prefixes.
    *  Performs basic format validation but NOT full bech32m checksum verification.
-   *  Returns true if the address looks like a unified address, false otherwise. */
+   *  Returns true if the address looks like a unified address, false otherwise.
+   * 
+   *  @todo(F4Jumble) Upgrade to full ZIP-316 decoding with F4Jumble to:
+   *    - Parse actual typecodes from address items
+   *    - Validate F4Jumble checksum (not just bech32m)
+   *    - Optionally enforce: address must contain at least one Orchard receiver (typecode 0x03)
+   *    Requires @noble/hashes (blake2b) implementation of F4Jumble inverse. */
   isValidUnifiedAddress(address: string): boolean {
     // Unified addresses start with 'u' (mainnet) or 'utest' (testnet)
     // followed by '1' separator and alphanumeric characters
@@ -207,40 +201,23 @@ export class ZNS {
   }
 
   async listings(limit?: number, offset?: number): Promise<{ listings: Listing[]; total: number }> {
-    const result = await this.rpc<{ listings: RawListing[]; total: number }>("listings", {
+    const raw = await this.rpc<{ listings: Record<string, unknown>[]; total: number }>("listings", {
       limit,
       offset,
     });
     return {
-      listings: result.listings.map((l) => ({
-        name: l.name,
-        price: l.price,
-        payTaddr: l.pay_taddr,
-        nonce: l.nonce,
-        txid: l.txid,
-        height: l.height,
-        signature: l.signature,
-        pubkey: l.pubkey,
-        pendingBuy: l.pending_buy
-          ? {
-              buyer: l.pending_buy.buyer_ua,
-              price: l.pending_buy.price,
-              claimHeight: l.pending_buy.claim_height,
-              expiresAt: l.pending_buy.expires_at,
-              txid: l.pending_buy.txid,
-            }
-          : undefined,
-      })),
-      total: result.total,
+      listings: raw.listings.map((l) => normalizeApiResponse<Listing>(l)),
+      total: raw.total,
     };
   }
 
+
   async events(filter?: EventsFilter): Promise<EventsResult> {
-    const raw = await this.rpc<RawEventsResult>(
+    const raw = await this.rpc<Record<string, unknown>>(
       "events",
-      toEventsFilter(filter ?? {}) as Record<string, unknown>,
+      normalizeApiResponse(filter ?? {}) as Record<string, unknown>,
     );
-    return toEventsResult(raw);
+    return normalizeApiResponse<EventsResult>(raw);
   }
 
   /**
@@ -322,90 +299,91 @@ export class ZNS {
     }
 
     const actionUpper = raw.slice(0, colonIdx).toUpperCase();
-    const actionLower = raw.slice(0, colonIdx).toLowerCase();
     const rest = raw.slice(colonIdx + 1);
-
     const parts = rest.split(":");
 
-    switch (actionLower) {
-      case "claim": {
+    if (!ZNS_ACTIONS.includes(actionUpper as ZnsAction)) {
+      return {
+        valid: false,
+        action: actionUpper,
+        canonicalAction: null,
+        message: `Unrecognized action "${actionUpper}". Valid actions: ${ZNS_ACTIONS.join(", ")}.`,
+        level: "unrecognized",
+      };
+    }
+
+    const action = actionUpper as ZnsAction;
+
+    switch (action) {
+      case "CLAIM": {
         // CLAIM:<name>:<ua>
         if (parts.length !== 2)
-          return mk("invalid", actionUpper, "claim", `Expected CLAIM:<name>:<ua>.`);
+          return mk("invalid", action, `Expected CLAIM:<name>:<ua>.`);
         if (!NAME_RE.test(parts[0]))
-          return mk("invalid", actionUpper, "claim", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
         if (!this.isValidUnifiedAddress(parts[1]))
-          return mk("invalid", actionUpper, "claim", `Invalid unified address: "${parts[1]}".`);
-        return mk("valid", actionUpper, "claim", "Valid CLAIM payload.");
+          return mk("invalid", action, `Invalid unified address: "${parts[1]}".`);
+        return mk("valid", action, "Valid CLAIM payload.");
       }
 
-      case "buy": {
+      case "BUY": {
         // BUY:<name>:<buyer_ua>
         if (parts.length !== 2)
-          return mk("invalid", actionUpper, "buy", `Expected BUY:<name>:<buyer_ua>.`);
+          return mk("invalid", action, `Expected BUY:<name>:<buyer_ua>.`);
         if (!NAME_RE.test(parts[0]))
-          return mk("invalid", actionUpper, "buy", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
         if (!this.isValidUnifiedAddress(parts[1]))
-          return mk("invalid", actionUpper, "buy", `Invalid unified address: "${parts[1]}".`);
-        return mk("valid", actionUpper, "buy", "Valid BUY payload.");
+          return mk("invalid", action, `Invalid unified address: "${parts[1]}".`);
+        return mk("valid", action, "Valid BUY payload.");
       }
 
-      case "update": {
+      case "UPDATE": {
         // UPDATE:<name>:<new_ua>:<nonce>
         if (parts.length !== 3)
-          return mk("invalid", actionUpper, "update", `Expected UPDATE:<name>:<ua>:<nonce>.`);
+          return mk("invalid", action, `Expected UPDATE:<name>:<ua>:<nonce>.`);
         if (!NAME_RE.test(parts[0]))
-          return mk("invalid", actionUpper, "update", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
         if (!this.isValidUnifiedAddress(parts[1]))
-          return mk("invalid", actionUpper, "update", `Invalid unified address: "${parts[1]}".`);
+          return mk("invalid", action, `Invalid unified address: "${parts[1]}".`);
         if (!isWholeNumber(parts[2]))
-          return mk("invalid", actionUpper, "update", `Nonce must be a whole number.`);
-        return mk("valid", actionUpper, "update", "Valid UPDATE payload.");
+          return mk("invalid", action, `Nonce must be a whole number.`);
+        return mk("valid", action, "Valid UPDATE payload.");
       }
 
-      case "list": {
-        // LIST:<name>:<price>:<pay_taddr>:<nonce> — per ZNS spec §4
+      case "LIST": {
+        // LIST:<name>:<price>:<pay_taddr>:<nonce>
         if (parts.length !== 4)
-          return mk("invalid", actionUpper, "list", `Expected LIST:<name>:<price_zats>:<pay_taddr>:<nonce>.`);
+          return mk("invalid", action, `Expected LIST:<name>:<price_zats>:<pay_taddr>:<nonce>.`);
         if (!NAME_RE.test(parts[0]))
-          return mk("invalid", actionUpper, "list", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
         if (!isWholeNumber(parts[1]) || Number(parts[1]) <= 0)
-          return mk("invalid", actionUpper, "list", `Price must be a positive whole number in zats.`);
+          return mk("invalid", action, `Price must be a positive whole number in zats.`);
         if (!isWholeNumber(parts[3]))
-          return mk("invalid", actionUpper, "list", `Nonce must be a whole number.`);
-        return mk("valid", actionUpper, "list", "Valid LIST payload.");
+          return mk("invalid", action, `Nonce must be a whole number.`);
+        return mk("valid", action, "Valid LIST payload.");
       }
 
-      case "delist": {
+      case "DELIST": {
         // DELIST:<name>:<nonce>
         if (parts.length !== 2)
-          return mk("invalid", actionUpper, "delist", `Expected DELIST:<name>:<nonce>.`);
+          return mk("invalid", action, `Expected DELIST:<name>:<nonce>.`);
         if (!NAME_RE.test(parts[0]))
-          return mk("invalid", actionUpper, "delist", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
         if (!isWholeNumber(parts[1]))
-          return mk("invalid", actionUpper, "delist", `Nonce must be a whole number.`);
-        return mk("valid", actionUpper, "delist", "Valid DELIST payload.");
+          return mk("invalid", action, `Nonce must be a whole number.`);
+        return mk("valid", action, "Valid DELIST payload.");
       }
 
-      case "release": {
+      case "RELEASE": {
         // RELEASE:<name>:<nonce>
         if (parts.length !== 2)
-          return mk("invalid", actionUpper, "release", `Expected RELEASE:<name>:<nonce>.`);
+          return mk("invalid", action, `Expected RELEASE:<name>:<nonce>.`);
         if (!NAME_RE.test(parts[0]))
-          return mk("invalid", actionUpper, "release", `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
+          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
         if (!isWholeNumber(parts[1]))
-          return mk("invalid", actionUpper, "release", `Nonce must be a whole number.`);
-        return mk("valid", actionUpper, "release", "Valid RELEASE payload.");
+          return mk("invalid", action, `Nonce must be a whole number.`);
+        return mk("valid", action, "Valid RELEASE payload.");
       }
-
-      default:
-        return {
-          valid: false,
-          action: actionUpper,
-          canonicalAction: null,
-          message: `Unrecognized action "${actionUpper}". Valid actions: ${ZNS_ACTIONS.join(", ")}.`,
-          level: "unrecognized",
-        };
     }
   }
 

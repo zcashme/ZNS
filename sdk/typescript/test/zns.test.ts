@@ -222,7 +222,7 @@ describe("listings", () => {
     expect(result.listings).toHaveLength(1);
     expect(result.listings[0].name).toBe("bob");
     expect(result.listings[0].payTaddr).toBe("t1testaddr"); // camelCase
-    expect(result.listings[0].pendingBuy).toBeUndefined(); // camelCase
+    expect(result.listings[0].pendingBuy).toBeNull(); // camelCase
     expect(result.total).toBe(1);
   });
 
@@ -238,7 +238,7 @@ describe("listings", () => {
     const result = await zns.listings();
 
     expect(result.listings[0].pendingBuy).toBeDefined();
-    expect(result.listings[0].pendingBuy?.buyer).toBe("u1buyer"); // camelCase
+    expect(result.listings[0].pendingBuy?.buyerUa).toBe("u1buyer"); // camelCase
     expect(result.listings[0].pendingBuy?.claimHeight).toBe(200); // camelCase
     expect(result.listings[0].pendingBuy?.expiresAt).toBe(300); // camelCase
   });

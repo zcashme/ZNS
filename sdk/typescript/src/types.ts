@@ -1,114 +1,29 @@
 /**
- * Internal types that mirror the Rust indexer API exactly (snake_case).
- * These are used for raw data passthrough and debugging.
- * Public SDK consumers should use the camelCase types exported below.
+ * ZNS TypeScript SDK types.
+ *
+ * API responses are converted from snake_case (Rust convention) to camelCase
+ * (TypeScript convention) using the snakeToCamel utility. Types below are the
+ * user-facing shape — Raw* types and manual converters have been removed.
  */
+
 export type Zats = number;
 
-/** Commission sent with a BUY claim memo (0.0001 ZEC = 10,000 zats). */
-export const BUY_COMMISSION: Zats = 10_000;
-/** Listing commission sent with a LIST memo (0.01 ZEC = 1,000,000 zats).
- *  Mirrors the indexer's formula: min_tier × 1000. */
-export const LIST_COMMISSION: Zats = 1_000_000;
-
-/* ── Raw types (API passthrough) ─────────────────────────────────────── */
-
-/** @deprecated Use camelCase types below. Raw type matching Rust API. */
-export interface RawRegistration {
-  name: string;
-  address: string;
-  txid: string;
-  height: number;
-  nonce: number;
-  signature: string | null;
-  last_action: LastAction;
-  pubkey: string | null;
-  listing: RawListing | null;
-}
-
-/** @deprecated Use camelCase types below. Raw type matching Rust API. */
-export interface RawListing {
-  name: string;
-  price: Zats;
-  pay_taddr: string;
-  nonce: number;
-  txid: string;
-  height: number;
-  signature: string;
-  pubkey: string | null;
-  pending_buy: RawPendingBuy | null;
-}
-
-/** @deprecated Use camelCase types below. Raw type matching Rust API. */
-export interface RawPendingBuy {
-  buyer_ua: string;
-  price: Zats;
-  claim_height: number;
-  expires_at: number;
-  txid: string;
-}
-
-/** @deprecated Use camelCase types below. Raw type matching Rust API. */
-export interface RawStatus {
-  synced_height: number;
-  admin_pubkey: string;
-  uivk: string;
-  address: string;
-  registered: number;
-  listed: number;
-  pricing: RawPricing | null;
-}
-
-/** @deprecated Use camelCase types below. Raw type matching Rust API. */
-export interface RawPricing {
-  nonce: number;
-  height: number;
-  tiers: Zats[];
-}
-
-/** @deprecated Use camelCase types below. Raw type matching Rust API. */
-export interface RawEvent {
-  id: number;
-  name: string;
-  action: EventAction;
-  txid: string;
-  height: number;
-  ua: string | null;
-  price: Zats | null;
-  nonce: number | null;
-  signature: string | null;
-  pubkey: string | null;
-}
-
-/** @deprecated Use camelCase types below. Raw type matching Rust API. */
-export interface RawEventsFilter {
-  name?: string;
-  action?: EventAction;
-  since_height?: number;
-  limit?: number;
-  offset?: number;
-}
-
-/** @deprecated Use camelCase types below. Raw type matching Rust API. */
-export interface RawEventsResult {
-  events: RawEvent[];
-  total: number;
-}
+/** Target network for ZNS operations. */
+export type Network = "testnet" | "mainnet";
 
 /* ── Actions ─────────────────────────────────────────────────────────── */
 
-/** Actions that can be the 'last action' on a Registration (ownership-changing actions) */
-export type LastAction = "CLAIM" | "BUY" | "UPDATE" | "DELIST" | "RELEASE";
+/** All user-signable ZNS actions. Single source of truth — ZnsAction is derived from this. */
+export const ZNS_ACTIONS = ["CLAIM", "BUY", "UPDATE", "LIST", "DELIST", "RELEASE"] as const;
 
-/** All actions that can appear in the Event log (includes non-ownership actions like LIST) */
-export type EventAction =
-  | "CLAIM"
-  | "LIST"
-  | "DELIST"
-  | "RELEASE"
-  | "UPDATE"
-  | "BUY"
-  | "SETPRICE";
+/** Union of all user-signable action names. Derived from ZNS_ACTIONS. */
+export type ZnsAction = (typeof ZNS_ACTIONS)[number];
+
+/** Ownership-changing actions — can appear as Registration.lastAction. */
+export type LastAction = Exclude<ZnsAction, "LIST">;
+
+/** All actions that appear in the event log — user actions plus admin SETPRICE. */
+export type EventAction = ZnsAction | "SETPRICE";
 
 /* ── Public types (camelCase, TypeScript conventions) ───────────────── */
 
@@ -274,113 +189,10 @@ export interface PayloadValidationResult {
   readonly valid: boolean;
   /** Parsed action name (uppercase), e.g. "CLAIM", "LIST" */
   readonly action: string;
-  /** Canonical action used internally (lowercase), e.g. "claim", "list" */
-  readonly canonicalAction: string | null;
+  /** Recognized ZNS action, or null if unrecognized. */
+  readonly canonicalAction: ZnsAction | null;
   /** Human-readable validation message */
   readonly message: string;
   /** Validation level: valid | invalid | unrecognized */
   readonly level: PayloadValidationLevel;
 }
-
-/* ── Internal converters (snake_case ↔ camelCase) ──────────────────── */
-
-function toPendingBuy(raw: RawPendingBuy): PendingBuy {
-  return {
-    buyer: raw.buyer_ua,
-    price: raw.price,
-    claimHeight: raw.claim_height,
-    expiresAt: raw.expires_at,
-    txid: raw.txid,
-  };
-}
-
-function toListing(raw: RawListing): Listing {
-  return {
-    name: raw.name,
-    price: raw.price,
-    payTaddr: raw.pay_taddr,
-    nonce: raw.nonce,
-    txid: raw.txid,
-    height: raw.height,
-    signature: raw.signature,
-    pubkey: raw.pubkey,
-    pendingBuy: raw.pending_buy ? toPendingBuy(raw.pending_buy) : undefined,
-  };
-}
-
-export function toRegistration(raw: RawRegistration): Registration {
-  return {
-    name: raw.name,
-    address: raw.address,
-    txid: raw.txid,
-    height: raw.height,
-    nonce: raw.nonce,
-    signature: raw.signature,
-    lastAction: raw.last_action,
-    pubkey: raw.pubkey,
-    listing: raw.listing ? toListing(raw.listing) : null,
-  };
-}
-
-function toPricing(raw: RawPricing): Pricing {
-  return {
-    nonce: raw.nonce,
-    height: raw.height,
-    tiers: raw.tiers,
-  };
-}
-
-export function toStatus(raw: RawStatus): Status {
-  return {
-    syncedHeight: raw.synced_height,
-    adminPubkey: raw.admin_pubkey,
-    uivk: raw.uivk,
-    address: raw.address,
-    registered: raw.registered,
-    listed: raw.listed,
-    pricing: raw.pricing ? toPricing(raw.pricing) : null,
-  };
-}
-
-export function toEvent(raw: RawEvent): Event {
-  return {
-    id: raw.id,
-    name: raw.name,
-    action: raw.action,
-    txid: raw.txid,
-    height: raw.height,
-    ua: raw.ua,
-    price: raw.price,
-    nonce: raw.nonce,
-    signature: raw.signature,
-    pubkey: raw.pubkey,
-  };
-}
-
-export function toEventsFilter(raw: EventsFilter): RawEventsFilter {
-  return {
-    name: raw.name,
-    action: raw.action,
-    since_height: raw.sinceHeight,
-    limit: raw.limit,
-    offset: raw.offset,
-  };
-}
-
-export function toEventsResult(raw: RawEventsResult): EventsResult {
-  return {
-    events: raw.events.map(toEvent),
-    total: raw.total,
-  };
-}
-
-/** @internal Exported for testing and advanced use cases */
-export const _converters = {
-  toPendingBuy,
-  toListing,
-  toRegistration,
-  toPricing,
-  toStatus,
-  toEvent,
-  toEventsFilter,
-};
