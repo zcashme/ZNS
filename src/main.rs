@@ -193,7 +193,7 @@ async fn resolve_pending_buys(reg: &Registry, indexer: &mut decrypter::IndexerSt
         let pubkey = pending.pubkey.as_deref();
         if let Err(e) = reg.finalize_buy(
             &pending.name,
-            &pending.buyer_ua,
+            &pending.buyer,
             &pending.signature,
             &payment.txid,
             payment.height,
@@ -205,7 +205,7 @@ async fn resolve_pending_buys(reg: &Registry, indexer: &mut decrypter::IndexerSt
         }
         info!(
             "Sold: {} → {} for {} zats (payment txid {}, height {})",
-            pending.name, pending.buyer_ua, pending.price, payment.txid, payment.height
+            pending.name, pending.buyer, pending.price, payment.txid, payment.height
         );
     }
 }

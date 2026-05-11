@@ -43,7 +43,7 @@ pub(crate) struct ListingEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PendingBuyEntry {
-    buyer_ua: String,
+    buyer: String,
     price: u64,
     claim_height: u64,
     expires_at: u64,
@@ -283,7 +283,7 @@ fn registration_entry(
 
 fn listing_entry(l: crate::registry::Listing, reg: &Registry) -> ListingEntry {
     let pending_buy = reg.get_pending_buy(&l.name).map(|p| PendingBuyEntry {
-        buyer_ua: p.buyer_ua,
+        buyer: p.buyer,
         price: p.price,
         claim_height: p.claim_height,
         expires_at: p.expires_at,

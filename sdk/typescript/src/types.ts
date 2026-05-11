@@ -189,8 +189,6 @@ export interface PayloadValidationResult {
   readonly valid: boolean;
   /** Parsed action name (uppercase), e.g. "CLAIM", "LIST" */
   readonly action: string;
-  /** Recognized ZNS action, or null if unrecognized. */
-  readonly canonicalAction: ZnsAction | null;
   /** Human-readable validation message */
   readonly message: string;
   /** Validation level: valid | invalid | unrecognized */

@@ -239,7 +239,7 @@ impl Registry {
                 |row| {
                     Ok(PendingBuy {
                         name: row.get(0)?,
-                        buyer_ua: row.get(1)?,
+                        buyer: row.get(1)?,
                         price: row.get::<_, i64>(2)? as u64,
                         pay_taddr: row.get(3)?,
                         claim_height: row.get::<_, i64>(4)? as u64,
@@ -263,7 +263,7 @@ impl Registry {
         let rows = stmt.query_map([current_height as i64], |row| {
             Ok(PendingBuy {
                 name: row.get(0)?,
-                buyer_ua: row.get(1)?,
+                buyer: row.get(1)?,
                 price: row.get::<_, i64>(2)? as u64,
                 pay_taddr: row.get(3)?,
                 claim_height: row.get::<_, i64>(4)? as u64,
@@ -727,7 +727,7 @@ pub struct Listing {
 #[derive(Debug, Clone)]
 pub struct PendingBuy {
     pub name: String,
-    pub buyer_ua: String,
+    pub buyer: String,
     pub price: u64,
     pub pay_taddr: String,
     pub claim_height: u64,

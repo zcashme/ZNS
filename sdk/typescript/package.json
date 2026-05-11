@@ -1,6 +1,6 @@
 {
   "name": "zcashname-sdk",
-  "version": "0.8.4",
+  "version": "0.8.6",
   "type": "module",
   "description": "TypeScript SDK for the Zcash Name System (ZNS).",
   "main": "dist/zns.cjs",
@@ -33,6 +33,7 @@
     "bech32": "^2.0.0"
   },
   "devDependencies": {
+    "@noble/hashes": "^2.2.0",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
     "vitest": "^2.0.0"

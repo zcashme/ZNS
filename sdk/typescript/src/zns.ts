@@ -4,6 +4,7 @@ import { ZNS_ACTIONS } from "./types.js";
 import type {
   Zats,
   ZnsAction,
+  Network,
   Registration,
   Listing,
   Status,
@@ -23,8 +24,6 @@ import type {
   PayloadValidationResult,
 } from "./types.js";
 
-export const DEFAULT_URL = "https://light.zcash.me/zns-testnet";
-
 /** Commission sent with a BUY claim memo (0.0001 ZEC = 10,000 zats). */
 export const BUY_COMMISSION: Zats = 10_000;
 
@@ -36,34 +35,32 @@ export const LIST_COMMISSION: Zats = 1_000_000;
 export const NETWORKS = {
   testnet: {
     url: "https://light.zcash.me/zns-testnet",
-    registryAddress: "utest1f32kn6c4zvn54xr8wfsnxmj9hzpu2mwgtxzpzwcw34906tdccdvzs0z2dx38lly7tpan77x6udt8pjczqm22ymsdhlz9j0tk5yq664nl",
+    registryAddress:
+      "utest1f32kn6c4zvn54xr8wfsnxmj9hzpu2mwgtxzpzwcw34906tdccdvzs0z2dx38lly7tpan77x6udt8pjczqm22ymsdhlz9j0tk5yq664nl",
     uivk: "utest1hzw7wyadutvzfgpna80yftsk5l7jeyu2p5me5quvp28tytxueta00cx4068wnlzcv7tx9n3t3gfhsy83pe4y6jrhxtzaq0hj6xtg5zrk2dn7zen3vns2a5pgs4fxdjlletmqrhfa42",
   },
   mainnet: {
-    url: "https://light.zcash.me/zns",
-    registryAddress: "u1k0evt0ahj5qdt6y9ftsxndl8lrkm4ff6rp00u04cjpmqj6hxl9t8hfsxftmn3ht34e03lljh89czn2h8qn67rwrs8x0hm3lsxsucp9q9",
+    url: "https://light.zcash.me/zns-mainnet",
+    registryAddress:
+      "u1k0evt0ahj5qdt6y9ftsxndl8lrkm4ff6rp00u04cjpmqj6hxl9t8hfsxftmn3ht34e03lljh89czn2h8qn67rwrs8x0hm3lsxsucp9q9",
     uivk: "u1k0evt0ahj5qdt6y9ftsxndl8lrkm4ff6rp00u04cjpmqj6hxl9t8hfsxftmn3ht34e03lljh89czn2h8qn67rwrs8x0hm3lsxsucp9q9",
   },
 } as const;
 
-// Derived exports
-export const TESTNET_URL = NETWORKS.testnet.url;
-export const MAINNET_URL = NETWORKS.mainnet.url;
-export const TESTNET_REGISTRY_ADDRESS = NETWORKS.testnet.registryAddress;
-export const MAINNET_REGISTRY_ADDRESS = NETWORKS.mainnet.registryAddress;
-export const TESTNET_UIVK = NETWORKS.testnet.uivk;
-export const MAINNET_UIVK = NETWORKS.mainnet.uivk;
-
-export { ZNS_ACTIONS };
-
 /** Valid ZNS name pattern: 1-62 lowercase alphanumeric chars. */
 const NAME_RE = /^[a-z0-9]{1,62}$/;
+
+/** Validates a ZNS name format (lowercase alphanumeric, 1-62 chars). */
+function isValidName(name: string): boolean {
+  return NAME_RE.test(name);
+}
 
 /**
  * Normalizes indexer API responses from snake_case (Rust) to camelCase (TypeScript).
  */
 function normalizeApiResponse<T>(obj: unknown): T {
-  if (Array.isArray(obj)) return obj.map((item) => normalizeApiResponse(item)) as T;
+  if (Array.isArray(obj))
+    return obj.map((item) => normalizeApiResponse(item)) as T;
   if (obj && typeof obj === "object") {
     return Object.fromEntries(
       Object.entries(obj).map(([k, v]) => [
@@ -76,21 +73,86 @@ function normalizeApiResponse<T>(obj: unknown): T {
 }
 
 function isWholeNumber(value: string): boolean {
-  return /^\d+$/.test(value) && !value.startsWith("0") || value === "0";
+  return (/^\d+$/.test(value) && !value.startsWith("0")) || value === "0";
 }
 
-type MkLevel = "valid" | "invalid" | "unrecognized";
+/** Validates a Zcash unified (u-) address. */
+function isValidUnifiedAddress(address: string): boolean {
+  if (!address) return false;
+  if (address.startsWith("utest1")) return true;
+  if (address.startsWith("u1")) return true;
+  try {
+    const decoded = bech32m.decode(address);
+    return decoded.prefix === "u" || decoded.prefix === "utest";
+  } catch {
+    return false;
+  }
+}
 
-/** Helper to construct PayloadValidationResult from validatePayload(). */
-function mk(
-  level: MkLevel,
-  action: ZnsAction,
+/** Validates a Zcash transparent (t-) address. */
+function isValidTransparentAddress(address: string): boolean {
+  if (!address) return false;
+  const validPrefixes = ["t1", "t3", "tm", "tn"];
+  if (!validPrefixes.some((p) => address.startsWith(p))) return false;
+  if (address.length < 26 || address.length > 36) return false;
+  const base58Regex =
+    /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/;
+  return base58Regex.test(address);
+}
+
+type PayloadCheck = "name" | "ua" | "price" | "nonce" | "pay_taddr";
+
+const PAYLOAD_RULES = {
+  CLAIM: { format: "CLAIM:<name>:<ua>", checks: ["name", "ua"] },
+  BUY: { format: "BUY:<name>:<ua>", checks: ["name", "ua"] },
+  UPDATE: {
+    format: "UPDATE:<name>:<ua>:<nonce>",
+    checks: ["name", "ua", "nonce"],
+  },
+  LIST: {
+    format: "LIST:<name>:<price>:<pay_taddr>:<nonce>",
+    checks: ["name", "price", "pay_taddr", "nonce"],
+  },
+  DELIST: { format: "DELIST:<name>:<nonce>", checks: ["name", "nonce"] },
+  RELEASE: { format: "RELEASE:<name>:<nonce>", checks: ["name", "nonce"] },
+} as const satisfies Record<
+  ZnsAction,
+  { format: string; checks: readonly PayloadCheck[] }
+>;
+
+function validateField(value: string, type: PayloadCheck): string | null {
+  switch (type) {
+    case "name":
+      return NAME_RE.test(value)
+        ? null
+        : "Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.";
+    case "ua":
+      return isValidUnifiedAddress(value)
+        ? null
+        : `Invalid unified address: "${value}".`;
+    case "price":
+      return isWholeNumber(value) && Number(value) > 0
+        ? null
+        : "Price must be a positive whole number in zats.";
+    case "nonce":
+      return isWholeNumber(value) ? null : "Nonce must be a whole number.";
+    case "pay_taddr":
+      return isValidTransparentAddress(value)
+        ? null
+        : `Invalid transparent address: "${value}".`;
+  }
+}
+
+type ValidationLevel = "valid" | "invalid" | "unrecognized";
+
+/** Builds a PayloadValidationResult from validatePayload(). */
+function buildValidationResult(
+  level: ValidationLevel,
+  action: string,
   message: string,
 ): PayloadValidationResult {
-  return { valid: level === "valid", action, canonicalAction: action, message, level };
+  return { valid: level === "valid", action, message, level };
 }
-
-export type Network = "testnet" | "mainnet";
 
 export class ZNS {
   private url: string;
@@ -141,13 +203,19 @@ export class ZNS {
 
   /** Resolve a ZNS name to its registration. Returns null if not registered. */
   async resolveName(name: string): Promise<Registration | null> {
-    const raw = await this.rpc<Record<string, unknown> | null>("resolve", { query: name });
+    const raw = await this.rpc<Record<string, unknown> | null>("resolve", {
+      query: name,
+    });
     return raw ? normalizeApiResponse<Registration>(raw) : null;
   }
 
   /** Resolve a Zcash Unified Address to all names pointing to it. Returns empty array if none.
    *  Supports pagination with limit (default 50, max 500) and offset (default 0). */
-  async resolveAddress(address: string, limit?: number, offset?: number): Promise<Registration[]> {
+  async resolveAddress(
+    address: string,
+    limit?: number,
+    offset?: number,
+  ): Promise<Registration[]> {
     const raw = await this.rpc<Record<string, unknown>[]>("resolve", {
       query: address,
       limit,
@@ -158,7 +226,10 @@ export class ZNS {
 
   /** List all registered names. Useful for explorers or browsers.
    *  Supports pagination with limit (default 50, max 500) and offset (default 0). */
-  async listAllRegistrations(limit?: number, offset?: number): Promise<Registration[]> {
+  async listAllRegistrations(
+    limit?: number,
+    offset?: number,
+  ): Promise<Registration[]> {
     const raw = await this.rpc<Record<string, unknown>[]>("resolve", {
       query: "",
       limit,
@@ -170,7 +241,7 @@ export class ZNS {
   /** Check if a name is available for registration.
    *  Returns false immediately for invalid names without hitting the server. */
   async isAvailable(name: string): Promise<boolean> {
-    if (!this.isValidName(name)) return false;
+    if (!isValidName(name)) return false;
     const result = await this.resolveName(name);
     return result === null;
   }
@@ -179,29 +250,24 @@ export class ZNS {
    *  Accepts both mainnet ('u') and testnet ('utest') prefixes.
    *  Performs basic format validation but NOT full bech32m checksum verification.
    *  Returns true if the address looks like a unified address, false otherwise.
-   * 
+   *
    *  @todo(F4Jumble) Upgrade to full ZIP-316 decoding with F4Jumble to:
    *    - Parse actual typecodes from address items
    *    - Validate F4Jumble checksum (not just bech32m)
    *    - Optionally enforce: address must contain at least one Orchard receiver (typecode 0x03)
    *    Requires @noble/hashes (blake2b) implementation of F4Jumble inverse. */
-  isValidUnifiedAddress(address: string): boolean {
-    // Unified addresses start with 'u' (mainnet) or 'utest' (testnet)
-    // followed by '1' separator and alphanumeric characters
-    if (!address) return false;
-    if (address.startsWith("utest1")) return true;
-    if (address.startsWith("u1")) return true;
-    // Fall back to strict bech32m validation
-    try {
-      const decoded = bech32m.decode(address);
-      return decoded.prefix === "u" || decoded.prefix === "utest";
-    } catch {
-      return false;
-    }
-  }
+  isValidName = isValidName;
+  isValidUnifiedAddress = isValidUnifiedAddress;
+  isValidTransparentAddress = isValidTransparentAddress;
 
-  async listings(limit?: number, offset?: number): Promise<{ listings: Listing[]; total: number }> {
-    const raw = await this.rpc<{ listings: Record<string, unknown>[]; total: number }>("listings", {
+  async listings(
+    limit?: number,
+    offset?: number,
+  ): Promise<{ listings: Listing[]; total: number }> {
+    const raw = await this.rpc<{
+      listings: Record<string, unknown>[];
+      total: number;
+    }>("listings", {
       limit,
       offset,
     });
@@ -210,7 +276,6 @@ export class ZNS {
       total: raw.total,
     };
   }
-
 
   async events(filter?: EventsFilter): Promise<EventsResult> {
     const raw = await this.rpc<Record<string, unknown>>(
@@ -250,9 +315,29 @@ export class ZNS {
     return this.verifyEd25519(payload, reg.signature, pubkey);
   }
 
-  /** Check if a name is valid format (lowercase alphanumeric, 1-62 chars). */
-  isValidName(name: string): boolean {
-    return NAME_RE.test(name);
+  /**
+   * Verify a sovereign Ed25519 signature before sending a transaction.
+   * Call this after signing but before calling `complete()` to catch invalid signatures early.
+   *
+   * @param payload The signing payload string (e.g. `CLAIM:foo:u1abc`)
+   * @param signature The Ed25519 signature (base64)
+   * @param pubkey The Ed25519 public key (base64)
+   * @returns true if the signature is valid for the given payload and pubkey
+   *
+   * @example
+   * ```ts
+   * const claim = zns.prepareClaim(name, address, cost);
+   * const isValid = await zns.verifySoverignSignature(claim.payload, signature, userPubkey);
+   * if (!isValid) throw new Error("Invalid signature");
+   * const { memo, uri } = claim.complete(signature, userPubkey);
+   * ```
+   */
+  async verifySoverignSignature(
+    payload: string,
+    signature: string,
+    pubkey: string,
+  ): Promise<boolean> {
+    return this.verifyEd25519(payload, signature, pubkey);
   }
 
   /**
@@ -281,7 +366,6 @@ export class ZNS {
       return {
         valid: false,
         action: "",
-        canonicalAction: null,
         message: "Empty payload.",
         level: "invalid",
       };
@@ -292,99 +376,37 @@ export class ZNS {
       return {
         valid: false,
         action: raw.toUpperCase(),
-        canonicalAction: null,
-        message: "Missing colon separator. Expected format: ACTION:field1:field2:...",
+        message:
+          "Missing colon separator. Expected format: ACTION:field1:field2:...",
         level: "invalid",
       };
     }
 
-    const actionUpper = raw.slice(0, colonIdx).toUpperCase();
+    const action = raw.slice(0, colonIdx).toUpperCase();
     const rest = raw.slice(colonIdx + 1);
     const parts = rest.split(":");
 
-    if (!ZNS_ACTIONS.includes(actionUpper as ZnsAction)) {
+    if (!ZNS_ACTIONS.includes(action as ZnsAction)) {
       return {
         valid: false,
-        action: actionUpper,
-        canonicalAction: null,
-        message: `Unrecognized action "${actionUpper}". Valid actions: ${ZNS_ACTIONS.join(", ")}.`,
+        action: action,
+        message: `Unrecognized action "${action}". Valid actions: ${ZNS_ACTIONS.join(", ")}.`,
         level: "unrecognized",
       };
     }
 
-    const action = actionUpper as ZnsAction;
-
-    switch (action) {
-      case "CLAIM": {
-        // CLAIM:<name>:<ua>
-        if (parts.length !== 2)
-          return mk("invalid", action, `Expected CLAIM:<name>:<ua>.`);
-        if (!NAME_RE.test(parts[0]))
-          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
-        if (!this.isValidUnifiedAddress(parts[1]))
-          return mk("invalid", action, `Invalid unified address: "${parts[1]}".`);
-        return mk("valid", action, "Valid CLAIM payload.");
-      }
-
-      case "BUY": {
-        // BUY:<name>:<buyer_ua>
-        if (parts.length !== 2)
-          return mk("invalid", action, `Expected BUY:<name>:<buyer_ua>.`);
-        if (!NAME_RE.test(parts[0]))
-          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
-        if (!this.isValidUnifiedAddress(parts[1]))
-          return mk("invalid", action, `Invalid unified address: "${parts[1]}".`);
-        return mk("valid", action, "Valid BUY payload.");
-      }
-
-      case "UPDATE": {
-        // UPDATE:<name>:<new_ua>:<nonce>
-        if (parts.length !== 3)
-          return mk("invalid", action, `Expected UPDATE:<name>:<ua>:<nonce>.`);
-        if (!NAME_RE.test(parts[0]))
-          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
-        if (!this.isValidUnifiedAddress(parts[1]))
-          return mk("invalid", action, `Invalid unified address: "${parts[1]}".`);
-        if (!isWholeNumber(parts[2]))
-          return mk("invalid", action, `Nonce must be a whole number.`);
-        return mk("valid", action, "Valid UPDATE payload.");
-      }
-
-      case "LIST": {
-        // LIST:<name>:<price>:<pay_taddr>:<nonce>
-        if (parts.length !== 4)
-          return mk("invalid", action, `Expected LIST:<name>:<price_zats>:<pay_taddr>:<nonce>.`);
-        if (!NAME_RE.test(parts[0]))
-          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
-        if (!isWholeNumber(parts[1]) || Number(parts[1]) <= 0)
-          return mk("invalid", action, `Price must be a positive whole number in zats.`);
-        if (!isWholeNumber(parts[3]))
-          return mk("invalid", action, `Nonce must be a whole number.`);
-        return mk("valid", action, "Valid LIST payload.");
-      }
-
-      case "DELIST": {
-        // DELIST:<name>:<nonce>
-        if (parts.length !== 2)
-          return mk("invalid", action, `Expected DELIST:<name>:<nonce>.`);
-        if (!NAME_RE.test(parts[0]))
-          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
-        if (!isWholeNumber(parts[1]))
-          return mk("invalid", action, `Nonce must be a whole number.`);
-        return mk("valid", action, "Valid DELIST payload.");
-      }
-
-      case "RELEASE": {
-        // RELEASE:<name>:<nonce>
-        if (parts.length !== 2)
-          return mk("invalid", action, `Expected RELEASE:<name>:<nonce>.`);
-        if (!NAME_RE.test(parts[0]))
-          return mk("invalid", action, `Invalid name. Use lowercase a-z and 0-9, 1 to 62 chars.`);
-        if (!isWholeNumber(parts[1]))
-          return mk("invalid", action, `Nonce must be a whole number.`);
-        return mk("valid", action, "Valid RELEASE payload.");
-      }
+    const rule = PAYLOAD_RULES[action as ZnsAction];
+    if (parts.length !== rule.checks.length)
+      return buildValidationResult(
+        "invalid",
+        action,
+        `Expected ${rule.format}.`,
+      );
+    for (let i = 0; i < rule.checks.length; i++) {
+      const err = validateField(parts[i], rule.checks[i]);
+      if (err) return buildValidationResult("invalid", action, err);
     }
+    return buildValidationResult("valid", action, `Valid ${action} payload.`);
   }
 
   /**
@@ -435,13 +457,9 @@ export class ZNS {
    * @param cost The claim cost in zatoshis - obtain from {@link claimCost}
    * @returns Prepared claim ready for signature completion
    */
-  prepareClaim(
-    name: string,
-    address: string,
-    cost: Zats,
-  ): PreparedClaim {
+  prepareClaim(name: string, address: string, cost: Zats): PreparedClaim {
     this.requireValidName(name);
-    if (!this.isValidUnifiedAddress(address)) {
+    if (!isValidUnifiedAddress(address)) {
       throw new Error(`Invalid Zcash Unified Address: ${address}`);
     }
 
@@ -478,15 +496,15 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:LIST:${name}:${price}:${payTaddr}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:LIST:${name}:${price}:${payTaddr}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(this.registryAddress, LIST_COMMISSION, memo) };
+        return {
+          memo,
+          uri: this.buildZcashUri(this.registryAddress, LIST_COMMISSION, memo),
+        };
       },
     };
   }
 
-  prepareDelist(
-    name: string,
-    nonce: number,
-  ): PreparedDelist {
+  prepareDelist(name: string, nonce: number): PreparedDelist {
     this.requireValidName(name);
 
     return {
@@ -497,7 +515,10 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:DELIST:${name}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:DELIST:${name}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
+        return {
+          memo,
+          uri: this.buildZcashUri(this.registryAddress, undefined, memo),
+        };
       },
     };
   }
@@ -508,7 +529,7 @@ export class ZNS {
     nonce: number,
   ): PreparedUpdate {
     this.requireValidName(name);
-    if (!this.isValidUnifiedAddress(newAddress)) {
+    if (!isValidUnifiedAddress(newAddress)) {
       throw new Error(`Invalid Zcash Unified Address: ${newAddress}`);
     }
 
@@ -521,16 +542,15 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
+        return {
+          memo,
+          uri: this.buildZcashUri(this.registryAddress, undefined, memo),
+        };
       },
     };
   }
 
-  prepareBuy(
-    name: string,
-    buyerAddress: string,
-    price: Zats,
-  ): PreparedBuy {
+  prepareBuy(name: string, buyerAddress: string, price: Zats): PreparedBuy {
     this.requireValidName(name);
     if (!this.isValidUnifiedAddress(buyerAddress)) {
       throw new Error(`Invalid Zcash Unified Address: ${buyerAddress}`);
@@ -545,15 +565,15 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:BUY:${name}:${buyerAddress}:${price}:${signature}:${userPubkey}`
           : `ZNS:BUY:${name}:${buyerAddress}:${price}:${signature}`;
-        return { memo, uri: this.buildZcashUri(this.registryAddress, BUY_COMMISSION, memo) };
+        return {
+          memo,
+          uri: this.buildZcashUri(this.registryAddress, BUY_COMMISSION, memo),
+        };
       },
     };
   }
 
-  prepareRelease(
-    name: string,
-    nonce: number,
-  ): PreparedRelease {
+  prepareRelease(name: string, nonce: number): PreparedRelease {
     this.requireValidName(name);
 
     return {
@@ -564,22 +584,25 @@ export class ZNS {
         const memo = userPubkey
           ? `ZNS:RELEASE:${name}:${nonce}:${signature}:${userPubkey}`
           : `ZNS:RELEASE:${name}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
+        return {
+          memo,
+          uri: this.buildZcashUri(this.registryAddress, undefined, memo),
+        };
       },
     };
   }
 
-  prepareSetPrice(
-    prices: Zats[],
-    nonce: number,
-  ): PreparedSetPrice {
+  prepareSetPrice(prices: Zats[], nonce: number): PreparedSetPrice {
     return {
       prices,
       nonce,
       payload: `SETPRICE:${prices.length}:${prices.join(":")}:${nonce}`,
       complete: (signature: string): CompletedAction => {
         const memo = `ZNS:SETPRICE:${prices.length}:${prices.join(":")}:${nonce}:${signature}`;
-        return { memo, uri: this.buildZcashUri(this.registryAddress, undefined, memo) };
+        return {
+          memo,
+          uri: this.buildZcashUri(this.registryAddress, undefined, memo),
+        };
       },
     };
   }
@@ -620,7 +643,7 @@ export class ZNS {
   }
 
   private requireValidName(name: string): void {
-    if (!NAME_RE.test(name)) throw new Error(`Invalid ZNS name: ${name}`);
+    if (!isValidName(name)) throw new Error(`Invalid ZNS name: ${name}`);
   }
 
   /** Build a ZIP-321 URI. Amount is in zatoshis and will be converted to ZEC for the URI. */
