@@ -212,7 +212,11 @@ impl Registry {
         pubkey: Option<&str>,
     ) -> rusqlite::Result<bool> {
         self.db.execute(
-            "INSERT OR IGNORE INTO pending_buys
+            // OR REPLACE so a fresh BUY at height H supersedes a stale row from
+            // an earlier expired BUY on the same name. The caller (handle_action)
+            // already gates on existing.expires_at < height before reaching us,
+            // so a replace here can never overwrite an active lock.
+            "INSERT OR REPLACE INTO pending_buys
              (name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature, pubkey)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
