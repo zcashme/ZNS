@@ -194,7 +194,7 @@ describe("ZNS", () => {
     });
   });
 
-  describe("verifySoverignSignature", () => {
+  describe("verifySovereignSignature", () => {
     it("accepts a valid signature", async () => {
       const sk = ed25519.utils.randomPrivateKey();
       const pk = await ed25519.getPublicKeyAsync(sk);
@@ -203,7 +203,7 @@ describe("ZNS", () => {
       const pubkey = Buffer.from(pk).toString("base64");
       const sigBase64 = Buffer.from(signature).toString("base64");
 
-      const result = await zns.verifySoverignSignature(payload, sigBase64, pubkey);
+      const result = await zns.verifySovereignSignature(payload, sigBase64, pubkey);
       expect(result).toBe(true);
     });
 
@@ -217,7 +217,7 @@ describe("ZNS", () => {
       const wrongPubkey = Buffer.from(wrongPk).toString("base64");
       const sigBase64 = Buffer.from(signature).toString("base64");
 
-      const result = await zns.verifySoverignSignature(payload, sigBase64, wrongPubkey);
+      const result = await zns.verifySovereignSignature(payload, sigBase64, wrongPubkey);
       expect(result).toBe(false);
     });
 
@@ -230,7 +230,7 @@ describe("ZNS", () => {
       const pubkey = Buffer.from(pk).toString("base64");
       const sigBase64 = Buffer.from(signature).toString("base64");
 
-      const result = await zns.verifySoverignSignature(tamperedPayload, sigBase64, pubkey);
+      const result = await zns.verifySovereignSignature(tamperedPayload, sigBase64, pubkey);
       expect(result).toBe(false);
     });
 
@@ -240,7 +240,7 @@ describe("ZNS", () => {
       const payload = `CLAIM:alice:${VALID_TESTNET_UA}`;
       const pubkey = Buffer.from(pk).toString("base64");
 
-      const result = await zns.verifySoverignSignature(payload, "notavalidb64", pubkey);
+      const result = await zns.verifySovereignSignature(payload, "notavalidb64", pubkey);
       expect(result).toBe(false);
     });
 
@@ -250,7 +250,7 @@ describe("ZNS", () => {
       const signature = await ed25519.signAsync(new TextEncoder().encode(payload), sk);
       const sigBase64 = Buffer.from(signature).toString("base64");
 
-      const result = await zns.verifySoverignSignature(payload, sigBase64, "notavalidb64");
+      const result = await zns.verifySovereignSignature(payload, sigBase64, "notavalidb64");
       expect(result).toBe(false);
     });
 
@@ -270,9 +270,22 @@ describe("ZNS", () => {
       for (const payload of actions) {
         const signature = await ed25519.signAsync(new TextEncoder().encode(payload), sk);
         const sigBase64 = Buffer.from(signature).toString("base64");
-        const result = await zns.verifySoverignSignature(payload, sigBase64, pubkey);
+        const result = await zns.verifySovereignSignature(payload, sigBase64, pubkey);
         expect(result).toBe(true);
       }
+    });
+
+    it("deprecated verifySoverignSignature alias still works", async () => {
+      const sk = ed25519.utils.randomPrivateKey();
+      const pk = await ed25519.getPublicKeyAsync(sk);
+      const payload = `CLAIM:alice:${VALID_TESTNET_UA}`;
+      const signature = await ed25519.signAsync(new TextEncoder().encode(payload), sk);
+      const pubkey = Buffer.from(pk).toString("base64");
+      const sigBase64 = Buffer.from(signature).toString("base64");
+
+      // eslint-disable-next-line @typescript-eslint/no-deprecated
+      const result = await zns.verifySoverignSignature(payload, sigBase64, pubkey);
+      expect(result).toBe(true);
     });
   });
 

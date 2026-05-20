@@ -1,0 +1,10 @@
+.dart_tool/
+pubspec.lock
+lib/src/client.dart
+lib/src/constants.dart
+lib/src/errors.dart
+lib/src/memo.dart
+lib/src/pricing.dart
+lib/src/types.dart
+lib/src/validation.dart
+lib/src/verify.dart

@@ -1,51 +1,74 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-import 'errors.dart';
+/// Thrown when an RPC call fails — either a non-2xx HTTP status, or a
+/// JSON-RPC envelope `error`.
+class ZnsRpcException implements Exception {
+  /// JSON-RPC error code when [isHttp] is false; the raw HTTP status code
+  /// (e.g. 404, 500) when [isHttp] is true.
+  final int code;
+  final String message;
+  final bool isHttp;
 
-/// Send a JSON-RPC 2.0 request and return the result.
-Future<dynamic> rpc(
-  http.Client httpClient,
-  String url,
-  String method, {
-  Map<String, dynamic>? params,
-  int id = 1,
-}) async {
-  final payload = jsonEncode({
-    'jsonrpc': '2.0',
-    'id': id,
-    'method': method,
-    'params': params ?? <String, dynamic>{},
-  });
+  ZnsRpcException(this.code, this.message, {this.isHttp = false});
 
-  final http.Response response;
-  try {
-    response = await httpClient.post(
-      Uri.parse(url),
-      headers: {'Content-Type': 'application/json'},
-      body: payload,
+  @override
+  String toString() => isHttp
+      ? 'ZnsRpcException: ZNS HTTP $code: $message'
+      : 'ZnsRpcException: ZNS RPC error $code: $message';
+}
+
+/// Internal JSON-RPC 2.0 client. Not exported in the public surface.
+class RpcClient {
+  final Uri url;
+  final http.Client httpClient;
+  int _id = 0;
+
+  /// Whether [httpClient] is owned (and therefore closed by [close]).
+  final bool _ownsClient;
+
+  RpcClient(this.url, {http.Client? httpClient})
+      : httpClient = httpClient ?? http.Client(),
+        _ownsClient = httpClient == null;
+
+  Future<T> call<T>(String method, [Map<String, dynamic>? params]) async {
+    final id = ++_id;
+    final body = jsonEncode({
+      'jsonrpc': '2.0',
+      'id': id,
+      'method': method,
+      'params': params ?? <String, dynamic>{},
+    });
+
+    final response = await httpClient.post(
+      url,
+      headers: const {'Content-Type': 'application/json'},
+      body: body,
     );
-  } on Exception catch (e) {
-    throw ZnsError(ZnsErrorType.httpError, e.toString());
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ZnsRpcException(
+        response.statusCode,
+        response.reasonPhrase ?? 'HTTP error',
+        isHttp: true,
+      );
+    }
+
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    final error = decoded['error'];
+    if (error != null) {
+      final m = error as Map<String, dynamic>;
+      throw ZnsRpcException(
+        (m['code'] as int?) ?? -32603,
+        (m['message'] as String?) ?? 'Unknown error',
+      );
+    }
+    return decoded['result'] as T;
   }
 
-  if (response.statusCode != 200) {
-    throw ZnsError(
-      ZnsErrorType.httpError,
-      'HTTP ${response.statusCode}: ${response.reasonPhrase}',
-    );
+  void close() {
+    if (_ownsClient) httpClient.close();
   }
-
-  final body = jsonDecode(response.body) as Map<String, dynamic>;
-
-  final error = body['error'];
-  if (error != null) {
-    final code = error['code'] as int? ?? ZnsErrorType.internalError.code;
-    final errorType = ZnsErrorType.fromCode(code);
-    final message = error['message'] as String? ?? 'Unknown error';
-    throw ZnsError(errorType, message);
-  }
-
-  return body['result'];
 }

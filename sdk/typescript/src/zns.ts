@@ -327,12 +327,12 @@ export class ZNS {
    * @example
    * ```ts
    * const claim = zns.prepareClaim(name, address, cost);
-   * const isValid = await zns.verifySoverignSignature(claim.payload, signature, userPubkey);
+   * const isValid = await zns.verifySovereignSignature(claim.payload, signature, userPubkey);
    * if (!isValid) throw new Error("Invalid signature");
    * const { memo, uri } = claim.complete(signature, userPubkey);
    * ```
    */
-  async verifySoverignSignature(
+  async verifySovereignSignature(
     payload: string,
     signature: string,
     pubkey: string,

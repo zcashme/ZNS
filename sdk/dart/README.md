@@ -1,12 +1,10 @@
 # zcashname_sdk
 
-Dart SDK for the Zcash Name System (ZNS) JSON-RPC API.
+Dart SDK for the Zcash Name System (ZNS).
 
-ZNS maps human-readable names to Zcash shielded addresses. Names are registered on-chain via Orchard memos and indexed into a queryable API. This SDK talks to that API.
+ZNS maps human-readable names to Zcash shielded addresses. Names are registered on-chain via Orchard memos and indexed into a queryable API. This SDK mirrors the TypeScript SDK's surface — single `ZNS` class, no codegen, no consumer-side boilerplate.
 
-## Installation
-
-Add to your `pubspec.yaml`:
+## Install
 
 ```yaml
 dependencies:
@@ -19,125 +17,137 @@ dependencies:
 ```dart
 import 'package:zcashname_sdk/zcashname_sdk.dart';
 
-void main() async {
-  final client = await ZnsClient.create();
+Future<void> main() async {
+  final zns = ZNS(network: Network.testnet);
+  await zns.verify(); // checks the indexer UIVK
 
-  // Resolve a name
-  final result = await client.resolveName('alice');
-  print(result?.address);
+  final reg = await zns.resolveName('alice');
+  print(reg?.address);
 
-  // Check availability
-  final available = await client.isAvailable('myname');
+  final available = await zns.isAvailable('myname');
   print('Available: $available');
 
-  client.dispose();
+  zns.close();
 }
 ```
 
 ## Resolve a name
 
-The primary use case. A wallet has a name, needs an address.
-
 ```dart
-final result = await client.resolveName('alice');
-// ResolveResult(name: 'alice', address: 'utest1...', ...)
+final reg = await zns.resolveName('alice');
+// Registration(name: 'alice', address: 'utest1...', ...)
 ```
 
 Returns `null` if the name is not registered.
 
 ## Reverse resolve
 
-A wallet or explorer has an address, wants to show the name.
-
 ```dart
-final results = await client.resolveAddress('utest1...');
-// [ResolveResult(name: 'alice', ...)]
+final results = await zns.resolveAddress('utest1...');
 ```
 
 ## Check availability
 
 ```dart
-if (await client.isAvailable('myname')) {
-  // name is not registered
+if (await zns.isAvailable('myname')) {
+  // free to claim
 }
 ```
 
 ## Name history
 
 ```dart
-final history = await client.events(EventsFilter(name: 'alice'));
-for (final event in history.events) {
-  print('${event.action} at height ${event.height}');
+final history = await zns.events(EventsFilter(name: 'alice'));
+for (final e in history.events) {
+  // e.action is a ZnsAction enum; switch on it for type-safe handling.
+  print('${e.action} at height ${e.height}');
 }
 ```
 
-## Register a name
-
-Registration is a two-step process: build the memo, then send a Zcash transaction with that memo and the correct payment amount.
+Filter by action with the enum:
 
 ```dart
-final name = 'alice';
-final ua = 'utest1abc...';
-
-// 1. Build the memo
-final memo = buildClaimMemo(name, ua, signature);
-
-// 2. Get the cost
-final s = await client.status();
-final cost = claimCost(s.pricing!.tiers, name.length);
-
-// 3. Build a payment URI
-final uri = buildZcashUri(ua, amount: '0.75', memo: memo);
+final claims = await zns.events(EventsFilter(action: ZnsAction.claim));
 ```
 
-## Marketplace actions
+## Claim a name
 
-### List a name for sale
+Prepared actions return a `payload` to sign, plus a `complete(signature, [userPubkey])` method that builds the memo and ZIP-321 URI.
 
 ```dart
-final nonce = (await client.getNonce('alice'))! + 1;
-final payload = listPayload('alice', 50000000, nonce);
-final sig = sign(payload); // your Ed25519 signing logic
-final memo = buildListMemo('alice', 50000000, nonce, sig);
+final s = await zns.status();
+final cost = zns.claimCost('alice'.length, s.pricing!);
+final claim = zns.prepareClaim('alice', 'utest1abc...', cost!);
+
+// 1. sign claim.payload with your Ed25519 key
+final sig = base64.encode(await mySigner.sign(utf8.encode(claim.payload)));
+
+// 2. produce a transaction-ready URI + memo
+final action = claim.complete(sig, userPubkeyBase64);
+print(action.uri);  // zcash:utest1...?amount=...&memo=...
 ```
 
-### Buy a listed name
+## Marketplace
 
 ```dart
-final memo = buildBuyMemo('alice', 'utest1buyer...', signature);
+// List
+final list = zns.prepareList('alice', 50000000, 'tm...', nonce);
+
+// Buy
+final buy = zns.prepareBuy('alice', buyerUa, price);
+
+// Delist / Release / Update
+final delist  = zns.prepareDelist('alice', nonce);
+final release = zns.prepareRelease('alice', nonce);
+final update  = zns.prepareUpdate('alice', newUa, nonce);
 ```
 
-### Delist / Update
+Each returned `Prepared*` carries the action fields and a `complete()` that produces the memo + `zcash:` URI for the wallet.
+
+`PreparedAction` is a sealed type — you can exhaustively switch on subtypes:
 
 ```dart
-final nonce = (await client.getNonce('alice'))! + 1;
-final memo = buildDelistMemo('alice', nonce, signature);
-final memo = buildUpdateMemo('alice', 'utest1new...', nonce, signature);
+final action = zns.prepareClaim('alice', ua, cost!);
+final memoBody = switch (action) {
+  PreparedClaim(:final name)   => 'claiming $name',
+  PreparedList(:final price)   => 'listing for $price',
+  PreparedDelist(:final name)  => 'delisting $name',
+  PreparedUpdate(:final name)  => 'updating $name',
+  PreparedBuy(:final price)    => 'buying for $price',
+  PreparedRelease(:final name) => 'releasing $name',
+  PreparedSetPrice()           => 'setting prices',
+};
 ```
 
-## Name validation
+Invalid arguments throw typed exceptions: `InvalidNameException`, `InvalidAddressException`.
 
-Names must be 1-62 characters. Lowercase letters, digits, and hyphens only. No leading/trailing hyphens, no double hyphens.
+## Validation
+
+Both `ZNS` and top-level functions are exported:
 
 ```dart
-isValidName('alice');     // true
-isValidName('my-name');   // true
-isValidName('Alice');     // false (uppercase)
-isValidName('my--name');  // false (double hyphen)
-isValidName('-name');     // false (leading hyphen)
+isValidName('alice');                             // true
+isValidUnifiedAddress('utest1...');                // true
+isValidTransparentAddress('tm...');                // true
+validatePayload('CLAIM:alice:utest1...');          // PayloadValidationResult
 ```
+
+`validatePayload` mirrors the indexer's `parse_memo` — same source of truth as the TS SDK.
+
+## Signature verification
+
+```dart
+final ok = await zns.verifySovereignSignature(payload, signatureB64, pubkeyB64);
+final regOk     = await zns.verifyRegistration(reg, s.adminPubkey);
+final listingOk = await zns.verifyListing(listing, s.adminPubkey);
+```
+
+Returns `false` on any decode error or length mismatch; never throws.
 
 ## Custom endpoint
 
 ```dart
-final client = await ZnsClient.create(url: 'http://localhost:3000');
+final zns = ZNS(url: Uri.parse('http://localhost:3000'));
 ```
 
-Skip UIVK verification if you trust the endpoint:
-
-```dart
-final client = await ZnsClient.create(
-  url: 'http://localhost:3000',
-  skipVerify: true,
-);
-```
+Skip `verify()` if you trust the endpoint.
