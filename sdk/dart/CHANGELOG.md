@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2
+
+- Fix: `resolveName` now normalizes the input to lowercase before querying the
+  indexer, so `resolveName('Alice')` and `resolveName('alice')` are equivalent.
+- Fix: all RPC calls now enforce a configurable timeout (default 10 s) via
+  `RpcClient`, preventing indefinite hangs when the indexer is slow or
+  unreachable. The `ZNS` factory accepts an optional `timeout` parameter to
+  override the default.
+
 ## 0.5.1
 
 - Fix: expose correct UIVK strings for testnet and mainnet networks.

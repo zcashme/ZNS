@@ -1,6 +1,6 @@
 name: zcashname_sdk
 description: Dart SDK for the Zcash Name System (ZNS) JSON-RPC API.
-version: 0.5.1
+version: 0.5.2
 repository: https://github.com/zcashme/ZNS
 license: MIT
 

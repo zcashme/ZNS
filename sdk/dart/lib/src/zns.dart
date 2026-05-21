@@ -28,16 +28,20 @@ class ZNS {
 
   /// Create a new ZNS client. Defaults to [Network.testnet]. If [url] is
   /// supplied, it overrides the network's default URL.
+  ///
+  /// [timeout] controls how long each RPC call waits before throwing a
+  /// [TimeoutException]. Defaults to 10 seconds.
   factory ZNS({
     Network network = Network.testnet,
     Uri? url,
     http.Client? httpClient,
+    Duration? timeout,
   }) {
     final resolvedUrl = url ?? networks[network]!.url;
     return ZNS._(
       network,
       resolvedUrl,
-      RpcClient(resolvedUrl, httpClient: httpClient),
+      RpcClient(resolvedUrl, httpClient: httpClient, timeout: timeout),
     );
   }
 
@@ -74,9 +78,12 @@ class ZNS {
   }
 
   /// Resolve a name. Returns `null` if not registered.
+  ///
+  /// [name] is normalized to lowercase before querying the indexer, so
+  /// `resolveName('Alice')` and `resolveName('alice')` are equivalent.
   Future<Registration?> resolveName(String name) async {
     final raw = await _rpc
-        .call<Map<String, dynamic>?>('resolve', {'query': name});
+        .call<Map<String, dynamic>?>('resolve', {'query': name.toLowerCase()});
     return raw == null ? null : Registration.fromJson(raw);
   }
 

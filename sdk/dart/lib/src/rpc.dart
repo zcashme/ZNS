@@ -24,14 +24,16 @@ class ZnsRpcException implements Exception {
 class RpcClient {
   final Uri url;
   final http.Client httpClient;
+  final Duration timeout;
   int _id = 0;
 
   /// Whether [httpClient] is owned (and therefore closed by [close]).
   final bool _ownsClient;
 
-  RpcClient(this.url, {http.Client? httpClient})
+  RpcClient(this.url, {http.Client? httpClient, Duration? timeout})
       : httpClient = httpClient ?? http.Client(),
-        _ownsClient = httpClient == null;
+        _ownsClient = httpClient == null,
+        timeout = timeout ?? const Duration(seconds: 10);
 
   Future<T> call<T>(String method, [Map<String, dynamic>? params]) async {
     final id = ++_id;
@@ -46,7 +48,7 @@ class RpcClient {
       url,
       headers: const {'Content-Type': 'application/json'},
       body: body,
-    );
+    ).timeout(timeout);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ZnsRpcException(
