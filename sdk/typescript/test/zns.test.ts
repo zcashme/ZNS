@@ -334,12 +334,13 @@ describe("ZNS", () => {
 
   describe("prepareList", () => {
     it("builds valid list payload", () => {
-      const list = zns.prepareList("alice", 100000000, VALID_TESTNET_TADDR, 1);
+      const list = zns.prepareList("alice", 100000000, VALID_TESTNET_TADDR, 1, 10);
       expect(list.payload).toBe(`LIST:alice:100000000:${VALID_TESTNET_TADDR}:1`);
+      expect(list.commission).toBe(10);
     });
 
     it("throws on invalid name", () => {
-      expect(() => zns.prepareList("ALICE", 100000000, VALID_TESTNET_TADDR, 1)).toThrow("Invalid ZNS name");
+      expect(() => zns.prepareList("ALICE", 100000000, VALID_TESTNET_TADDR, 1, 10)).toThrow("Invalid ZNS name");
     });
   });
 

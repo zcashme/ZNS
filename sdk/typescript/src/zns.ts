@@ -24,12 +24,10 @@ import type {
   PayloadValidationResult,
 } from "./types.js";
 
-/** Commission sent with a BUY claim memo (0.0001 ZEC = 10,000 zats). */
-export const BUY_COMMISSION: Zats = 10_000;
-
-/** Listing commission sent with a LIST memo (0.01 ZEC = 1,000,000 zats).
- *  Mirrors the indexer's formula: min_tier × 1000. */
-export const LIST_COMMISSION: Zats = 1_000_000;
+// Commission is no longer a fixed constant — the indexer derives the LIST
+// commission from current pricing (10% of the minimum tier) and BUY no longer
+// has a registry-side floor. Callers must pass the commission explicitly to
+// prepareList / prepareBuy; use {@link ZNS.listCommission} for the LIST value.
 
 /** Network-specific configuration for ZNS. */
 export const NETWORKS = {
@@ -483,6 +481,7 @@ export class ZNS {
     price: Zats,
     payTaddr: string,
     nonce: number,
+    commission: Zats,
   ): PreparedList {
     this.requireValidName(name);
 
@@ -491,6 +490,7 @@ export class ZNS {
       price,
       payTaddr,
       nonce,
+      commission,
       payload: `LIST:${name}:${price}:${payTaddr}:${nonce}`,
       complete: (signature: string, userPubkey?: string): CompletedAction => {
         const memo = userPubkey
@@ -498,7 +498,7 @@ export class ZNS {
           : `ZNS:LIST:${name}:${price}:${payTaddr}:${nonce}:${signature}`;
         return {
           memo,
-          uri: this.buildZcashUri(this.registryAddress, LIST_COMMISSION, memo),
+          uri: this.buildZcashUri(this.registryAddress, commission, memo),
         };
       },
     };
@@ -550,7 +550,12 @@ export class ZNS {
     };
   }
 
-  prepareBuy(name: string, buyerAddress: string, price: Zats): PreparedBuy {
+  prepareBuy(
+    name: string,
+    buyerAddress: string,
+    price: Zats,
+    commission: Zats = 0,
+  ): PreparedBuy {
     this.requireValidName(name);
     if (!this.isValidUnifiedAddress(buyerAddress)) {
       throw new Error(`Invalid Zcash Unified Address: ${buyerAddress}`);
@@ -560,6 +565,7 @@ export class ZNS {
       name,
       buyerAddress,
       price,
+      commission,
       payload: `BUY:${name}:${buyerAddress}`,
       complete: (signature: string, userPubkey?: string): CompletedAction => {
         const memo = userPubkey
@@ -567,7 +573,11 @@ export class ZNS {
           : `ZNS:BUY:${name}:${buyerAddress}:${price}:${signature}`;
         return {
           memo,
-          uri: this.buildZcashUri(this.registryAddress, BUY_COMMISSION, memo),
+          uri: this.buildZcashUri(
+            this.registryAddress,
+            commission > 0 ? commission : undefined,
+            memo,
+          ),
         };
       },
     };

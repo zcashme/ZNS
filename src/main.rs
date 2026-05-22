@@ -350,14 +350,6 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
             }
         }
         ActionKind::Buy { buyer_ua, price } => {
-            const BUY_COMMISSION: u64 = 10_000; // 0.0001 ZEC dust to indexer
-            if note_value < BUY_COMMISSION {
-                warn!(
-                    "BUY: commission underpayment for {}: {note_value} < {BUY_COMMISSION}",
-                    action.name
-                );
-                return;
-            }
             let Some(listing) = reg.get_listing(&action.name) else {
                 warn!("BUY for unlisted name {}", action.name);
                 return;
@@ -377,6 +369,28 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                     );
                     return;
                 }
+            }
+            // Free listings (price == 0) settle on the BUY memo itself — there's
+            // no seller payment to wait for, and resolve_pending_buys would match
+            // any incidental t-addr activity, so skip the pending_buy entirely.
+            if *price == 0 {
+                if let Err(e) = reg.finalize_buy(
+                    &action.name,
+                    buyer_ua,
+                    &action.signature,
+                    txid,
+                    height,
+                    *price,
+                    pubkey,
+                ) {
+                    error!("DB error (finalize free buy {}): {e}", action.name);
+                } else {
+                    info!(
+                        "Sold (free): {} → {buyer_ua} (height {height})",
+                        action.name
+                    );
+                }
+                return;
             }
             let expires_at = height + config::BUY_WINDOW_BLOCKS;
             match reg.create_pending_buy(

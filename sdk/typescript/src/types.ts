@@ -143,6 +143,7 @@ export interface PreparedList extends PreparedAction {
   readonly price: Zats;
   readonly payTaddr: string;
   readonly nonce: number;
+  readonly commission: Zats;
 }
 
 /** Prepared DELIST action */
@@ -163,6 +164,7 @@ export interface PreparedBuy extends PreparedAction {
   readonly name: string;
   readonly buyerAddress: string;
   readonly price: Zats;
+  readonly commission: Zats;
 }
 
 /** Prepared RELEASE action */

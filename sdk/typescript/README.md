@@ -62,10 +62,10 @@ console.log("Memo:", memo);
 | Action | Description |
 |--------|-------------|
 | `prepareClaim(name, address, registryAddress, cost)` | Register a new name |
-| `prepareList(name, price, nonce, registryAddress)` | List name for sale |
-| `prepareDelist(name, nonce, registryAddress)` | Remove listing |
-| `prepareUpdate(name, newAddress, nonce, registryAddress)` | Change address |
-| `prepareBuy(name, buyerAddress, registryAddress)` | Buy a listed name |
+| `prepareList(name, price, payTaddr, nonce, commission)` | List name for sale. `commission` = `listCommission(pricing)` |
+| `prepareDelist(name, nonce)` | Remove listing |
+| `prepareUpdate(name, newAddress, nonce)` | Change address |
+| `prepareBuy(name, buyerAddress, price, commission?)` | Buy a listed name. `commission` defaults to 0 |
 | `prepareRelease(name, nonce, registryAddress)` | Release name (burn) |
 | `prepareSetPrice(prices, nonce, registryAddress)` | Admin: set pricing tiers |
 
