@@ -15,6 +15,7 @@
 mod config;
 mod decrypter;
 mod memo;
+mod merkle;
 mod registry;
 mod rpc;
 
@@ -97,8 +98,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         resolve_pending_buys(&reg, &mut indexer).await;
 
+        update_state_root(&reg, indexer.height());
+
         height_tx.send(indexer.height()).ok();
         info!("Synced to {}.", indexer.height());
+    }
+}
+
+// ── State-root commitment ────────────────────────────────────────────────────
+
+fn update_state_root(reg: &Registry, height: u64) {
+    let regs = reg.all_registrations_sorted();
+    let leaves: Vec<merkle::Hash> = regs.iter().map(merkle::hash_leaf).collect();
+    let root = merkle::merkle_root(&leaves);
+    if let Err(e) = reg.store_state_root(height, &root, leaves.len() as u64) {
+        error!("DB error (state_root height {height}): {e}");
     }
 }
 

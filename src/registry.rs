@@ -67,6 +67,11 @@ impl Registry {
                 height    INTEGER NOT NULL,
                 txid      TEXT NOT NULL,
                 signature TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS state_roots (
+                height     INTEGER PRIMARY KEY,
+                root       BLOB    NOT NULL,
+                leaf_count INTEGER NOT NULL
             );",
         )?;
         Ok(Registry { db })
@@ -614,6 +619,71 @@ impl Registry {
             .min()
     }
 
+    // ── State-root commitment ───────────────────────────────────────────────
+
+    /// All registrations ordered by name — the canonical leaf order for the
+    /// Merkle tree. Reads the same columns as `resolve_by_name` so leaf hashing
+    /// can use the existing `Registration` struct.
+    pub fn all_registrations_sorted(&self) -> Vec<Registration> {
+        let Ok(mut stmt) = self.db.prepare(
+            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey
+             FROM registrations ORDER BY name",
+        ) else {
+            return vec![];
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            Ok(Registration {
+                name: row.get(0)?,
+                address: row.get(1)?,
+                txid: row.get(2)?,
+                height: row.get::<_, i64>(3)? as u64,
+                nonce: row.get::<_, i64>(4)? as u64,
+                signature: row.get(5)?,
+                last_action: row.get(6)?,
+                pubkey: row.get(7)?,
+            })
+        }) else {
+            return vec![];
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
+    pub fn store_state_root(
+        &self,
+        height: u64,
+        root: &[u8; 32],
+        leaf_count: u64,
+    ) -> rusqlite::Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO state_roots (height, root, leaf_count)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![height as i64, root.as_slice(), leaf_count as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_latest_state_root(&self) -> Option<StateRoot> {
+        self.db
+            .query_row(
+                "SELECT height, root, leaf_count FROM state_roots
+                 ORDER BY height DESC LIMIT 1",
+                [],
+                |row| {
+                    let root_bytes: Vec<u8> = row.get(1)?;
+                    let mut root = [0u8; 32];
+                    if root_bytes.len() == 32 {
+                        root.copy_from_slice(&root_bytes);
+                    }
+                    Ok(StateRoot {
+                        height: row.get::<_, i64>(0)? as u64,
+                        root,
+                        leaf_count: row.get::<_, i64>(2)? as u64,
+                    })
+                },
+            )
+            .ok()
+    }
+
     pub fn query_events(
         &self,
         name: Option<&str>,
@@ -766,4 +836,11 @@ pub struct Event {
 pub struct EventPage {
     pub events: Vec<Event>,
     pub total: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StateRoot {
+    pub height: u64,
+    pub root: [u8; 32],
+    pub leaf_count: u64,
 }

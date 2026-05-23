@@ -11,6 +11,7 @@ use serde_json::{self, Value};
 use tracing::{error, info};
 use zcash_address::ZcashAddress;
 
+use crate::merkle;
 use crate::registry::Registry;
 
 // ── Response types ──────────────────────────────────────────────────────────
@@ -26,6 +27,17 @@ pub(crate) struct RegistrationEntry {
     last_action: String,
     pubkey: Option<String>,
     listing: Option<ListingEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof: Option<MerkleProof>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MerkleProof {
+    index: u64,
+    path: Vec<String>,
+    root: String,
+    height: u64,
+    leaf_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +116,7 @@ pub trait ZnsApi {
         query: String,
         limit: Option<u64>,
         offset: Option<u64>,
+        with_proof: Option<bool>,
     ) -> RpcResult<Value>;
 
     #[method(name = "listings", blocking)]
@@ -144,41 +157,47 @@ impl ZnsApiServer for RpcContext {
         query: String,
         limit: Option<u64>,
         offset: Option<u64>,
+        with_proof: Option<bool>,
     ) -> RpcResult<Value> {
         let reg = open_registry(&self.db_path)?;
         let limit = limit.unwrap_or(50).min(500);
         let offset = offset.unwrap_or(0);
 
-        // Empty query = list all registrations
+        // Empty query = list all registrations (with_proof ignored — too bulky)
         if query.is_empty() {
             let registrations = reg.list_registrations(limit, offset);
             let entries: Vec<RegistrationEntry> = registrations
                 .into_iter()
                 .map(|r| {
                     let listing = reg.get_listing(&r.name).map(|l| listing_entry(l, &reg));
-                    registration_entry(r, listing)
+                    registration_entry(r, listing, None)
                 })
                 .collect();
             return Ok(serde_json::to_value(entries).unwrap());
         }
 
-        // Address query = list names for address
+        // Address query = list names for address (with_proof ignored)
         if query.parse::<ZcashAddress>().is_ok() {
             let registrations = reg.list_registrations_by_address(&query, limit, offset);
             let entries: Vec<RegistrationEntry> = registrations
                 .into_iter()
                 .map(|r| {
                     let listing = reg.get_listing(&r.name).map(|l| listing_entry(l, &reg));
-                    registration_entry(r, listing)
+                    registration_entry(r, listing, None)
                 })
                 .collect();
             return Ok(serde_json::to_value(entries).unwrap());
         }
 
-        // Exact name query = single registration
+        // Exact name query = single registration, optionally with Merkle proof
+        let proof = if with_proof.unwrap_or(false) {
+            build_proof_for(&reg, &query)
+        } else {
+            None
+        };
         let entry = reg.resolve_by_name(&query).map(|r| {
             let listing = reg.get_listing(&r.name).map(|l| listing_entry(l, &reg));
-            registration_entry(r, listing)
+            registration_entry(r, listing, proof)
         });
         Ok(serde_json::to_value(entry).unwrap())
     }
@@ -267,6 +286,7 @@ fn open_registry(db_path: &str) -> RpcResult<Registry> {
 fn registration_entry(
     r: crate::registry::Registration,
     listing: Option<ListingEntry>,
+    proof: Option<MerkleProof>,
 ) -> RegistrationEntry {
     RegistrationEntry {
         name: r.name,
@@ -278,7 +298,31 @@ fn registration_entry(
         last_action: r.last_action,
         pubkey: r.pubkey,
         listing,
+        proof,
     }
+}
+
+/// Rebuild leaves in canonical order, find the queried name, return its proof
+/// against the latest stored root. Returns None if the name isn't present or
+/// the freshly-computed root doesn't match the stored one (DB raced ahead of
+/// the indexer between sorted-scan and root persistence — caller retries).
+fn build_proof_for(reg: &Registry, name: &str) -> Option<MerkleProof> {
+    let stored = reg.get_latest_state_root()?;
+    let regs = reg.all_registrations_sorted();
+    let index = regs.iter().position(|r| r.name == name)?;
+    let leaves: Vec<merkle::Hash> = regs.iter().map(merkle::hash_leaf).collect();
+    let recomputed = merkle::merkle_root(&leaves);
+    if recomputed != stored.root {
+        return None;
+    }
+    let path = merkle::merkle_path(&leaves, index);
+    Some(MerkleProof {
+        index: index as u64,
+        path: path.iter().map(hex::encode).collect(),
+        root: hex::encode(stored.root),
+        height: stored.height,
+        leaf_count: stored.leaf_count,
+    })
 }
 
 fn listing_entry(l: crate::registry::Listing, reg: &Registry) -> ListingEntry {
