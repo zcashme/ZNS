@@ -18,8 +18,7 @@ impl Registry {
                 height      INTEGER NOT NULL,
                 nonce       INTEGER NOT NULL DEFAULT 0,
                 signature   TEXT,
-                last_action TEXT NOT NULL,
-                pubkey      TEXT
+                last_action TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_registrations_ua ON registrations(ua);
             CREATE TABLE IF NOT EXISTS listings (
@@ -29,8 +28,7 @@ impl Registry {
                 nonce     INTEGER NOT NULL,
                 txid      TEXT NOT NULL,
                 height    INTEGER NOT NULL,
-                signature TEXT NOT NULL,
-                pubkey    TEXT
+                signature TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS events (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,8 +39,7 @@ impl Registry {
                 ua        TEXT,
                 price     INTEGER,
                 nonce     INTEGER,
-                signature TEXT,
-                pubkey    TEXT
+                signature TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_events_name   ON events(name);
             CREATE INDEX IF NOT EXISTS idx_events_action ON events(action);
@@ -55,8 +52,7 @@ impl Registry {
                 claim_height INTEGER NOT NULL,
                 expires_at  INTEGER NOT NULL,
                 txid        TEXT NOT NULL,
-                signature   TEXT NOT NULL,
-                pubkey      TEXT
+                signature   TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_pending_buys_pay_taddr ON pending_buys(pay_taddr);
             CREATE INDEX IF NOT EXISTS idx_pending_buys_expires ON pending_buys(expires_at);
@@ -119,21 +115,20 @@ impl Registry {
         signature: &str,
         txid: &str,
         height: u64,
-        pubkey: Option<&str>,
     ) -> rusqlite::Result<bool> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute(
-            "INSERT OR IGNORE INTO registrations (name, ua, signature, txid, height, last_action, pubkey) VALUES (?1, ?2, ?3, ?4, ?5, 'CLAIM', ?6)",
-            rusqlite::params![name, ua, signature, txid, height as i64, pubkey],
+            "INSERT OR IGNORE INTO registrations (name, ua, signature, txid, height, last_action) VALUES (?1, ?2, ?3, ?4, ?5, 'CLAIM')",
+            rusqlite::params![name, ua, signature, txid, height as i64],
         )?;
         if tx.changes() == 0 {
             tx.commit()?;
             return Ok(false);
         }
         tx.execute(
-            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, price, nonce, signature, pubkey)
-             VALUES (?1, 'CLAIM', ?2, ?3, ?4, NULL, NULL, ?5, ?6)",
-            rusqlite::params![name, txid, height as i64, ua, signature, pubkey],
+            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, price, nonce, signature)
+             VALUES (?1, 'CLAIM', ?2, ?3, ?4, NULL, NULL, ?5)",
+            rusqlite::params![name, txid, height as i64, ua, signature],
         )?;
         tx.commit()?;
         Ok(true)
@@ -148,17 +143,16 @@ impl Registry {
         signature: &str,
         txid: &str,
         height: u64,
-        pubkey: Option<&str>,
     ) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute(
-            "INSERT OR REPLACE INTO listings (name, price, pay_taddr, nonce, signature, txid, height, pubkey) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![name, price as i64, pay_taddr, nonce as i64, signature, txid, height as i64, pubkey],
+            "INSERT OR REPLACE INTO listings (name, price, pay_taddr, nonce, signature, txid, height) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![name, price as i64, pay_taddr, nonce as i64, signature, txid, height as i64],
         )?;
         tx.execute(
-            "INSERT OR IGNORE INTO events (name, action, txid, height, price, nonce, signature, pubkey)
-             VALUES (?1, 'LIST', ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![name, txid, height as i64, price as i64, nonce as i64, signature, pubkey],
+            "INSERT OR IGNORE INTO events (name, action, txid, height, price, nonce, signature)
+             VALUES (?1, 'LIST', ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![name, txid, height as i64, price as i64, nonce as i64, signature],
         )?;
         tx.commit()?;
         Ok(())
@@ -185,19 +179,18 @@ impl Registry {
         payment_txid: &str,
         payment_height: u64,
         price: u64,
-        pubkey: Option<&str>,
     ) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute(
-            "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, nonce = 0, signature = ?4, last_action = 'BUY', pubkey = ?5 WHERE name = ?6",
-            rusqlite::params![new_ua, payment_txid, payment_height as i64, signature, pubkey, name],
+            "UPDATE registrations SET ua = ?1, txid = ?2, height = ?3, nonce = 0, signature = ?4, last_action = 'BUY' WHERE name = ?5",
+            rusqlite::params![new_ua, payment_txid, payment_height as i64, signature, name],
         )?;
         tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
         tx.execute("DELETE FROM pending_buys WHERE name = ?1", [name])?;
         tx.execute(
-            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, price, nonce, signature, pubkey)
-             VALUES (?1, 'BUY', ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
-            rusqlite::params![name, payment_txid, payment_height as i64, new_ua, price as i64, signature, pubkey],
+            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, price, nonce, signature)
+             VALUES (?1, 'BUY', ?2, ?3, ?4, ?5, NULL, ?6)",
+            rusqlite::params![name, payment_txid, payment_height as i64, new_ua, price as i64, signature],
         )?;
         tx.commit()
     }
@@ -214,7 +207,6 @@ impl Registry {
         expires_at: u64,
         txid: &str,
         signature: &str,
-        pubkey: Option<&str>,
     ) -> rusqlite::Result<bool> {
         self.db.execute(
             // OR REPLACE so a fresh BUY at height H supersedes a stale row from
@@ -222,8 +214,8 @@ impl Registry {
             // already gates on existing.expires_at < height before reaching us,
             // so a replace here can never overwrite an active lock.
             "INSERT OR REPLACE INTO pending_buys
-             (name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature, pubkey)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 name,
                 buyer_ua,
@@ -233,7 +225,6 @@ impl Registry {
                 expires_at as i64,
                 txid,
                 signature,
-                pubkey,
             ],
         )?;
         Ok(self.db.changes() > 0)
@@ -242,7 +233,7 @@ impl Registry {
     pub fn get_pending_buy(&self, name: &str) -> Option<PendingBuy> {
         self.db
             .query_row(
-                "SELECT name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature, pubkey
+                "SELECT name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature
                  FROM pending_buys WHERE name = ?1",
                 [name],
                 |row| {
@@ -255,7 +246,6 @@ impl Registry {
                         expires_at: row.get::<_, i64>(5)? as u64,
                         txid: row.get(6)?,
                         signature: row.get(7)?,
-                        pubkey: row.get(8)?,
                     })
                 },
             )
@@ -264,7 +254,7 @@ impl Registry {
 
     pub fn list_active_pending_buys(&self, current_height: u64) -> Vec<PendingBuy> {
         let Ok(mut stmt) = self.db.prepare(
-            "SELECT name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature, pubkey
+            "SELECT name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature
              FROM pending_buys WHERE expires_at >= ?1",
         ) else {
             return vec![];
@@ -279,7 +269,6 @@ impl Registry {
                 expires_at: row.get::<_, i64>(5)? as u64,
                 txid: row.get(6)?,
                 signature: row.get(7)?,
-                pubkey: row.get(8)?,
             })
         });
         match rows {
@@ -308,7 +297,7 @@ impl Registry {
         names
     }
 
-    pub fn delete_listing(&self, name: &str, signature: &str, txid: &str, height: u64, nonce: u64, pubkey: Option<&str>) -> rusqlite::Result<()> {
+    pub fn delete_listing(&self, name: &str, signature: &str, txid: &str, height: u64, nonce: u64) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute(
             "UPDATE registrations SET signature = ?1, last_action = 'DELIST' WHERE name = ?2",
@@ -316,22 +305,22 @@ impl Registry {
         )?;
         tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
         tx.execute(
-            "INSERT OR IGNORE INTO events (name, action, txid, height, nonce, signature, pubkey)
-             VALUES (?1, 'DELIST', ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![name, txid, height as i64, nonce as i64, signature, pubkey],
+            "INSERT OR IGNORE INTO events (name, action, txid, height, nonce, signature)
+             VALUES (?1, 'DELIST', ?2, ?3, ?4, ?5)",
+            rusqlite::params![name, txid, height as i64, nonce as i64, signature],
         )?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn delete_registration(&self, name: &str, txid: &str, height: u64, nonce: u64, signature: &str, pubkey: Option<&str>) -> rusqlite::Result<()> {
+    pub fn delete_registration(&self, name: &str, txid: &str, height: u64, nonce: u64, signature: &str) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute("DELETE FROM listings WHERE name = ?1", [name])?;
         tx.execute("DELETE FROM registrations WHERE name = ?1", [name])?;
         tx.execute(
-            "INSERT OR IGNORE INTO events (name, action, txid, height, nonce, signature, pubkey)
-             VALUES (?1, 'RELEASE', ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![name, txid, height as i64, nonce as i64, signature, pubkey],
+            "INSERT OR IGNORE INTO events (name, action, txid, height, nonce, signature)
+             VALUES (?1, 'RELEASE', ?2, ?3, ?4, ?5)",
+            rusqlite::params![name, txid, height as i64, nonce as i64, signature],
         )?;
         tx.commit()?;
         Ok(())
@@ -344,7 +333,6 @@ impl Registry {
         signature: &str,
         txid: &str,
         height: u64,
-        pubkey: Option<&str>,
     ) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute(
@@ -352,32 +340,12 @@ impl Registry {
             rusqlite::params![new_ua, txid, height as i64, signature, name],
         )?;
         tx.execute(
-            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, nonce, signature, pubkey)
-             VALUES (?1, 'UPDATE', ?2, ?3, ?4, NULL, ?5, ?6)",
-            rusqlite::params![name, txid, height as i64, new_ua, signature, pubkey],
+            "INSERT OR IGNORE INTO events (name, action, txid, height, ua, nonce, signature)
+             VALUES (?1, 'UPDATE', ?2, ?3, ?4, NULL, ?5)",
+            rusqlite::params![name, txid, height as i64, new_ua, signature],
         )?;
         tx.commit()?;
         Ok(())
-    }
-
-    /// Returns `(sig, ua, action)` from the most recent CLAIM or BUY event for
-    /// a name, used to prove sovereign ownership via stored signature.
-    pub fn get_claim_sig_for_ownership(&self, name: &str) -> Option<(String, String, String)> {
-        self.db
-            .query_row(
-                "SELECT signature, ua, action FROM events \
-                 WHERE name = ?1 AND action IN ('CLAIM', 'BUY') \
-                 ORDER BY height DESC, id DESC LIMIT 1",
-                [name],
-                |row| {
-                    let sig: Option<String> = row.get(0)?;
-                    let ua: Option<String> = row.get(1)?;
-                    let action: String = row.get(2)?;
-                    Ok((sig, ua, action))
-                },
-            )
-            .ok()
-            .and_then(|(sig, ua, action)| Some((sig?, ua?, action)))
     }
 
     pub fn get_owner_ua(&self, name: &str) -> Option<String> {
@@ -443,7 +411,7 @@ impl Registry {
     pub fn resolve_by_name(&self, name: &str) -> Option<Registration> {
         self.db
             .query_row(
-                "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey FROM registrations WHERE name = ?1",
+                "SELECT name, ua, txid, height, nonce, signature, last_action FROM registrations WHERE name = ?1",
                 [name],
                 |row| {
                     Ok(Registration {
@@ -454,7 +422,6 @@ impl Registry {
                         nonce: row.get::<_, i64>(4)? as u64,
                         signature: row.get(5)?,
                         last_action: row.get(6)?,
-                        pubkey: row.get(7)?,
                     })
                 },
             )
@@ -464,7 +431,7 @@ impl Registry {
     pub fn get_listing(&self, name: &str) -> Option<Listing> {
         self.db
             .query_row(
-                "SELECT name, price, pay_taddr, nonce, txid, height, signature, pubkey FROM listings WHERE name = ?1",
+                "SELECT name, price, pay_taddr, nonce, txid, height, signature FROM listings WHERE name = ?1",
                 [name],
                 |row| {
                     Ok(Listing {
@@ -475,7 +442,6 @@ impl Registry {
                         txid: row.get(4)?,
                         height: row.get::<_, i64>(5)? as u64,
                         signature: row.get(6)?,
-                        pubkey: row.get(7)?,
                     })
                 },
             )
@@ -500,7 +466,7 @@ impl Registry {
 
     pub fn list_registrations(&self, limit: u64, offset: u64) -> Vec<Registration> {
         let Ok(mut stmt) = self.db.prepare(
-            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey
+            "SELECT name, ua, txid, height, nonce, signature, last_action
              FROM registrations
              ORDER BY height DESC LIMIT ?1 OFFSET ?2",
         ) else {
@@ -515,7 +481,6 @@ impl Registry {
                 nonce: row.get::<_, i64>(4)? as u64,
                 signature: row.get(5)?,
                 last_action: row.get(6)?,
-                pubkey: row.get(7)?,
             })
         }) else {
             return vec![];
@@ -530,7 +495,7 @@ impl Registry {
         offset: u64,
     ) -> Vec<Registration> {
         let Ok(mut stmt) = self.db.prepare(
-            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey
+            "SELECT name, ua, txid, height, nonce, signature, last_action
              FROM registrations
              WHERE ua = ?1
              ORDER BY height DESC LIMIT ?2 OFFSET ?3",
@@ -548,7 +513,6 @@ impl Registry {
                     nonce: row.get::<_, i64>(4)? as u64,
                     signature: row.get(5)?,
                     last_action: row.get(6)?,
-                    pubkey: row.get(7)?,
                 })
             },
         ) else {
@@ -559,7 +523,7 @@ impl Registry {
 
     pub fn list_listings(&self, limit: u64, offset: u64) -> Vec<Listing> {
         let Ok(mut stmt) = self.db.prepare(
-            "SELECT name, price, pay_taddr, nonce, txid, height, signature, pubkey
+            "SELECT name, price, pay_taddr, nonce, txid, height, signature
              FROM listings
              ORDER BY height DESC LIMIT ?1 OFFSET ?2",
         ) else {
@@ -574,7 +538,6 @@ impl Registry {
                 txid: row.get(4)?,
                 height: row.get::<_, i64>(5)? as u64,
                 signature: row.get(6)?,
-                pubkey: row.get(7)?,
             })
         }) else {
             return vec![];
@@ -626,7 +589,7 @@ impl Registry {
     /// can use the existing `Registration` struct.
     pub fn all_registrations_sorted(&self) -> Vec<Registration> {
         let Ok(mut stmt) = self.db.prepare(
-            "SELECT name, ua, txid, height, nonce, signature, last_action, pubkey
+            "SELECT name, ua, txid, height, nonce, signature, last_action
              FROM registrations ORDER BY name",
         ) else {
             return vec![];
@@ -640,7 +603,6 @@ impl Registry {
                 nonce: row.get::<_, i64>(4)? as u64,
                 signature: row.get(5)?,
                 last_action: row.get(6)?,
-                pubkey: row.get(7)?,
             })
         }) else {
             return vec![];
@@ -732,7 +694,7 @@ impl Registry {
             .unwrap_or(0);
 
         let query_sql = format!(
-            "SELECT id, name, action, txid, height, ua, price, nonce, signature, pubkey \
+            "SELECT id, name, action, txid, height, ua, price, nonce, signature \
              FROM events WHERE {where_clause} ORDER BY height DESC, id DESC LIMIT ?{} OFFSET ?{}",
             bind.len() + 1,
             bind.len() + 2,
@@ -761,7 +723,6 @@ impl Registry {
                 price: row.get::<_, Option<i64>>(6)?.map(|p| p as u64),
                 nonce: row.get::<_, Option<i64>>(7)?.map(|n| n as u64),
                 signature: row.get(8)?,
-                pubkey: row.get(9)?,
             })
         }) {
             Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
@@ -783,7 +744,6 @@ pub struct Registration {
     pub nonce: u64,
     pub signature: Option<String>,
     pub last_action: String,
-    pub pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -795,7 +755,6 @@ pub struct Listing {
     pub txid: String,
     pub height: u64,
     pub signature: String,
-    pub pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -808,7 +767,6 @@ pub struct PendingBuy {
     pub expires_at: u64,
     pub txid: String,
     pub signature: String,
-    pub pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -829,7 +787,6 @@ pub struct Event {
     pub price: Option<u64>,
     pub nonce: Option<u64>,
     pub signature: Option<String>,
-    pub pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone)]

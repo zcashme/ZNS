@@ -8,7 +8,6 @@ use zcash_address::ZcashAddress;
 pub struct MemoAction {
     pub name: String,
     pub signature: String,
-    pub user_pubkey: Option<[u8; 32]>,
     pub kind: ActionKind,
 }
 
@@ -24,20 +23,6 @@ pub enum ActionKind {
 }
 
 impl ActionKind {}
-
-/// Constructs the ownership payload for a CLAIM or BUY establishing action.
-///
-/// Ownership proofs verify that the stored signature from the original CLAIM or BUY
-/// still validates against a given key, proving sovereign control. The payload format
-/// is `CLAIM:{name}:{ua}` or `BUY:{name}:{ua}` — same as the signing payload for
-/// those actions (they have no nonce).
-pub fn ownership_payload(action: &str, name: &str, ua: &str) -> Option<String> {
-    match action {
-        "CLAIM" => Some(format!("CLAIM:{name}:{ua}")),
-        "BUY" => Some(format!("BUY:{name}:{ua}")),
-        _ => None,
-    }
-}
 
 // ── Validation ───────────────────────────────────────────────────────────────
 
@@ -57,8 +42,8 @@ pub fn validate_name(name: &str) -> bool {
 
 /// Returns the signing payload for a given action, per the ZNS namespace spec.
 ///
-/// This is the canonical construction used for both signature verification
-/// and ownership proofs. The format is defined in NAMESPACE_SPEC.md §4:
+/// This is the canonical construction used for signature verification.
+/// The format is defined in NAMESPACE_SPEC.md §4:
 ///
 /// | Action    | Signing payload format                    |
 /// |-----------|-----------------------------------------|
@@ -110,19 +95,6 @@ pub fn verify_action(action: &MemoAction, pubkey: &[u8; 32]) -> bool {
 
 // ── Parsing ──────────────────────────────────────────────────────────────────
 
-fn parse_user_pubkey(s: &str) -> Option<[u8; 32]> {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(s).ok()?;
-    bytes.try_into().ok()
-}
-
-/// Extract signature (second-to-last mandatory field) and optional user_pubkey
-/// (trailing field if present) from a split parts array.
-fn extract_sig_and_pubkey(parts: &[&str], sig_idx: usize) -> Option<(String, Option<[u8; 32]>)> {
-    let sig = parts[sig_idx];
-    let pk = parts.get(sig_idx + 1).and_then(|s| parse_user_pubkey(s));
-    Some((sig.into(), pk))
-}
-
 pub fn parse_memo(memo: &[u8; 512]) -> Option<MemoAction> {
     let s = std::str::from_utf8(memo).ok()?;
     let s = s.trim_end_matches('\0').strip_prefix("ZNS:")?;
@@ -160,105 +132,92 @@ fn parse_setprice(rest: &str) -> Option<MemoAction> {
     Some(MemoAction {
         name: String::new(),
         signature: sig.into(),
-        user_pubkey: None,
         kind: ActionKind::SetPrice { prices, nonce },
     })
 }
 
 fn parse_claim(rest: &str) -> Option<MemoAction> {
-    // ZNS:CLAIM:<name>:<ua>:<sig>[:<user_pubkey>]
-    let parts: Vec<&str> = rest.splitn(4, ':').collect();
-    if parts.len() < 3 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
+    // ZNS:CLAIM:<name>:<ua>:<sig>
+    let parts: Vec<&str> = rest.splitn(3, ':').collect();
+    if parts.len() != 3 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
         return None;
     }
-    let (sig, pk) = extract_sig_and_pubkey(&parts, 2)?;
     Some(MemoAction {
         name: parts[0].into(),
-        signature: sig,
-        user_pubkey: pk,
+        signature: parts[2].into(),
         kind: ActionKind::Claim { ua: parts[1].into() },
     })
 }
 
 fn parse_list(rest: &str) -> Option<MemoAction> {
-    // ZNS:LIST:<name>:<price>:<pay_taddr>:<nonce>:<sig>[:<user_pubkey>]
-    let parts: Vec<&str> = rest.splitn(6, ':').collect();
-    if parts.len() < 5 || !validate_name(parts[0]) {
+    // ZNS:LIST:<name>:<price>:<pay_taddr>:<nonce>:<sig>
+    let parts: Vec<&str> = rest.splitn(5, ':').collect();
+    if parts.len() != 5 || !validate_name(parts[0]) {
         return None;
     }
     let price: u64 = parts[1].parse().ok()?;
     let pay_taddr = parts[2].to_string();
     let nonce: u64 = parts[3].parse().ok()?;
-    let (sig, pk) = extract_sig_and_pubkey(&parts, 4)?;
     Some(MemoAction {
         name: parts[0].into(),
-        signature: sig,
-        user_pubkey: pk,
+        signature: parts[4].into(),
         kind: ActionKind::List { price, pay_taddr, nonce },
     })
 }
 
 fn parse_delist(rest: &str) -> Option<MemoAction> {
-    // ZNS:DELIST:<name>:<nonce>:<sig>[:<user_pubkey>]
-    let parts: Vec<&str> = rest.splitn(4, ':').collect();
-    if parts.len() < 3 || !validate_name(parts[0]) {
+    // ZNS:DELIST:<name>:<nonce>:<sig>
+    let parts: Vec<&str> = rest.splitn(3, ':').collect();
+    if parts.len() != 3 || !validate_name(parts[0]) {
         return None;
     }
     let nonce: u64 = parts[1].parse().ok()?;
-    let (sig, pk) = extract_sig_and_pubkey(&parts, 2)?;
     Some(MemoAction {
         name: parts[0].into(),
-        signature: sig,
-        user_pubkey: pk,
+        signature: parts[2].into(),
         kind: ActionKind::Delist { nonce },
     })
 }
 
 fn parse_release(rest: &str) -> Option<MemoAction> {
-    // ZNS:RELEASE:<name>:<nonce>:<sig>[:<user_pubkey>]
-    let parts: Vec<&str> = rest.splitn(4, ':').collect();
-    if parts.len() < 3 || !validate_name(parts[0]) {
+    // ZNS:RELEASE:<name>:<nonce>:<sig>
+    let parts: Vec<&str> = rest.splitn(3, ':').collect();
+    if parts.len() != 3 || !validate_name(parts[0]) {
         return None;
     }
     let nonce: u64 = parts[1].parse().ok()?;
-    let (sig, pk) = extract_sig_and_pubkey(&parts, 2)?;
     Some(MemoAction {
         name: parts[0].into(),
-        signature: sig,
-        user_pubkey: pk,
+        signature: parts[2].into(),
         kind: ActionKind::Release { nonce },
     })
 }
 
 fn parse_update(rest: &str) -> Option<MemoAction> {
-    // ZNS:UPDATE:<name>:<new_ua>:<nonce>:<sig>[:<user_pubkey>]
-    let parts: Vec<&str> = rest.splitn(5, ':').collect();
-    if parts.len() < 4 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
+    // ZNS:UPDATE:<name>:<new_ua>:<nonce>:<sig>
+    let parts: Vec<&str> = rest.splitn(4, ':').collect();
+    if parts.len() != 4 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
         return None;
     }
     let nonce: u64 = parts[2].parse().ok()?;
-    let (sig, pk) = extract_sig_and_pubkey(&parts, 3)?;
     Some(MemoAction {
         name: parts[0].into(),
-        signature: sig,
-        user_pubkey: pk,
+        signature: parts[3].into(),
         kind: ActionKind::Update { new_ua: parts[1].into(), nonce },
     })
 }
 
 fn parse_buy(rest: &str) -> Option<MemoAction> {
-    // ZNS:BUY:<name>:<buyer_ua>:<price>:<sig>[:<user_pubkey>]
-    let parts: Vec<&str> = rest.splitn(5, ':').collect();
-    if parts.len() < 4 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
+    // ZNS:BUY:<name>:<buyer_ua>:<price>:<sig>
+    let parts: Vec<&str> = rest.splitn(4, ':').collect();
+    if parts.len() != 4 || !validate_name(parts[0]) || !validate_ua(parts[1]) {
         return None;
     }
     let buyer_ua = parts[1].to_string();
     let price: u64 = parts[2].parse().ok()?;
-    let (sig, pk) = extract_sig_and_pubkey(&parts, 3)?;
     Some(MemoAction {
         name: parts[0].into(),
-        signature: sig,
-        user_pubkey: pk,
+        signature: parts[3].into(),
         kind: ActionKind::Buy { buyer_ua, price },
     })
 }

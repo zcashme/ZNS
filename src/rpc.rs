@@ -25,7 +25,6 @@ pub(crate) struct RegistrationEntry {
     nonce: u64,
     signature: Option<String>,
     last_action: String,
-    pubkey: Option<String>,
     listing: Option<ListingEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     proof: Option<MerkleProof>,
@@ -49,7 +48,6 @@ pub(crate) struct ListingEntry {
     txid: String,
     height: u64,
     signature: String,
-    pubkey: Option<String>,
     pending_buy: Option<PendingBuyEntry>,
 }
 
@@ -97,7 +95,6 @@ pub(crate) struct EventEntry {
     price: Option<u64>,
     nonce: Option<u64>,
     signature: Option<String>,
-    pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,7 +262,6 @@ impl ZnsApiServer for RpcContext {
                 price: e.price,
                 nonce: e.nonce,
                 signature: e.signature,
-                pubkey: e.pubkey,
             })
             .collect();
 
@@ -296,7 +292,6 @@ fn registration_entry(
         nonce: r.nonce,
         signature: r.signature,
         last_action: r.last_action,
-        pubkey: r.pubkey,
         listing,
         proof,
     }
@@ -341,7 +336,6 @@ fn listing_entry(l: crate::registry::Listing, reg: &Registry) -> ListingEntry {
         txid: l.txid,
         height: l.height,
         signature: l.signature,
-        pubkey: l.pubkey,
         pending_buy,
     }
 }

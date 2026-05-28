@@ -23,7 +23,7 @@ const INTERNAL_TAG: &[u8] = b"ZNSv1:NODE\x00";
 ///
 /// Fields are separated by `\x00` so no field boundary can collide with a
 /// legitimate value (names and UAs are alphanumeric, nonces are decimal,
-/// actions are uppercase ASCII; pubkey is base64).
+/// actions are uppercase ASCII).
 pub fn hash_leaf(reg: &Registration) -> Hash {
     let mut h = Blake2b256::new();
     h.update(LEAF_TAG);
@@ -34,7 +34,6 @@ pub fn hash_leaf(reg: &Registration) -> Hash {
     h.update(reg.nonce.to_be_bytes());
     h.update(reg.last_action.as_bytes());
     h.update(b"\x00");
-    h.update(reg.pubkey.as_deref().unwrap_or("").as_bytes());
     h.finalize().into()
 }
 
@@ -102,7 +101,6 @@ mod tests {
             nonce: 0,
             signature: None,
             last_action: "CLAIM".into(),
-            pubkey: None,
         }
     }
 

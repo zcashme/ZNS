@@ -5,11 +5,11 @@
 // registrations and marketplace listings.
 //
 // Supported actions:
-//   CLAIM     — claim a name (admin-signed; user may append pubkey for sovereignty)
+//   CLAIM     — claim a name (admin-signed)
 //   LIST      — put a name up for sale at a price
 //   DELIST    — remove a listing
 //   UPDATE    — change the address behind a name
-//   BUY       — purchase a listed name (admin-signed; buyer may append pubkey)
+//   BUY       — purchase a listed name (admin-signed)
 //   RELEASE   — release a name back to the pool
 
 mod config;
@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(action) = memo::parse_memo(&note.memo) else {
                 continue;
             };
-            if !verify_and_authorize(&reg, &action, &cfg.admin_pubkey) {
+            if !verify_and_authorize(&action, &cfg.admin_pubkey) {
                 continue;
             }
             handle_action(
@@ -116,67 +116,14 @@ fn update_state_root(reg: &Registry, height: u64) {
     }
 }
 
-// ── Signature verification and sovereignty enforcement ───────────────────────
+// ── Signature verification ───────────────────────────────────────────────────
 
-fn verify_and_authorize(reg: &Registry, action: &MemoAction, admin_pubkey: &[u8; 32]) -> bool {
-    if let Some(user_pk) = action.user_pubkey {
-        // Sovereign path: user signed this action, verify against their pubkey.
-        if !memo::verify_action(action, &user_pk) {
-            warn!("Invalid user sig for '{}'", action.name);
-            return false;
-        }
-        // For non-establishing actions, prove ownership: stored CLAIM/BUY sig
-        // must verify against this user key (it was signed by them, not admin).
-        if !matches!(action.kind, memo::ActionKind::Claim { .. } | memo::ActionKind::Buy { .. }) {
-            let Some((stored_sig, stored_ua, stored_action)) =
-                reg.get_claim_sig_for_ownership(&action.name)
-            else {
-                warn!("No claim record for sovereign action on '{}'", action.name);
-                return false;
-            };
-            let Some(payload) = memo::ownership_payload(&stored_action, &action.name, &stored_ua) else {
-                warn!("Invalid stored action '{}' for ownership proof on '{}'", stored_action, action.name);
-                return false;
-            };
-            if !memo::verify_signature(&payload, &stored_sig, &user_pk) {
-                warn!("Ownership proof failed for '{}'", action.name);
-                return false;
-            }
-        }
-        true
-    } else {
-        // Admin path: first check sovereignty, then verify sig.
-        let is_establishing = matches!(
-            action.kind,
-            memo::ActionKind::SetPrice { .. }
-                | memo::ActionKind::Claim { .. }
-                | memo::ActionKind::Buy { .. }
-        );
-        if !is_establishing {
-            if let Some((stored_sig, stored_ua, stored_action)) =
-                reg.get_claim_sig_for_ownership(&action.name)
-            {
-                let Some(payload) =
-                    memo::ownership_payload(&stored_action, &action.name, &stored_ua)
-                else {
-                    warn!(
-                        "Invalid stored action '{}' for ownership proof on '{}'",
-                        stored_action, action.name
-                    );
-                    return false;
-                };
-                if !memo::verify_signature(&payload, &stored_sig, admin_pubkey) {
-                    warn!("Admin rejected: '{}' is sovereign", action.name);
-                    return false;
-                }
-            }
-        }
-        if !memo::verify_action(action, admin_pubkey) {
-            warn!("Invalid admin sig for '{}'", action.name);
-            return false;
-        }
-        true
+fn verify_and_authorize(action: &MemoAction, admin_pubkey: &[u8; 32]) -> bool {
+    if !memo::verify_action(action, admin_pubkey) {
+        warn!("Invalid admin sig for '{}'", action.name);
+        return false;
     }
+    true
 }
 
 // ── Pending buy resolution ───────────────────────────────────────────────────
@@ -204,7 +151,6 @@ async fn resolve_pending_buys(reg: &Registry, indexer: &mut decrypter::IndexerSt
             continue;
         };
 
-        let pubkey = pending.pubkey.as_deref();
         if let Err(e) = reg.finalize_buy(
             &pending.name,
             &pending.buyer,
@@ -212,7 +158,6 @@ async fn resolve_pending_buys(reg: &Registry, indexer: &mut decrypter::IndexerSt
             &payment.txid,
             payment.height,
             pending.price,
-            pubkey,
         ) {
             error!("DB error (finalize buy {}): {e}", pending.name);
             continue;
@@ -227,11 +172,6 @@ async fn resolve_pending_buys(reg: &Registry, indexer: &mut decrypter::IndexerSt
 // ── Action dispatch ──────────────────────────────────────────────────────────
 
 fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str, height: u64) {
-    let pubkey_b64 = action
-        .user_pubkey
-        .as_ref()
-        .map(|k| base64::engine::general_purpose::STANDARD.encode(k));
-    let pubkey = pubkey_b64.as_deref();
     match &action.kind {
         ActionKind::SetPrice { prices, nonce } => {
             if let Some(current) = reg.get_pricing_nonce() {
@@ -270,7 +210,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 );
                 return;
             }
-            match reg.create_registration(&action.name, ua, &action.signature, txid, height, pubkey) {
+            match reg.create_registration(&action.name, ua, &action.signature, txid, height) {
                 Ok(true) => {
                     info!(
                         "Claimed: {} → {ua} for {note_value} zats (height {height})",
@@ -299,11 +239,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 warn!("LIST: {e}");
                 return;
             }
-            let listing_pubkey_b64 = action
-                .user_pubkey
-                .as_ref()
-                .map(|k| base64::engine::general_purpose::STANDARD.encode(k));
-            match reg.create_listing(&action.name, *price, pay_taddr, *nonce, &action.signature, txid, height, listing_pubkey_b64.as_deref()) {
+            match reg.create_listing(&action.name, *price, pay_taddr, *nonce, &action.signature, txid, height) {
                 Ok(()) => {
                     info!("Listed: {} for {price} zats → {pay_taddr} (height {height})", action.name)
                 }
@@ -328,7 +264,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 warn!("DELIST: {e}");
                 return;
             }
-            match reg.delete_listing(&action.name, &action.signature, txid, height, *nonce, pubkey) {
+            match reg.delete_listing(&action.name, &action.signature, txid, height, *nonce) {
                 Ok(()) => {
                     info!("Delisted: {} (height {height})", action.name)
                 }
@@ -344,7 +280,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 warn!("RELEASE: {e}");
                 return;
             }
-            match reg.delete_registration(&action.name, txid, height, *nonce, &action.signature, pubkey) {
+            match reg.delete_registration(&action.name, txid, height, *nonce, &action.signature) {
                 Ok(()) => {
                     info!("Released: {} (height {height})", action.name)
                 }
@@ -356,7 +292,7 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 warn!("UPDATE: {e}");
                 return;
             }
-            match reg.update_address(&action.name, new_ua, &action.signature, txid, height, pubkey) {
+            match reg.update_address(&action.name, new_ua, &action.signature, txid, height) {
                 Ok(()) => {
                     info!("Updated: {} → {new_ua} (height {height})", action.name)
                 }
@@ -395,7 +331,6 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                     txid,
                     height,
                     *price,
-                    pubkey,
                 ) {
                     error!("DB error (finalize free buy {}): {e}", action.name);
                 } else {
@@ -416,7 +351,6 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                 expires_at,
                 txid,
                 &action.signature,
-                pubkey,
             ) {
                 Ok(true) => {
                     info!(
