@@ -8,6 +8,16 @@
 //! - 1 to 62 characters inclusive
 //! - lowercase ASCII letters and digits only (no hyphens, no underscores, no unicode)
 
+pub fn normalize_query(raw: &str) -> String {
+    let mut s = raw.trim().to_ascii_lowercase();
+    if let Some(stripped) = s.strip_suffix(".zcash") {
+        s = stripped.to_string();
+    } else if let Some(stripped) = s.strip_suffix(".zec") {
+        s = stripped.to_string();
+    }
+    s
+}
+
 /// Returns `true` if `name` is a valid ZNS name.
 pub fn is_valid(name: &str) -> bool {
     !name.is_empty()
@@ -20,6 +30,12 @@ pub fn is_valid(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_strips_display_suffixes() {
+        assert_eq!(normalize_query("alice.zcash"), "alice");
+        assert_eq!(normalize_query("ALICE.ZEC"), "alice");
+    }
 
     #[test]
     fn accepts_common_names() {

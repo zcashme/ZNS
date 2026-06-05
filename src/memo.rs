@@ -38,6 +38,31 @@ pub fn validate_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
+pub fn normalize_name_query(raw: &str) -> String {
+    let mut s = raw.trim().to_ascii_lowercase();
+    if let Some(stripped) = s.strip_suffix(".zcash") {
+        s = stripped.to_string();
+    } else if let Some(stripped) = s.strip_suffix(".zec") {
+        s = stripped.to_string();
+    }
+    s
+}
+
+fn validate_taddr(taddr: &str) -> bool {
+    if taddr.is_empty() || taddr.len() < 26 || taddr.len() > 36 {
+        return false;
+    }
+    let valid_prefix = taddr.starts_with("t1")
+        || taddr.starts_with("t3")
+        || taddr.starts_with("tm")
+        || taddr.starts_with("tn");
+    if !valid_prefix {
+        return false;
+    }
+    const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    taddr.chars().all(|c| BASE58.contains(c))
+}
+
 // ── Signing payload construction (single source of truth) ────────────────────
 
 /// Returns the signing payload for a given action, per the ZNS namespace spec.
@@ -152,7 +177,7 @@ fn parse_claim(rest: &str) -> Option<MemoAction> {
 fn parse_list(rest: &str) -> Option<MemoAction> {
     // ZNS:LIST:<name>:<price>:<pay_taddr>:<nonce>:<sig>
     let parts: Vec<&str> = rest.splitn(5, ':').collect();
-    if parts.len() != 5 || !validate_name(parts[0]) {
+    if parts.len() != 5 || !validate_name(parts[0]) || !validate_taddr(parts[2]) {
         return None;
     }
     let price: u64 = parts[1].parse().ok()?;
@@ -220,4 +245,48 @@ fn parse_buy(rest: &str) -> Option<MemoAction> {
         signature: parts[3].into(),
         kind: ActionKind::Buy { buyer_ua, price },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_strips_display_suffixes() {
+        assert_eq!(normalize_name_query("alice.zcash"), "alice");
+        assert_eq!(normalize_name_query("alice.zec"), "alice");
+        assert_eq!(normalize_name_query("ALICE.ZCASH"), "alice");
+        assert_eq!(normalize_name_query("  bob.zec  "), "bob");
+    }
+
+    #[test]
+    fn normalize_preserves_bare_names() {
+        assert_eq!(normalize_name_query("alice"), "alice");
+        assert_eq!(normalize_name_query("user42"), "user42");
+    }
+
+    #[test]
+    fn validate_name_rejects_invalid() {
+        assert!(!validate_name(""));
+        assert!(!validate_name("Alice"));
+        assert!(!validate_name("my-name"));
+        assert!(!validate_name(&"a".repeat(63)));
+    }
+
+    #[test]
+    fn list_rejects_invalid_pay_taddr() {
+        let memo = b"ZNS:LIST:alice:100000000:not-a-taddr:1:AQID\n";
+        let mut padded = [0u8; 512];
+        padded[..memo.len()].copy_from_slice(memo);
+        assert!(parse_memo(&padded).is_none());
+    }
+
+    #[test]
+    fn list_accepts_valid_pay_taddr() {
+        let memo = b"ZNS:LIST:alice:100000000:tmqY61Gp3B7Pz3ev12NRFzWxJz1yB28Gfkfi:1:AQID\n";
+        let mut padded = [0u8; 512];
+        padded[..memo.len()].copy_from_slice(memo);
+        let action = parse_memo(&padded).expect("parse LIST");
+        assert!(matches!(action.kind, ActionKind::List { .. }));
+    }
 }

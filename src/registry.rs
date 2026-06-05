@@ -230,6 +230,54 @@ impl Registry {
         Ok(self.db.changes() > 0)
     }
 
+    pub fn has_conflicting_pending_buy(
+        &self,
+        pay_taddr: &str,
+        price: u64,
+        name: &str,
+        current_height: u64,
+    ) -> bool {
+        self.db
+            .query_row(
+                "SELECT 1 FROM pending_buys
+                 WHERE pay_taddr = ?1 AND price = ?2 AND name != ?3 AND expires_at >= ?4
+                 LIMIT 1",
+                rusqlite::params![pay_taddr, price as i64, name, current_height as i64],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    pub fn canonical_pending_for_payment(
+        &self,
+        pay_taddr: &str,
+        price: u64,
+        current_height: u64,
+    ) -> Option<PendingBuy> {
+        self.db
+            .query_row(
+                "SELECT name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature
+                 FROM pending_buys
+                 WHERE pay_taddr = ?1 AND price = ?2 AND expires_at >= ?3
+                 ORDER BY claim_height ASC, name ASC
+                 LIMIT 1",
+                rusqlite::params![pay_taddr, price as i64, current_height as i64],
+                |row| {
+                    Ok(PendingBuy {
+                        name: row.get(0)?,
+                        buyer: row.get(1)?,
+                        price: row.get::<_, i64>(2)? as u64,
+                        pay_taddr: row.get(3)?,
+                        claim_height: row.get::<_, i64>(4)? as u64,
+                        expires_at: row.get::<_, i64>(5)? as u64,
+                        txid: row.get(6)?,
+                        signature: row.get(7)?,
+                    })
+                },
+            )
+            .ok()
+    }
+
     pub fn get_pending_buy(&self, name: &str) -> Option<PendingBuy> {
         self.db
             .query_row(
@@ -255,7 +303,8 @@ impl Registry {
     pub fn list_active_pending_buys(&self, current_height: u64) -> Vec<PendingBuy> {
         let Ok(mut stmt) = self.db.prepare(
             "SELECT name, buyer_ua, price, pay_taddr, claim_height, expires_at, txid, signature
-             FROM pending_buys WHERE expires_at >= ?1",
+             FROM pending_buys WHERE expires_at >= ?1
+             ORDER BY claim_height ASC, name ASC",
         ) else {
             return vec![];
         };
@@ -800,4 +849,46 @@ pub struct StateRoot {
     pub height: u64,
     pub root: [u8; 32],
     pub leaf_count: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TADDR: &str = "tmqY61Gp3B7Pz3ev12NRFzWxJz1yB28Gfkfi";
+
+    fn mem_registry() -> Registry {
+        Registry::open(":memory:").expect("in-memory db")
+    }
+
+    fn seed_name(reg: &Registry, name: &str) {
+        reg.create_registration(name, "u1example", "sig", &format!("tx-{name}"), 1)
+            .expect("registration");
+    }
+
+    #[test]
+    fn detects_conflicting_pending_buys() {
+        let reg = mem_registry();
+        seed_name(&reg, "alice");
+        seed_name(&reg, "bob");
+        reg.create_pending_buy("alice", "buyer1", 100, TADDR, 10, 200, "tx-a", "sig")
+            .expect("pending alice");
+        assert!(reg.has_conflicting_pending_buy(TADDR, 100, "bob", 10));
+        assert!(!reg.has_conflicting_pending_buy(TADDR, 100, "alice", 10));
+    }
+
+    #[test]
+    fn canonical_pending_is_earliest_claim() {
+        let reg = mem_registry();
+        seed_name(&reg, "alice");
+        seed_name(&reg, "bob");
+        reg.create_pending_buy("bob", "buyer2", 100, TADDR, 20, 200, "tx-b", "sig")
+            .expect("pending bob");
+        reg.create_pending_buy("alice", "buyer1", 100, TADDR, 10, 200, "tx-a", "sig")
+            .expect("pending alice");
+        let canonical = reg
+            .canonical_pending_for_payment(TADDR, 100, 15)
+            .expect("canonical");
+        assert_eq!(canonical.name, "alice");
+    }
 }

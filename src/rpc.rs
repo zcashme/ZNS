@@ -11,6 +11,7 @@ use serde_json::{self, Value};
 use tracing::{error, info};
 use zcash_address::ZcashAddress;
 
+use crate::memo;
 use crate::merkle;
 use crate::registry::Registry;
 
@@ -186,13 +187,16 @@ impl ZnsApiServer for RpcContext {
             return Ok(serde_json::to_value(entries).unwrap());
         }
 
-        // Exact name query = single registration, optionally with Merkle proof
+        let name = memo::normalize_name_query(&query);
+        if !memo::validate_name(&name) {
+            return Ok(serde_json::to_value(None::<()>).unwrap());
+        }
         let proof = if with_proof.unwrap_or(false) {
-            build_proof_for(&reg, &query)
+            build_proof_for(&reg, &name)
         } else {
             None
         };
-        let entry = reg.resolve_by_name(&query).map(|r| {
+        let entry = reg.resolve_by_name(&name).map(|r| {
             let listing = reg.get_listing(&r.name).map(|l| listing_entry(l, &reg));
             registration_entry(r, listing, proof)
         });

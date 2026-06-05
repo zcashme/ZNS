@@ -53,6 +53,11 @@ function isValidName(name: string): boolean {
   return NAME_RE.test(name);
 }
 
+function normalizeNameQuery(raw: string): string {
+  const trimmed = raw.trim().toLowerCase();
+  return trimmed.replace(/\.(zcash|zec)$/, "");
+}
+
 /**
  * Normalizes indexer API responses from snake_case (Rust) to camelCase (TypeScript).
  */
@@ -201,8 +206,10 @@ export class ZNS {
 
   /** Resolve a ZNS name to its registration. Returns null if not registered. */
   async resolveName(name: string): Promise<Registration | null> {
+    const query = normalizeNameQuery(name);
+    if (!isValidName(query)) return null;
     const raw = await this.rpc<Record<string, unknown> | null>("resolve", {
-      query: name,
+      query,
     });
     return raw ? normalizeApiResponse<Registration>(raw) : null;
   }
@@ -239,9 +246,8 @@ export class ZNS {
   /** Check if a name is available for registration.
    *  Returns false immediately for invalid names without hitting the server. */
   async isAvailable(name: string): Promise<boolean> {
-    if (!isValidName(name)) return false;
-    const result = await this.resolveName(name);
-    return result === null;
+    if (!isValidName(normalizeNameQuery(name))) return false;
+    return (await this.resolveName(name)) === null;
   }
 
   /** Validate a Zcash Unified Address format.

@@ -139,6 +139,16 @@ async fn resolve_pending_buys(reg: &Registry, indexer: &mut decrypter::IndexerSt
     }
 
     for pending in reg.list_active_pending_buys(current_height) {
+        if let Some(canonical) = reg.canonical_pending_for_payment(
+            &pending.pay_taddr,
+            pending.price,
+            current_height,
+        ) {
+            if canonical.name != pending.name {
+                continue;
+            }
+        }
+
         let Some(payment) = indexer
             .find_payment(
                 &pending.pay_taddr,
@@ -319,6 +329,18 @@ fn handle_action(reg: &Registry, action: MemoAction, note_value: u64, txid: &str
                     );
                     return;
                 }
+            }
+            if reg.has_conflicting_pending_buy(
+                &listing.pay_taddr,
+                *price,
+                &action.name,
+                height,
+            ) {
+                warn!(
+                    "BUY rejected for {}: another active pending buy shares pay_taddr {} at price {}",
+                    action.name, listing.pay_taddr, price
+                );
+                return;
             }
             // Free listings (price == 0) settle on the BUY memo itself — there's
             // no seller payment to wait for, and resolve_pending_buys would match

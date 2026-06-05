@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import * as ed25519 from "@noble/ed25519";
 import { ZNS } from "../src/zns.js";
 
@@ -43,6 +43,49 @@ describe("ZNS", () => {
       expect(zns.isValidName("Alice")).toBe(false);
       expect(zns.isValidName("my-name")).toBe(false);
       expect(zns.isValidName("a".repeat(63))).toBe(false);
+    });
+  });
+
+  describe("resolveName normalization", () => {
+    it("treats display suffixes as equivalent to bare names", async () => {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+              name: "alice",
+              address: VALID_TESTNET_UA,
+              txid: "abc",
+              height: 1,
+              nonce: 0,
+              signature: null,
+              last_action: "CLAIM",
+              pubkey: null,
+              listing: null,
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+
+      const z = new ZNS({ url: "https://example.test/zns" });
+      await z.resolveName("alice.zcash");
+
+      expect(fetchSpy).toHaveBeenCalled();
+      const body = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+      expect(body.params.query).toBe("alice");
+
+      fetchSpy.mockRestore();
+    });
+
+    it("returns null for invalid normalized names without RPC", async () => {
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+      const z = new ZNS({ url: "https://example.test/zns" });
+      const result = await z.resolveName("not-valid!");
+      expect(result).toBeNull();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
     });
   });
 
