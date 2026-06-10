@@ -72,7 +72,7 @@ final claims = await zns.events(EventsFilter(action: ZnsAction.claim));
 
 ## Claim a name
 
-Prepared actions return a `payload` to sign, plus a `complete(signature, [userPubkey])` method that builds the memo and ZIP-321 URI.
+Prepared actions return a `payload` to sign, plus a `complete(signature)` method that builds the memo and ZIP-321 URI.
 
 ```dart
 final s = await zns.status();
@@ -83,7 +83,7 @@ final claim = zns.prepareClaim('alice', 'utest1abc...', cost!);
 final sig = base64.encode(await mySigner.sign(utf8.encode(claim.payload)));
 
 // 2. produce a transaction-ready URI + memo
-final action = claim.complete(sig, userPubkeyBase64);
+final action = claim.complete(sig);
 print(action.uri);  // zcash:utest1...?amount=...&memo=...
 ```
 
@@ -137,7 +137,7 @@ validatePayload('CLAIM:alice:utest1...');          // PayloadValidationResult
 ## Signature verification
 
 ```dart
-final ok = await zns.verifySovereignSignature(payload, signatureB64, pubkeyB64);
+final ok = await zns.verifySignature(payload, signatureB64, pubkeyB64);
 final regOk     = await zns.verifyRegistration(reg, s.adminPubkey);
 final listingOk = await zns.verifyListing(listing, s.adminPubkey);
 ```

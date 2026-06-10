@@ -60,7 +60,6 @@ class Listing {
   final String txid;
   final int height;
   final String signature;
-  final String? pubkey;
   final PendingBuy? pendingBuy;
 
   const Listing({
@@ -71,7 +70,6 @@ class Listing {
     required this.txid,
     required this.height,
     required this.signature,
-    this.pubkey,
     this.pendingBuy,
   });
 
@@ -85,7 +83,6 @@ class Listing {
       txid: json['txid'] as String,
       height: json['height'] as int,
       signature: json['signature'] as String,
-      pubkey: json['pubkey'] as String?,
       pendingBuy:
           pb != null ? PendingBuy.fromJson(pb as Map<String, dynamic>) : null,
     );
@@ -102,12 +99,11 @@ class Listing {
           other.txid == txid &&
           other.height == height &&
           other.signature == signature &&
-          other.pubkey == pubkey &&
           other.pendingBuy == pendingBuy;
 
   @override
   int get hashCode => Object.hash(
-      name, price, payTaddr, nonce, txid, height, signature, pubkey, pendingBuy);
+      name, price, payTaddr, nonce, txid, height, signature, pendingBuy);
 
   @override
   String toString() =>
@@ -128,7 +124,6 @@ class Registration {
   /// ownership-changing subset of [ZnsAction] (see
   /// [ZnsAction.isOwnershipChanging]).
   final ZnsAction lastAction;
-  final String? pubkey;
   final Listing? listing;
 
   Registration({
@@ -139,7 +134,6 @@ class Registration {
     required this.nonce,
     required this.lastAction,
     this.signature,
-    this.pubkey,
     this.listing,
   }) : assert(lastAction.isOwnershipChanging,
             'lastAction must be ownership-changing, got $lastAction');
@@ -160,7 +154,6 @@ class Registration {
       nonce: json['nonce'] as int,
       signature: json['signature'] as String?,
       lastAction: action,
-      pubkey: json['pubkey'] as String?,
       listing: l != null ? Listing.fromJson(l as Map<String, dynamic>) : null,
     );
   }
@@ -176,12 +169,11 @@ class Registration {
           other.nonce == nonce &&
           other.signature == signature &&
           other.lastAction == lastAction &&
-          other.pubkey == pubkey &&
           other.listing == listing;
 
   @override
   int get hashCode => Object.hash(
-      name, address, txid, height, nonce, signature, lastAction, pubkey, listing);
+      name, address, txid, height, nonce, signature, lastAction, listing);
 
   @override
   String toString() =>
@@ -260,7 +252,6 @@ class RegistrationWithProof {
   int get nonce => registration.nonce;
   String? get signature => registration.signature;
   ZnsAction get lastAction => registration.lastAction;
-  String? get pubkey => registration.pubkey;
   Listing? get listing => registration.listing;
 
   /// Parse from the indexer's wire format. The proof must be present;
@@ -403,7 +394,6 @@ class Event {
   final int? price;
   final int? nonce;
   final String? signature;
-  final String? pubkey;
 
   const Event({
     required this.id,
@@ -415,7 +405,6 @@ class Event {
     this.price,
     this.nonce,
     this.signature,
-    this.pubkey,
   });
 
   factory Event.fromJson(Map<String, dynamic> json) {
@@ -434,7 +423,6 @@ class Event {
       price: json['price'] as int?,
       nonce: json['nonce'] as int?,
       signature: json['signature'] as String?,
-      pubkey: json['pubkey'] as String?,
     );
   }
 
@@ -450,12 +438,11 @@ class Event {
           other.ua == ua &&
           other.price == price &&
           other.nonce == nonce &&
-          other.signature == signature &&
-          other.pubkey == pubkey;
+          other.signature == signature;
 
   @override
   int get hashCode => Object.hash(
-      id, name, action, txid, height, ua, price, nonce, signature, pubkey);
+      id, name, action, txid, height, ua, price, nonce, signature);
 
   @override
   String toString() =>

@@ -150,7 +150,7 @@ void main() {
       expect(c.cost, 1000);
     });
 
-    test('complete() builds memo without userPubkey', () {
+    test('complete() builds the memo', () {
       final z = ZNS();
       final c = z.prepareClaim('alice', _ua, 1000);
       final result = c.complete('SIGB64');
@@ -158,13 +158,6 @@ void main() {
       expect(result.memo.contains(':null'), isFalse);
       expect(result.uri.startsWith('zcash:'), isTrue);
       expect(result.uri.contains('amount='), isTrue);
-    });
-
-    test('complete() builds memo with userPubkey', () {
-      final z = ZNS();
-      final c = z.prepareClaim('alice', _ua, 1000);
-      final result = c.complete('SIGB64', 'PKB64');
-      expect(result.memo, endsWith(':SIGB64:PKB64'));
     });
 
     test('normalizes the name before building the payload', () {
@@ -254,11 +247,6 @@ void main() {
       expect(r.memo, 'ZNS:SETPRICE:3:100:200:300:1:SIG');
     });
 
-    test('userPubkey is ignored (admin-only)', () {
-      final p = ZNS().prepareSetPrice([100], 1);
-      final r = p.complete('SIG', 'PKB64');
-      expect(r.memo, 'ZNS:SETPRICE:1:100:1:SIG');
-    });
   });
 
   group('PreparedAction (sealed)', () {
@@ -311,7 +299,7 @@ void main() {
     });
   });
 
-  group('verifySovereignSignature', () {
+  group('verifySignature', () {
     test('verifies a real Ed25519 signature', () async {
       final algo = Ed25519();
       final pair = await algo.newKeyPair();
@@ -323,7 +311,7 @@ void main() {
       final pkB64 = base64.encode(pubkey.bytes);
 
       final z = ZNS();
-      expect(await z.verifySovereignSignature(payload, sigB64, pkB64), isTrue);
+      expect(await z.verifySignature(payload, sigB64, pkB64), isTrue);
     });
 
     test('rejects tampered payload', () async {
@@ -339,12 +327,12 @@ void main() {
 
       final z = ZNS();
       expect(
-          await z.verifySovereignSignature(tampered, sigB64, pkB64), isFalse);
+          await z.verifySignature(tampered, sigB64, pkB64), isFalse);
     });
 
     test('returns false on malformed base64', () async {
       final z = ZNS();
-      expect(await z.verifySovereignSignature('CLAIM:a:b', '!!!', '!!!'),
+      expect(await z.verifySignature('CLAIM:a:b', '!!!', '!!!'),
           isFalse);
     });
 
@@ -354,7 +342,7 @@ void main() {
       final sig = base64.encode(List<int>.filled(64, 0));
       final pk = base64.encode(List<int>.filled(16, 0));
       expect(
-          await z.verifySovereignSignature('CLAIM:a:b', sig, pk), isFalse);
+          await z.verifySignature('CLAIM:a:b', sig, pk), isFalse);
     });
   });
 
@@ -368,7 +356,6 @@ void main() {
         'nonce': 1,
         'signature': 'SIG',
         'last_action': 'CLAIM',
-        'pubkey': null,
       });
       expect(reg.name, 'alice');
       expect(reg.lastAction, ZnsAction.claim);
@@ -385,7 +372,6 @@ void main() {
           'nonce': 1,
           'signature': 'SIG',
           'last_action': 'LIST',
-          'pubkey': null,
         }),
         throwsA(isA<FormatException>()),
       );
@@ -421,7 +407,6 @@ void main() {
         'txid': 'abc',
         'height': 100,
         'signature': 'SIG',
-        'pubkey': null,
         'pending_buy': {
           'buyer': 'utest1xxx',
           'price': 10,

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0
+
+- BREAKING: sovereign signatures removed, matching the indexer (all actions
+  are now strictly admin-signed). `Registration`, `Listing`, and `Event` no
+  longer carry a `pubkey` field; `complete()` no longer accepts a
+  `userPubkey` and never emits the `:<pubkey>` memo suffix;
+  `verifyRegistration`/`verifyListing` verify strictly against the admin
+  pubkey; `verifySovereignSignature` is renamed to `verifySignature`;
+  `hashLeaf` matches the indexer's new Merkle leaf pre-image (no pubkey
+  bytes).
+
 ## 0.6.0
 
 - Feat: Merkle inclusion proofs. `resolveNameWithProof` returns a

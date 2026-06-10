@@ -29,9 +29,8 @@ sealed class PreparedAction {
   /// The action this represents.
   ZnsAction get action;
 
-  /// Build the memo + URI from [signatureBase64]. If [userPubkey] is non-null,
-  /// it is appended to the memo as a final segment (sovereign-name flow).
-  CompletedAction complete(String signatureBase64, [String? userPubkey]);
+  /// Build the memo + URI from [signatureBase64].
+  CompletedAction complete(String signatureBase64);
 }
 
 /// Internal helper — builds the `ZNS:` memo and the ZIP-321 URI.
@@ -39,10 +38,8 @@ CompletedAction _build({
   required String memoBody,
   required String registryAddress,
   int? amountZats,
-  String? userPubkey,
 }) {
-  final memo =
-      userPubkey == null ? 'ZNS:$memoBody' : 'ZNS:$memoBody:$userPubkey';
+  final memo = 'ZNS:$memoBody';
   return CompletedAction(
     memo: memo,
     uri: zip321.buildZcashUri(
@@ -74,12 +71,11 @@ final class PreparedClaim extends PreparedAction {
   String get payload => 'CLAIM:$name:$address';
 
   @override
-  CompletedAction complete(String signatureBase64, [String? userPubkey]) =>
+  CompletedAction complete(String signatureBase64) =>
       _build(
         memoBody: 'CLAIM:$name:$address:$signatureBase64',
         registryAddress: _registryAddress,
         amountZats: cost,
-        userPubkey: userPubkey,
       );
 }
 
@@ -106,12 +102,11 @@ final class PreparedList extends PreparedAction {
   String get payload => 'LIST:$name:$price:$payTaddr:$nonce';
 
   @override
-  CompletedAction complete(String signatureBase64, [String? userPubkey]) =>
+  CompletedAction complete(String signatureBase64) =>
       _build(
         memoBody: 'LIST:$name:$price:$payTaddr:$nonce:$signatureBase64',
         registryAddress: _registryAddress,
         amountZats: listCommission,
-        userPubkey: userPubkey,
       );
 }
 
@@ -134,11 +129,10 @@ final class PreparedDelist extends PreparedAction {
   String get payload => 'DELIST:$name:$nonce';
 
   @override
-  CompletedAction complete(String signatureBase64, [String? userPubkey]) =>
+  CompletedAction complete(String signatureBase64) =>
       _build(
         memoBody: 'DELIST:$name:$nonce:$signatureBase64',
         registryAddress: _registryAddress,
-        userPubkey: userPubkey,
       );
 }
 
@@ -163,11 +157,10 @@ final class PreparedUpdate extends PreparedAction {
   String get payload => 'UPDATE:$name:$newAddress:$nonce';
 
   @override
-  CompletedAction complete(String signatureBase64, [String? userPubkey]) =>
+  CompletedAction complete(String signatureBase64) =>
       _build(
         memoBody: 'UPDATE:$name:$newAddress:$nonce:$signatureBase64',
         registryAddress: _registryAddress,
-        userPubkey: userPubkey,
       );
 }
 
@@ -192,12 +185,11 @@ final class PreparedBuy extends PreparedAction {
   String get payload => 'BUY:$name:$buyerAddress';
 
   @override
-  CompletedAction complete(String signatureBase64, [String? userPubkey]) =>
+  CompletedAction complete(String signatureBase64) =>
       _build(
         memoBody: 'BUY:$name:$buyerAddress:$price:$signatureBase64',
         registryAddress: _registryAddress,
         amountZats: buyCommission,
-        userPubkey: userPubkey,
       );
 }
 
@@ -220,17 +212,14 @@ final class PreparedRelease extends PreparedAction {
   String get payload => 'RELEASE:$name:$nonce';
 
   @override
-  CompletedAction complete(String signatureBase64, [String? userPubkey]) =>
+  CompletedAction complete(String signatureBase64) =>
       _build(
         memoBody: 'RELEASE:$name:$nonce:$signatureBase64',
         registryAddress: _registryAddress,
-        userPubkey: userPubkey,
       );
 }
 
-/// Admin-only. The optional [userPubkey] argument on [complete] is accepted
-/// for interface symmetry but is always ignored — SETPRICE is signed only
-/// by the registry admin key.
+/// Admin-only. SETPRICE is signed only by the registry admin key.
 @immutable
 final class PreparedSetPrice extends PreparedAction {
   final List<int> prices;
@@ -251,7 +240,7 @@ final class PreparedSetPrice extends PreparedAction {
   String get payload => 'SETPRICE:${prices.length}:${prices.join(':')}:$nonce';
 
   @override
-  CompletedAction complete(String signatureBase64, [String? userPubkey]) =>
+  CompletedAction complete(String signatureBase64) =>
       _build(
         memoBody:
             'SETPRICE:${prices.length}:${prices.join(':')}:$nonce:$signatureBase64',

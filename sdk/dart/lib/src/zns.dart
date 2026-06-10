@@ -187,13 +187,12 @@ class ZNS {
 
   // ── Signature verification ───────────────────────────────────────────────
 
-  /// Verify a listing's signature. Uses [Listing.pubkey] if set, otherwise
-  /// falls back to [adminPubkey] (from [Status.adminPubkey]).
+  /// Verify a listing's signature against [adminPubkey]
+  /// (from [Status.adminPubkey]).
   Future<bool> verifyListing(Listing listing, String adminPubkey) {
-    final pubkey = listing.pubkey ?? adminPubkey;
     final payload =
         'LIST:${listing.name}:${listing.price}:${listing.payTaddr}:${listing.nonce}';
-    return crypto.verifyEd25519(payload, listing.signature, pubkey);
+    return crypto.verifyEd25519(payload, listing.signature, adminPubkey);
   }
 
   /// Verify a registration's signature.
@@ -203,13 +202,13 @@ class ZNS {
     if (sig == null) return false;
     final payload = _registrationPayload(reg);
     if (payload == null) return false;
-    final pubkey = reg.pubkey ?? adminPubkey;
-    return crypto.verifyEd25519(payload, sig, pubkey);
+    return crypto.verifyEd25519(payload, sig, adminPubkey);
   }
 
-  /// Verify a sovereign-key signature before submitting a transaction.
-  /// Returns `false` on any decode error or mismatch; never throws.
-  Future<bool> verifySovereignSignature(
+  /// Verify an Ed25519 signature over a signing payload before submitting a
+  /// transaction. Returns `false` on any decode error or mismatch; never
+  /// throws.
+  Future<bool> verifySignature(
     String payload,
     String signatureBase64,
     String pubkeyBase64,
@@ -238,7 +237,6 @@ class ZNS {
         address: reg.address,
         nonce: reg.nonce,
         lastAction: reg.lastAction.wire,
-        pubkey: reg.pubkey,
       );
       var idx = reg.proof.index;
       for (final siblingHex in reg.proof.path) {
