@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:test/test.dart';
 import 'package:zcashname_sdk/zcashname_sdk.dart';
 
@@ -31,6 +33,73 @@ void main() {
     test('registryAddress matches network', () {
       final z = ZNS(network: Network.mainnet);
       expect(z.registryAddress, networks[Network.mainnet]!.registryAddress);
+    });
+  });
+
+  group('resolveName normalization', () {
+    /// Mock indexer that records each resolve query and answers with a
+    /// registration for "alice".
+    MockClient mockResolve(List<String?> queries) {
+      return MockClient((req) async {
+        final body = jsonDecode(req.body) as Map<String, dynamic>;
+        final params = body['params'] as Map<String, dynamic>?;
+        queries.add(params?['query'] as String?);
+        return http.Response(
+          jsonEncode({
+            'jsonrpc': '2.0',
+            'id': body['id'],
+            'result': {
+              'name': 'alice',
+              'address': _ua,
+              'txid': 'ab' * 32,
+              'height': 100,
+              'nonce': 0,
+              'last_action': 'CLAIM',
+            },
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+    }
+
+    test('sends the normalized name as the query', () async {
+      final queries = <String?>[];
+      final z = ZNS(httpClient: mockResolve(queries));
+      for (final input in [
+        'Alice.zcash',
+        'alice.zec',
+        'aLice.Zec',
+        'alice.ZCASH',
+        '  ALICE  ',
+      ]) {
+        final reg = await z.resolveName(input);
+        expect(reg?.name, 'alice');
+      }
+      expect(queries, ['alice', 'alice', 'alice', 'alice', 'alice']);
+    });
+
+    test('returns null for invalid names without hitting the server',
+        () async {
+      var calls = 0;
+      final z = ZNS(httpClient: MockClient((req) async {
+        calls++;
+        return http.Response('{}', 200);
+      }));
+      expect(await z.resolveName('alice.eth'), isNull);
+      expect(await z.resolveName('alice.zec.zec'), isNull);
+      expect(await z.resolveName('.zec'), isNull);
+      expect(await z.resolveName(''), isNull);
+      expect(await z.resolveNameWithProof('alice.eth'), isNull);
+      expect(await z.isAvailable('alice.eth'), isFalse);
+      expect(calls, 0);
+    });
+
+    test('isAvailable checks the normalized name', () async {
+      final queries = <String?>[];
+      final z = ZNS(httpClient: mockResolve(queries));
+      expect(await z.isAvailable('Alice.zec'), isFalse);
+      expect(queries, ['alice']);
     });
   });
 
@@ -98,9 +167,19 @@ void main() {
       expect(result.memo, endsWith(':SIGB64:PKB64'));
     });
 
+    test('normalizes the name before building the payload', () {
+      final z = ZNS();
+      final c = z.prepareClaim('  ALICE.Zec ', _ua, 1000);
+      expect(c.name, 'alice');
+      expect(c.payload, 'CLAIM:alice:$_ua');
+      expect(c.complete('SIGB64').memo, 'ZNS:CLAIM:alice:$_ua:SIGB64');
+    });
+
     test('throws on invalid name', () {
       final z = ZNS();
-      expect(() => z.prepareClaim('ALICE', _ua, 1000),
+      expect(() => z.prepareClaim('alice.eth', _ua, 1000),
+          throwsA(isA<InvalidNameException>()));
+      expect(() => z.prepareClaim('my-name', _ua, 1000),
           throwsA(isA<InvalidNameException>()));
     });
 

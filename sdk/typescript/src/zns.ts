@@ -1,4 +1,5 @@
 import * as ed25519 from "@noble/ed25519";
+import { blake2b } from "@noble/hashes/blake2.js";
 import { bech32m } from "bech32";
 import { ZNS_ACTIONS } from "./types.js";
 import type {
@@ -22,6 +23,8 @@ import type {
   PreparedSetPrice,
   PendingBuy,
   PayloadValidationResult,
+  MerkleProof,
+  RegistrationWithProof,
 } from "./types.js";
 
 // Commission is no longer a fixed constant — the indexer derives the LIST
@@ -48,9 +51,59 @@ export const NETWORKS = {
 /** Valid ZNS name pattern: 1-62 lowercase alphanumeric chars. */
 const NAME_RE = /^[a-z0-9]{1,62}$/;
 
+/** Domain tags for the Merkle commitment — must match the Rust indexer. */
+const LEAF_TAG = new TextEncoder().encode("ZNSv1:LEAF\0");
+const NODE_TAG = new TextEncoder().encode("ZNSv1:NODE\0");
+const NULL_BYTE = new Uint8Array([0]);
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (clean.length % 2 !== 0) throw new Error(`Invalid hex length: ${hex}`);
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function u64BE(n: number): Uint8Array {
+  const buf = new Uint8Array(8);
+  new DataView(buf.buffer).setBigUint64(0, BigInt(n), false);
+  return buf;
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}
+
 /** Validates a ZNS name format (lowercase alphanumeric, 1-62 chars). */
 function isValidName(name: string): boolean {
   return NAME_RE.test(name);
+}
+
+/**
+ * Normalizes a ZNS name for lookups: trims whitespace, lowercases, and
+ * strips one trailing `.zcash` or `.zec` suffix (case-insensitive), so
+ * `Alice.zcash`, `aLice.Zec`, and `alice` all normalize to `alice`.
+ */
+function normalizeName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/\.(zcash|zec)$/, "");
 }
 
 /**
@@ -199,12 +252,54 @@ export class ZNS {
     return normalizeApiResponse<Status>(raw);
   }
 
-  /** Resolve a ZNS name to its registration. Returns null if not registered. */
+  /** Resolve a ZNS name to its registration. Returns null if not registered.
+   *
+   *  The name is normalized before querying: trimmed, lowercased, and one
+   *  trailing `.zcash`/`.zec` suffix stripped (case-insensitive), so
+   *  `Alice.zcash`, `aLice.Zec`, and `alice` all resolve the same name.
+   *  Returns null without hitting the server if the name is invalid after
+   *  normalization. Note the returned registration's `name` field is the
+   *  normalized form, not the raw input. */
   async resolveName(name: string): Promise<Registration | null> {
+    const normalized = normalizeName(name);
+    if (!isValidName(normalized)) return null;
     const raw = await this.rpc<Record<string, unknown> | null>("resolve", {
-      query: name,
+      query: normalized,
     });
     return raw ? normalizeApiResponse<Registration>(raw) : null;
+  }
+
+  /**
+   * Resolve a ZNS name with an accompanying Merkle inclusion proof against
+   * the indexer's state root. Returns null if the name isn't registered.
+   * Throws if the name is registered but the indexer didn't return a proof
+   * (e.g. the indexer hasn't yet computed a root, or doesn't support proofs).
+   *
+   * The name is normalized the same way as {@link resolveName} (trim,
+   * lowercase, strip one `.zcash`/`.zec` suffix); invalid names return null
+   * without a server round trip.
+   *
+   * Call {@link verifyProof} on the result to confirm the binding offline.
+   * For full trustlessness, also cross-check `proof.root` against an
+   * independent indexer at the same `proof.height`.
+   */
+  async resolveNameWithProof(
+    name: string,
+  ): Promise<RegistrationWithProof | null> {
+    const normalized = normalizeName(name);
+    if (!isValidName(normalized)) return null;
+    const raw = await this.rpc<Record<string, unknown> | null>("resolve", {
+      query: normalized,
+      with_proof: true,
+    });
+    if (!raw) return null;
+    const reg = normalizeApiResponse<RegistrationWithProof>(raw);
+    if (!reg.proof) {
+      throw new Error(
+        `Indexer returned no Merkle proof for "${name}" — it may not yet have committed a state root or may not support proofs.`,
+      );
+    }
+    return reg;
   }
 
   /** Resolve a Zcash Unified Address to all names pointing to it. Returns empty array if none.
@@ -237,10 +332,14 @@ export class ZNS {
   }
 
   /** Check if a name is available for registration.
-   *  Returns false immediately for invalid names without hitting the server. */
+   *  The name is normalized like {@link resolveName} first, so
+   *  `isAvailable("Alice.zec")` checks "alice". Returns false immediately
+   *  for names that are invalid after normalization, without hitting the
+   *  server. */
   async isAvailable(name: string): Promise<boolean> {
-    if (!isValidName(name)) return false;
-    const result = await this.resolveName(name);
+    const normalized = normalizeName(name);
+    if (!isValidName(normalized)) return false;
+    const result = await this.resolveName(normalized);
     return result === null;
   }
 
@@ -255,6 +354,7 @@ export class ZNS {
    *    - Optionally enforce: address must contain at least one Orchard receiver (typecode 0x03)
    *    Requires @noble/hashes (blake2b) implementation of F4Jumble inverse. */
   isValidName = isValidName;
+  normalizeName = normalizeName;
   isValidUnifiedAddress = isValidUnifiedAddress;
   isValidTransparentAddress = isValidTransparentAddress;
 
@@ -336,6 +436,44 @@ export class ZNS {
     pubkey: string,
   ): Promise<boolean> {
     return this.verifyEd25519(payload, signature, pubkey);
+  }
+
+  /** @deprecated Misspelled alias kept for backward compatibility — use
+   *  {@link verifySovereignSignature}. Will be removed in v1.0. */
+  async verifySoverignSignature(
+    payload: string,
+    signature: string,
+    pubkey: string,
+  ): Promise<boolean> {
+    return this.verifySovereignSignature(payload, signature, pubkey);
+  }
+
+  /**
+   * Verify a Merkle inclusion proof returned by {@link resolveNameWithProof}.
+   *
+   * Recomputes the leaf hash from the registration fields, folds the sibling
+   * path bottom-up, and compares the result against `proof.root`. Returns
+   * `true` iff the binding is consistent with the root the indexer committed
+   * to at `proof.height`.
+   *
+   * This proves the indexer's response is internally consistent — it cannot
+   * have lied about this specific name without also committing to a globally
+   * forged root. It does NOT prove the root reflects on-chain truth; for that,
+   * cross-check `proof.root` against an independent indexer at the same
+   * height, or re-derive the state from the chain using the public UIVK.
+   */
+  verifyProof(reg: RegistrationWithProof): boolean {
+    let h = this.hashLeaf(reg);
+    let idx = reg.proof.index;
+    for (const siblingHex of reg.proof.path) {
+      const sibling = hexToBytes(siblingHex);
+      h = idx % 2 === 0
+        ? this.hashInternal(h, sibling)
+        : this.hashInternal(sibling, h);
+      idx = Math.floor(idx / 2);
+    }
+    const claimed = hexToBytes(reg.proof.root);
+    return bytesEqual(h, claimed);
   }
 
   /**
@@ -456,7 +594,7 @@ export class ZNS {
    * @returns Prepared claim ready for signature completion
    */
   prepareClaim(name: string, address: string, cost: Zats): PreparedClaim {
-    this.requireValidName(name);
+    name = this.requireValidName(name);
     if (!isValidUnifiedAddress(address)) {
       throw new Error(`Invalid Zcash Unified Address: ${address}`);
     }
@@ -483,7 +621,7 @@ export class ZNS {
     nonce: number,
     commission: Zats,
   ): PreparedList {
-    this.requireValidName(name);
+    name = this.requireValidName(name);
 
     return {
       name,
@@ -505,7 +643,7 @@ export class ZNS {
   }
 
   prepareDelist(name: string, nonce: number): PreparedDelist {
-    this.requireValidName(name);
+    name = this.requireValidName(name);
 
     return {
       name,
@@ -528,7 +666,7 @@ export class ZNS {
     newAddress: string,
     nonce: number,
   ): PreparedUpdate {
-    this.requireValidName(name);
+    name = this.requireValidName(name);
     if (!isValidUnifiedAddress(newAddress)) {
       throw new Error(`Invalid Zcash Unified Address: ${newAddress}`);
     }
@@ -556,7 +694,7 @@ export class ZNS {
     price: Zats,
     commission: Zats = 0,
   ): PreparedBuy {
-    this.requireValidName(name);
+    name = this.requireValidName(name);
     if (!this.isValidUnifiedAddress(buyerAddress)) {
       throw new Error(`Invalid Zcash Unified Address: ${buyerAddress}`);
     }
@@ -584,7 +722,7 @@ export class ZNS {
   }
 
   prepareRelease(name: string, nonce: number): PreparedRelease {
-    this.requireValidName(name);
+    name = this.requireValidName(name);
 
     return {
       name,
@@ -636,6 +774,31 @@ export class ZNS {
     }
   }
 
+  /** Hash one registration into a 32-byte Merkle leaf. Mirrors the Rust
+   *  indexer's `hash_leaf` byte-for-byte. */
+  private hashLeaf(reg: RegistrationWithProof): Uint8Array {
+    const enc = new TextEncoder();
+    return blake2b(
+      concatBytes(
+        LEAF_TAG,
+        enc.encode(reg.name),
+        NULL_BYTE,
+        enc.encode(reg.address),
+        NULL_BYTE,
+        u64BE(reg.nonce),
+        enc.encode(reg.lastAction),
+        NULL_BYTE,
+        enc.encode(reg.pubkey ?? ""),
+      ),
+      { dkLen: 32 },
+    );
+  }
+
+  /** Hash two child hashes into a parent. */
+  private hashInternal(left: Uint8Array, right: Uint8Array): Uint8Array {
+    return blake2b(concatBytes(NODE_TAG, left, right), { dkLen: 32 });
+  }
+
   private async verifyEd25519(
     payload: string,
     signatureB64: string,
@@ -652,8 +815,14 @@ export class ZNS {
     }
   }
 
-  private requireValidName(name: string): void {
-    if (!isValidName(name)) throw new Error(`Invalid ZNS name: ${name}`);
+  /** Normalize a name (trim, lowercase, strip one `.zcash`/`.zec` suffix)
+   *  and return it, throwing if the result is not a valid ZNS name. */
+  private requireValidName(name: string): string {
+    const normalized = normalizeName(name);
+    if (!isValidName(normalized)) {
+      throw new Error(`Invalid ZNS name: ${name}`);
+    }
+    return normalized;
   }
 
   /** Build a ZIP-321 URI. Amount is in zatoshis and will be converted to ZEC for the URI. */

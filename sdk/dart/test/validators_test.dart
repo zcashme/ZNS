@@ -24,6 +24,30 @@ void main() {
     });
   });
 
+  group('normalizeName', () {
+    test('lowercases and strips .zcash/.zec suffix in any case', () {
+      expect(normalizeName('alice'), 'alice');
+      expect(normalizeName('Alice.zcash'), 'alice');
+      expect(normalizeName('alice.zec'), 'alice');
+      expect(normalizeName('aLice.Zec'), 'alice');
+      expect(normalizeName('alice.ZCASH'), 'alice');
+      expect(normalizeName('ALICE'), 'alice');
+      expect(normalizeName('  alice.Zec  '), 'alice');
+    });
+
+    test('does not strip non-suffix lookalikes', () {
+      expect(normalizeName('zec'), 'zec');
+      expect(normalizeName('zcash'), 'zcash');
+      expect(normalizeName('alice.eth'), 'alice.eth');
+      expect(normalizeName('alice.'), 'alice.');
+    });
+
+    test('strips only one suffix', () {
+      expect(normalizeName('alice.zec.zec'), 'alice.zec');
+      expect(normalizeName('.zec'), '');
+    });
+  });
+
   group('isValidUnifiedAddress', () {
     test('accepts testnet UA', () {
       expect(isValidUnifiedAddress(_validTestnetUa), isTrue);

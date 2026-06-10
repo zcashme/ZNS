@@ -62,6 +62,22 @@ export interface Registration {
   listing: Listing | null;
 }
 
+/** Merkle inclusion proof binding a Registration to a state root.
+ *  Sibling hashes are hex-encoded, ordered bottom-up (leaf → root). */
+export interface MerkleProof {
+  index: number;
+  path: string[];
+  root: string;
+  height: number;
+  leafCount: number;
+}
+
+/** Registration with an accompanying Merkle proof against the indexer's
+ *  state root at `proof.height`. */
+export interface RegistrationWithProof extends Registration {
+  proof: MerkleProof;
+}
+
 /** Pricing tiers for name registration. */
 export interface Pricing {
   nonce: number;

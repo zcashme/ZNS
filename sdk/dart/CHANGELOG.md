@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0
+
+- Feat: Merkle inclusion proofs. `resolveNameWithProof` returns a
+  `RegistrationWithProof` carrying a `MerkleProof` against the indexer's
+  committed state root, and `verifyProof` checks the binding offline by
+  recomputing the BLAKE2b leaf/path (`hashLeaf` and `hashInternal` are also
+  exported).
+- Feat: lenient name input. All name-taking methods (`resolveName`,
+  `resolveNameWithProof`, `isAvailable`, and every `prepare*` action) now
+  normalize their input: trim, lowercase, and strip one trailing
+  `.zcash`/`.zec` suffix (case-insensitive), so `Alice.zcash`, `aLice.Zec`,
+  and `alice` are equivalent. The normalizer is exported as `normalizeName`.
+- Names that are invalid after normalization resolve to `null` (or `false`
+  from `isAvailable`) locally, without a server round trip; `prepare*`
+  actions still throw `InvalidNameException`.
+
 ## 0.5.2
 
 - Fix: `resolveName` now normalizes the input to lowercase before querying the

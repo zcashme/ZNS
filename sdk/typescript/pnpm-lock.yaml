@@ -11,13 +11,13 @@ importers:
       '@noble/ed25519':
         specifier: ^2.0.0
         version: 2.3.0
+      '@noble/hashes':
+        specifier: ^2.2.0
+        version: 2.2.0
       bech32:
         specifier: ^2.0.0
         version: 2.0.0
     devDependencies:
-      '@noble/hashes':
-        specifier: ^2.2.0
-        version: 2.2.0
       tsup:
         specifier: ^8.0.0
         version: 8.5.1(postcss@8.5.14)(typescript@5.9.3)

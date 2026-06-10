@@ -188,6 +188,111 @@ class Registration {
       'Registration(name: $name, address: $address, lastAction: $lastAction)';
 }
 
+/// Merkle inclusion proof binding a [Registration] to a state root.
+/// Sibling hashes are hex-encoded, ordered bottom-up (leaf → root).
+@immutable
+class MerkleProof {
+  final int index;
+  final List<String> path;
+  final String root;
+  final int height;
+  final int leafCount;
+
+  const MerkleProof({
+    required this.index,
+    required this.path,
+    required this.root,
+    required this.height,
+    required this.leafCount,
+  });
+
+  factory MerkleProof.fromJson(Map<String, dynamic> json) => MerkleProof(
+        index: json['index'] as int,
+        path: List<String>.unmodifiable(
+            (json['path'] as List).cast<String>()),
+        root: json['root'] as String,
+        height: json['height'] as int,
+        leafCount: json['leaf_count'] as int,
+      );
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    if (other is! MerkleProof) return false;
+    if (other.index != index ||
+        other.root != root ||
+        other.height != height ||
+        other.leafCount != leafCount) return false;
+    if (other.path.length != path.length) return false;
+    for (var i = 0; i < path.length; i++) {
+      if (other.path[i] != path[i]) return false;
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(index, Object.hashAll(path), root, height, leafCount);
+
+  @override
+  String toString() =>
+      'MerkleProof(index: $index, height: $height, root: $root)';
+}
+
+/// A [Registration] with an accompanying Merkle proof against the indexer's
+/// state root at `proof.height`. Returned by `ZNS.resolveNameWithProof`.
+@immutable
+class RegistrationWithProof {
+  final Registration registration;
+  final MerkleProof proof;
+
+  const RegistrationWithProof({
+    required this.registration,
+    required this.proof,
+  });
+
+  // Convenience accessors to the inner Registration's fields, matching the
+  // TypeScript SDK's flattened shape and avoiding `reg.registration.name`.
+  String get name => registration.name;
+  String get address => registration.address;
+  String get txid => registration.txid;
+  int get height => registration.height;
+  int get nonce => registration.nonce;
+  String? get signature => registration.signature;
+  ZnsAction get lastAction => registration.lastAction;
+  String? get pubkey => registration.pubkey;
+  Listing? get listing => registration.listing;
+
+  /// Parse from the indexer's wire format. The proof must be present;
+  /// callers should have requested `with_proof: true`.
+  factory RegistrationWithProof.fromJson(Map<String, dynamic> json) {
+    final proofJson = json['proof'];
+    if (proofJson == null) {
+      throw FormatException(
+          'Indexer response missing "proof" field — was with_proof=true sent?');
+    }
+    return RegistrationWithProof(
+      registration: Registration.fromJson(json),
+      proof: MerkleProof.fromJson(proofJson as Map<String, dynamic>),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RegistrationWithProof &&
+          other.registration == registration &&
+          other.proof == proof;
+
+  @override
+  int get hashCode => Object.hash(registration, proof);
+
+  @override
+  String toString() =>
+      'RegistrationWithProof(name: $name, address: $address, '
+      'proof.root: ${proof.root.substring(0, 16)}...)';
+}
+
 /// Pricing tiers for name registration.
 @immutable
 class Pricing {

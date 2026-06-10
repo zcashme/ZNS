@@ -79,12 +79,40 @@ class ZNS {
 
   /// Resolve a name. Returns `null` if not registered.
   ///
-  /// [name] is normalized to lowercase before querying the indexer, so
-  /// `resolveName('Alice')` and `resolveName('alice')` are equivalent.
+  /// [name] is normalized before querying: trimmed, lowercased, and one
+  /// trailing `.zcash`/`.zec` suffix stripped (case-insensitive), so
+  /// `Alice.zcash`, `aLice.Zec`, and `alice` all resolve the same name.
+  /// Returns `null` without hitting the server if the name is invalid after
+  /// normalization. Note the returned registration's `name` field is the
+  /// normalized form, not the raw input.
   Future<Registration?> resolveName(String name) async {
+    final normalized = v.normalizeName(name);
+    if (!v.isValidName(normalized)) return null;
     final raw = await _rpc
-        .call<Map<String, dynamic>?>('resolve', {'query': name.toLowerCase()});
+        .call<Map<String, dynamic>?>('resolve', {'query': normalized});
     return raw == null ? null : Registration.fromJson(raw);
+  }
+
+  /// Resolve a ZNS name with an accompanying Merkle inclusion proof against
+  /// the indexer's state root. Returns `null` if the name isn't registered.
+  /// Throws [FormatException] if the indexer returns no proof (e.g. it hasn't
+  /// committed a root yet, or doesn't support proofs).
+  ///
+  /// [name] is normalized the same way as [resolveName] (trim, lowercase,
+  /// strip one `.zcash`/`.zec` suffix); invalid names return `null` without
+  /// a server round trip.
+  ///
+  /// Call [verifyProof] on the result to confirm the binding offline. For
+  /// full trustlessness, also cross-check `proof.root` against an independent
+  /// indexer at the same `proof.height`.
+  Future<RegistrationWithProof?> resolveNameWithProof(String name) async {
+    final normalized = v.normalizeName(name);
+    if (!v.isValidName(normalized)) return null;
+    final raw = await _rpc.call<Map<String, dynamic>?>('resolve', {
+      'query': normalized,
+      'with_proof': true,
+    });
+    return raw == null ? null : RegistrationWithProof.fromJson(raw);
   }
 
   /// Resolve a Unified Address to all names pointing to it. Returns an empty
@@ -116,11 +144,14 @@ class ZNS {
         .toList(growable: false);
   }
 
-  /// Check if [name] is available. Returns `false` immediately for
-  /// syntactically invalid names without hitting the server.
+  /// Check if [name] is available. The name is normalized like
+  /// [resolveName] first, so `isAvailable('Alice.zec')` checks `alice`.
+  /// Returns `false` immediately for names that are invalid after
+  /// normalization, without hitting the server.
   Future<bool> isAvailable(String name) async {
-    if (!v.isValidName(name)) return false;
-    final r = await resolveName(name);
+    final normalized = v.normalizeName(name);
+    if (!v.isValidName(normalized)) return false;
+    final r = await resolveName(normalized);
     return r == null;
   }
 
@@ -143,6 +174,7 @@ class ZNS {
   // ── Validation re-exports ────────────────────────────────────────────────
 
   bool isValidName(String name) => v.isValidName(name);
+  String normalizeName(String name) => v.normalizeName(name);
   bool isValidUnifiedAddress(String address) =>
       v.isValidUnifiedAddress(address);
   bool isValidTransparentAddress(String address) =>
@@ -184,6 +216,45 @@ class ZNS {
   ) =>
       crypto.verifyEd25519(payload, signatureBase64, pubkeyBase64);
 
+  /// Verify a Merkle inclusion proof returned by [resolveNameWithProof].
+  ///
+  /// Recomputes the leaf hash from the registration fields, folds the
+  /// sibling path bottom-up, and compares the result against `proof.root`.
+  /// Returns `true` iff the binding is consistent with the root the indexer
+  /// committed to at `proof.height`.
+  ///
+  /// This proves the indexer's response is internally consistent — it cannot
+  /// have lied about this specific name without also committing to a globally
+  /// forged root. It does **not** prove the root reflects on-chain truth;
+  /// for that, cross-check `proof.root` against an independent indexer at the
+  /// same height, or re-derive the state from the chain using the public
+  /// UIVK.
+  ///
+  /// Returns `false` on any decode error or mismatch; never throws.
+  Future<bool> verifyProof(RegistrationWithProof reg) async {
+    try {
+      var h = await crypto.hashLeaf(
+        name: reg.name,
+        address: reg.address,
+        nonce: reg.nonce,
+        lastAction: reg.lastAction.wire,
+        pubkey: reg.pubkey,
+      );
+      var idx = reg.proof.index;
+      for (final siblingHex in reg.proof.path) {
+        final sibling = crypto.hexDecode(siblingHex);
+        h = idx % 2 == 0
+            ? await crypto.hashInternal(h, sibling)
+            : await crypto.hashInternal(sibling, h);
+        idx ~/= 2;
+      }
+      final claimed = crypto.hexDecode(reg.proof.root);
+      return crypto.bytesEqual(h, claimed);
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ── Pricing helpers ──────────────────────────────────────────────────────
 
   /// Cost in zatoshis to claim a name of [nameLength]. Returns `null` when
@@ -208,7 +279,7 @@ class ZNS {
   // ── Prepared actions ─────────────────────────────────────────────────────
 
   PreparedClaim prepareClaim(String name, String address, int cost) {
-    _requireValidName(name);
+    name = _requireValidName(name);
     if (!v.isValidUnifiedAddress(address)) {
       throw InvalidAddressException(address, ZcashAddressKind.unified);
     }
@@ -222,7 +293,7 @@ class ZNS {
 
   PreparedList prepareList(
       String name, int price, String payTaddr, int nonce) {
-    _requireValidName(name);
+    name = _requireValidName(name);
     if (!v.isValidTransparentAddress(payTaddr)) {
       throw InvalidAddressException(payTaddr, ZcashAddressKind.transparent);
     }
@@ -236,7 +307,7 @@ class ZNS {
   }
 
   PreparedDelist prepareDelist(String name, int nonce) {
-    _requireValidName(name);
+    name = _requireValidName(name);
     return PreparedDelist(
       name: name,
       nonce: nonce,
@@ -245,7 +316,7 @@ class ZNS {
   }
 
   PreparedUpdate prepareUpdate(String name, String newAddress, int nonce) {
-    _requireValidName(name);
+    name = _requireValidName(name);
     if (!v.isValidUnifiedAddress(newAddress)) {
       throw InvalidAddressException(newAddress, ZcashAddressKind.unified);
     }
@@ -258,7 +329,7 @@ class ZNS {
   }
 
   PreparedBuy prepareBuy(String name, String buyerAddress, int price) {
-    _requireValidName(name);
+    name = _requireValidName(name);
     if (!v.isValidUnifiedAddress(buyerAddress)) {
       throw InvalidAddressException(buyerAddress, ZcashAddressKind.unified);
     }
@@ -271,7 +342,7 @@ class ZNS {
   }
 
   PreparedRelease prepareRelease(String name, int nonce) {
-    _requireValidName(name);
+    name = _requireValidName(name);
     return PreparedRelease(
       name: name,
       nonce: nonce,
@@ -289,10 +360,15 @@ class ZNS {
 
   // ── Private ──────────────────────────────────────────────────────────────
 
-  void _requireValidName(String name) {
-    if (!v.isValidName(name)) {
+  /// Normalize [name] (trim, lowercase, strip one `.zcash`/`.zec` suffix)
+  /// and return it, throwing [InvalidNameException] if the result is not a
+  /// valid ZNS name.
+  String _requireValidName(String name) {
+    final normalized = v.normalizeName(name);
+    if (!v.isValidName(normalized)) {
       throw InvalidNameException(name);
     }
+    return normalized;
   }
 
   String? _registrationPayload(Registration reg) {

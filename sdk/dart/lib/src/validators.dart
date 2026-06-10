@@ -5,6 +5,14 @@ final RegExp nameRegExp = RegExp(r'^[a-z0-9]{1,62}$');
 /// Validate a ZNS name format (1-62 lowercase alphanumeric chars).
 bool isValidName(String name) => nameRegExp.hasMatch(name);
 
+final RegExp _nameSuffixRegExp = RegExp(r'\.(zcash|zec)$');
+
+/// Normalize a ZNS name for lookups: trim whitespace, lowercase, and strip
+/// one trailing `.zcash` or `.zec` suffix (case-insensitive), so
+/// `Alice.zcash`, `aLice.Zec`, and `alice` all normalize to `alice`.
+String normalizeName(String name) =>
+    name.trim().toLowerCase().replaceFirst(_nameSuffixRegExp, '');
+
 /// Validate a Zcash Unified Address. Accepts both mainnet (`u1`) and
 /// testnet (`utest1`) prefixes via a cheap prefix check, falling back to
 /// a bech32m decode for anything else.
