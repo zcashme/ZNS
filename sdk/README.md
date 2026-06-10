@@ -28,7 +28,6 @@ const result = await resolve("alice");
 //   nonce: 2,
 //   signature: "...",
 //   last_action: "CLAIM",
-//   pubkey: "base64...",  // null if admin-controlled, Ed25519 pubkey if sovereign
 //   listing: null
 // }
 ```
@@ -135,31 +134,6 @@ The transaction must be sent to the ZNS registry address with at least `claimCos
 | 6 chars | 0.50 ZEC |
 | 7+ chars | 0.25 ZEC |
 
-## Sovereign ownership
-
-By default, names are admin-controlled. To claim sovereign ownership - where only your Ed25519 key can authorize actions on the name - include your public key when building the memo.
-
-```ts
-import { claimPayload, buildClaimMemo } from "zns-sdk";
-
-const name = "alice";
-const ua = "utest1abc...";
-
-// 1. Build and sign the payload with your Ed25519 key
-const payload = claimPayload(name, ua);
-// "CLAIM:alice:utest1abc..."
-const signature = sign(payload);       // your Ed25519 signing logic
-const userPubkey = getPublicKey();     // base64-encoded Ed25519 public key
-
-// 2. Build the sovereign memo
-const memo = buildClaimMemo(name, ua, signature, userPubkey);
-// "ZNS:CLAIM:alice:utest1abc...:<sig>:<pubkey>"
-```
-
-Once claimed with a pubkey, all subsequent actions (LIST, DELIST, UPDATE, RELEASE) must be signed with that same key. The pubkey is stored on-chain and returned by `resolve()` and `events()`.
-
-The pubkey can be derived deterministically from a BIP39 seed phrase using SLIP-0010 Ed25519 derivation, so wallets can manage sovereign names without extra key management.
-
 ## Marketplace actions
 
 LIST, DELIST, UPDATE, and BUY. The first three require an Ed25519 admin signature. BUY just requires payment.
@@ -259,8 +233,6 @@ The events endpoint returns the `signature` and `nonce` for every signed action.
 Reconstruct the payload, verify the signature against the admin pubkey (available via `status()`), and you have independent proof the action was authorized. No chain access required.
 
 CLAIM and BUY actions are authenticated by the Zcash transaction itself - the sender paid ZEC, which is proof enough.
-
-For sovereign names, the `pubkey` field in `resolve()` and `events()` tells you which Ed25519 key controls the name. You can verify any signed action against that key using the same payload format above.
 
 ## Types
 

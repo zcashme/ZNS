@@ -287,7 +287,7 @@ describe("ZNS", () => {
     });
   });
 
-  describe("verifySovereignSignature", () => {
+  describe("verifySignature", () => {
     it("accepts a valid signature", async () => {
       const sk = ed25519.utils.randomPrivateKey();
       const pk = await ed25519.getPublicKeyAsync(sk);
@@ -296,7 +296,7 @@ describe("ZNS", () => {
       const pubkey = Buffer.from(pk).toString("base64");
       const sigBase64 = Buffer.from(signature).toString("base64");
 
-      const result = await zns.verifySovereignSignature(payload, sigBase64, pubkey);
+      const result = await zns.verifySignature(payload, sigBase64, pubkey);
       expect(result).toBe(true);
     });
 
@@ -310,7 +310,7 @@ describe("ZNS", () => {
       const wrongPubkey = Buffer.from(wrongPk).toString("base64");
       const sigBase64 = Buffer.from(signature).toString("base64");
 
-      const result = await zns.verifySovereignSignature(payload, sigBase64, wrongPubkey);
+      const result = await zns.verifySignature(payload, sigBase64, wrongPubkey);
       expect(result).toBe(false);
     });
 
@@ -323,7 +323,7 @@ describe("ZNS", () => {
       const pubkey = Buffer.from(pk).toString("base64");
       const sigBase64 = Buffer.from(signature).toString("base64");
 
-      const result = await zns.verifySovereignSignature(tamperedPayload, sigBase64, pubkey);
+      const result = await zns.verifySignature(tamperedPayload, sigBase64, pubkey);
       expect(result).toBe(false);
     });
 
@@ -333,7 +333,7 @@ describe("ZNS", () => {
       const payload = `CLAIM:alice:${VALID_TESTNET_UA}`;
       const pubkey = Buffer.from(pk).toString("base64");
 
-      const result = await zns.verifySovereignSignature(payload, "notavalidb64", pubkey);
+      const result = await zns.verifySignature(payload, "notavalidb64", pubkey);
       expect(result).toBe(false);
     });
 
@@ -343,7 +343,7 @@ describe("ZNS", () => {
       const signature = await ed25519.signAsync(new TextEncoder().encode(payload), sk);
       const sigBase64 = Buffer.from(signature).toString("base64");
 
-      const result = await zns.verifySovereignSignature(payload, sigBase64, "notavalidb64");
+      const result = await zns.verifySignature(payload, sigBase64, "notavalidb64");
       expect(result).toBe(false);
     });
 
@@ -363,22 +363,9 @@ describe("ZNS", () => {
       for (const payload of actions) {
         const signature = await ed25519.signAsync(new TextEncoder().encode(payload), sk);
         const sigBase64 = Buffer.from(signature).toString("base64");
-        const result = await zns.verifySovereignSignature(payload, sigBase64, pubkey);
+        const result = await zns.verifySignature(payload, sigBase64, pubkey);
         expect(result).toBe(true);
       }
-    });
-
-    it("deprecated verifySoverignSignature alias still works", async () => {
-      const sk = ed25519.utils.randomPrivateKey();
-      const pk = await ed25519.getPublicKeyAsync(sk);
-      const payload = `CLAIM:alice:${VALID_TESTNET_UA}`;
-      const signature = await ed25519.signAsync(new TextEncoder().encode(payload), sk);
-      const pubkey = Buffer.from(pk).toString("base64");
-      const sigBase64 = Buffer.from(signature).toString("base64");
-
-      // eslint-disable-next-line @typescript-eslint/no-deprecated
-      const result = await zns.verifySoverignSignature(payload, sigBase64, pubkey);
-      expect(result).toBe(true);
     });
   });
 
@@ -391,20 +378,7 @@ describe("ZNS", () => {
       expect(claim.cost).toBe(1000);
     });
 
-    it("complete() builds memo with userPubkey", async () => {
-      const claim = zns.prepareClaim("alice", VALID_TESTNET_UA, 1000);
-      const sk = ed25519.utils.randomPrivateKey();
-      const pk = await ed25519.getPublicKeyAsync(sk);
-      const signature = await ed25519.signAsync(new TextEncoder().encode(claim.payload), sk);
-      const pubkey = Buffer.from(pk).toString("base64");
-      const sigBase64 = Buffer.from(signature).toString("base64");
-
-      const { memo, uri } = claim.complete(sigBase64, pubkey);
-      expect(memo).toContain("ZNS:CLAIM:alice:");
-      expect(memo).toContain(`:${sigBase64}:${pubkey}`);
-    });
-
-    it("complete() builds memo without userPubkey when omitted", async () => {
+    it("complete() builds the memo", async () => {
       const claim = zns.prepareClaim("alice", VALID_TESTNET_UA, 1000);
       const sk = ed25519.utils.randomPrivateKey();
       const pk = await ed25519.getPublicKeyAsync(sk);
@@ -553,7 +527,6 @@ describe("ZNS", () => {
       address: string;
       nonce: number;
       lastAction: LastAction;
-      pubkey: string | null;
     };
     const hashLeaf = (l: Leaf) =>
       blake2b(
@@ -566,7 +539,6 @@ describe("ZNS", () => {
           u64be(l.nonce),
           enc.encode(l.lastAction),
           NUL,
-          enc.encode(l.pubkey ?? ""),
         ),
         { dkLen: 32 },
       );
@@ -627,11 +599,11 @@ describe("ZNS", () => {
     };
 
     const sampleLeaves: Leaf[] = [
-      { name: "alice",   address: "u1alice",   nonce: 1, lastAction: "CLAIM",  pubkey: null },
-      { name: "bob",     address: "u1bob",     nonce: 3, lastAction: "UPDATE", pubkey: "pk_bob" },
-      { name: "carol",   address: "u1carol",   nonce: 0, lastAction: "BUY",    pubkey: null },
-      { name: "dave",    address: "u1dave",    nonce: 7, lastAction: "CLAIM",  pubkey: null },
-      { name: "eve",     address: "u1eve",     nonce: 2, lastAction: "UPDATE", pubkey: "pk_eve" },
+      { name: "alice",   address: "u1alice",   nonce: 1, lastAction: "CLAIM"  },
+      { name: "bob",     address: "u1bob",     nonce: 3, lastAction: "UPDATE" },
+      { name: "carol",   address: "u1carol",   nonce: 0, lastAction: "BUY"    },
+      { name: "dave",    address: "u1dave",    nonce: 7, lastAction: "CLAIM"  },
+      { name: "eve",     address: "u1eve",     nonce: 2, lastAction: "UPDATE" },
     ];
 
     it("verifies a valid proof for each leaf in a 5-leaf tree", () => {

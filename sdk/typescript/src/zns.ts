@@ -390,10 +390,9 @@ export class ZNS {
    * @returns true if the signature is valid
    */
   async verifyListing(listing: Listing, adminPubkey: string): Promise<boolean> {
-    const pubkey = listing.pubkey ?? adminPubkey;
     // Use snake_case internally for signature verification (matches Rust)
     const payload = `LIST:${listing.name}:${listing.price}:${listing.payTaddr}:${listing.nonce}`;
-    return this.verifyEd25519(payload, listing.signature, pubkey);
+    return this.verifyEd25519(payload, listing.signature, adminPubkey);
   }
 
   /**
@@ -407,45 +406,27 @@ export class ZNS {
     adminPubkey: string,
   ): Promise<boolean> {
     if (!reg.signature) return false;
-    const pubkey = reg.pubkey ?? adminPubkey;
     const payload = this.registrationPayload(reg);
     if (!payload) return false;
-    return this.verifyEd25519(payload, reg.signature, pubkey);
+    return this.verifyEd25519(payload, reg.signature, adminPubkey);
   }
 
   /**
-   * Verify a sovereign Ed25519 signature before sending a transaction.
-   * Call this after signing but before calling `complete()` to catch invalid signatures early.
+   * Verify an Ed25519 signature over a signing payload before sending a
+   * transaction. Call this after signing but before calling `complete()`
+   * to catch invalid signatures early.
    *
    * @param payload The signing payload string (e.g. `CLAIM:foo:u1abc`)
    * @param signature The Ed25519 signature (base64)
    * @param pubkey The Ed25519 public key (base64)
    * @returns true if the signature is valid for the given payload and pubkey
-   *
-   * @example
-   * ```ts
-   * const claim = zns.prepareClaim(name, address, cost);
-   * const isValid = await zns.verifySovereignSignature(claim.payload, signature, userPubkey);
-   * if (!isValid) throw new Error("Invalid signature");
-   * const { memo, uri } = claim.complete(signature, userPubkey);
-   * ```
    */
-  async verifySovereignSignature(
+  async verifySignature(
     payload: string,
     signature: string,
     pubkey: string,
   ): Promise<boolean> {
     return this.verifyEd25519(payload, signature, pubkey);
-  }
-
-  /** @deprecated Misspelled alias kept for backward compatibility — use
-   *  {@link verifySovereignSignature}. Will be removed in v1.0. */
-  async verifySoverignSignature(
-    payload: string,
-    signature: string,
-    pubkey: string,
-  ): Promise<boolean> {
-    return this.verifySovereignSignature(payload, signature, pubkey);
   }
 
   /**
@@ -604,10 +585,8 @@ export class ZNS {
       address,
       cost,
       payload: `CLAIM:${name}:${address}`,
-      complete: (signature: string, userPubkey?: string): CompletedAction => {
-        const memo = userPubkey
-          ? `ZNS:CLAIM:${name}:${address}:${signature}:${userPubkey}`
-          : `ZNS:CLAIM:${name}:${address}:${signature}`;
+      complete: (signature: string): CompletedAction => {
+        const memo = `ZNS:CLAIM:${name}:${address}:${signature}`;
         const uri = this.buildZcashUri(this.registryAddress, cost, memo);
         return { memo, uri };
       },
@@ -630,10 +609,8 @@ export class ZNS {
       nonce,
       commission,
       payload: `LIST:${name}:${price}:${payTaddr}:${nonce}`,
-      complete: (signature: string, userPubkey?: string): CompletedAction => {
-        const memo = userPubkey
-          ? `ZNS:LIST:${name}:${price}:${payTaddr}:${nonce}:${signature}:${userPubkey}`
-          : `ZNS:LIST:${name}:${price}:${payTaddr}:${nonce}:${signature}`;
+      complete: (signature: string): CompletedAction => {
+        const memo = `ZNS:LIST:${name}:${price}:${payTaddr}:${nonce}:${signature}`;
         return {
           memo,
           uri: this.buildZcashUri(this.registryAddress, commission, memo),
@@ -649,10 +626,8 @@ export class ZNS {
       name,
       nonce,
       payload: `DELIST:${name}:${nonce}`,
-      complete: (signature: string, userPubkey?: string): CompletedAction => {
-        const memo = userPubkey
-          ? `ZNS:DELIST:${name}:${nonce}:${signature}:${userPubkey}`
-          : `ZNS:DELIST:${name}:${nonce}:${signature}`;
+      complete: (signature: string): CompletedAction => {
+        const memo = `ZNS:DELIST:${name}:${nonce}:${signature}`;
         return {
           memo,
           uri: this.buildZcashUri(this.registryAddress, undefined, memo),
@@ -676,10 +651,8 @@ export class ZNS {
       newAddress,
       nonce,
       payload: `UPDATE:${name}:${newAddress}:${nonce}`,
-      complete: (signature: string, userPubkey?: string): CompletedAction => {
-        const memo = userPubkey
-          ? `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}:${userPubkey}`
-          : `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}`;
+      complete: (signature: string): CompletedAction => {
+        const memo = `ZNS:UPDATE:${name}:${newAddress}:${nonce}:${signature}`;
         return {
           memo,
           uri: this.buildZcashUri(this.registryAddress, undefined, memo),
@@ -705,10 +678,8 @@ export class ZNS {
       price,
       commission,
       payload: `BUY:${name}:${buyerAddress}`,
-      complete: (signature: string, userPubkey?: string): CompletedAction => {
-        const memo = userPubkey
-          ? `ZNS:BUY:${name}:${buyerAddress}:${price}:${signature}:${userPubkey}`
-          : `ZNS:BUY:${name}:${buyerAddress}:${price}:${signature}`;
+      complete: (signature: string): CompletedAction => {
+        const memo = `ZNS:BUY:${name}:${buyerAddress}:${price}:${signature}`;
         return {
           memo,
           uri: this.buildZcashUri(
@@ -728,10 +699,8 @@ export class ZNS {
       name,
       nonce,
       payload: `RELEASE:${name}:${nonce}`,
-      complete: (signature: string, userPubkey?: string): CompletedAction => {
-        const memo = userPubkey
-          ? `ZNS:RELEASE:${name}:${nonce}:${signature}:${userPubkey}`
-          : `ZNS:RELEASE:${name}:${nonce}:${signature}`;
+      complete: (signature: string): CompletedAction => {
+        const memo = `ZNS:RELEASE:${name}:${nonce}:${signature}`;
         return {
           memo,
           uri: this.buildZcashUri(this.registryAddress, undefined, memo),
@@ -788,7 +757,6 @@ export class ZNS {
         u64BE(reg.nonce),
         enc.encode(reg.lastAction),
         NULL_BYTE,
-        enc.encode(reg.pubkey ?? ""),
       ),
       { dkLen: 32 },
     );

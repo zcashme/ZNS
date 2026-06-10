@@ -105,18 +105,13 @@ async function loadPrivateKey(flags: Record<string, string>): Promise<Uint8Array
 
 async function signAndComplete(
   payload: string,
-  complete: (sig: string, pubkey?: string) => { memo: string; uri: string },
+  complete: (sig: string) => { memo: string; uri: string },
   privateKey: Uint8Array
-): Promise<{ memo: string; uri: string; pubkey: string }> {
+): Promise<{ memo: string; uri: string }> {
   const message = new TextEncoder().encode(payload);
   const signature = await ed25519.signAsync(message, privateKey);
-  const pubkey = ed25519.getPublicKey(privateKey);
-  
   const sigB64 = Buffer.from(signature).toString("base64");
-  const pubkeyB64 = Buffer.from(pubkey).toString("base64");
-  
-  const result = complete(sigB64, pubkeyB64);
-  return { ...result, pubkey: pubkeyB64 };
+  return complete(sigB64);
 }
 
 async function main() {
@@ -143,7 +138,6 @@ async function main() {
       const results = Array.isArray(result) ? result : [result];
       for (const r of results) {
         console.log(`${r.name} → ${r.address}`);
-        console.log(`  sovereign: ${r.pubkey ? "yes" : "no (admin)"}`);
         console.log(`  txid: ${r.txid}  height: ${r.height}  nonce: ${r.nonce}`);
         console.log(`  last_action: ${r.last_action}`);
         if (r.listing) {
@@ -260,7 +254,7 @@ async function main() {
       console.log(`Payload: ${result.payload}`);
       console.log("");
       console.log("Sign this payload with your Ed25519 private key, then:");
-      console.log(`  zns complete-claim ${name} ${address} ${zns.registryAddress} ${cost} <signature> [pubkey]`);
+      console.log(`  zns complete-claim ${name} ${address} ${zns.registryAddress} ${cost} <signature>`);
       break;
     }
 
@@ -285,17 +279,16 @@ async function main() {
       const privateKey = await loadPrivateKey(flags);
       const action = zns.prepareClaim(name, address, cost);
       
-      const { memo, uri, pubkey } = await signAndComplete(
+      const { memo, uri } = await signAndComplete(
         action.payload,
         action.complete.bind(action),
         privateKey
       );
-      
+
       console.log(`Name:      ${name}`);
       console.log(`Address:   ${address}`);
       console.log(`Cost:      ${action.cost / 1e8} ZEC`);
       console.log(`Registry:  ${zns.registryAddress}`);
-      console.log(`Public Key: ${pubkey}`);
       console.log("");
       console.log("Memo:");
       console.log(memo);
@@ -318,15 +311,14 @@ async function main() {
       const privateKey = await loadPrivateKey(flags);
       const action = zns.prepareList(name, price, nonce);
       
-      const { memo, uri, pubkey } = await signAndComplete(
+      const { memo, uri } = await signAndComplete(
         action.payload,
         action.complete.bind(action),
         privateKey
       );
-      
+
       console.log(`Name:       ${name}`);
       console.log(`Price:      ${price / 1e8} ZEC (${price} zats)`);
-      console.log(`Public Key: ${pubkey}`);
       console.log("");
       console.log("Memo:");
       console.log(memo);

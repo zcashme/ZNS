@@ -45,7 +45,6 @@ export interface Listing {
   txid: string;
   height: number;
   signature: string;
-  pubkey: string | null;
   pendingBuy: PendingBuy | undefined;
 }
 
@@ -58,7 +57,6 @@ export interface Registration {
   nonce: number;
   signature: string | null;
   lastAction: LastAction;
-  pubkey: string | null;
   listing: Listing | null;
 }
 
@@ -107,7 +105,6 @@ export interface Event {
   price: Zats | null;
   nonce: number | null;
   signature: string | null;
-  pubkey: string | null;
 }
 
 /** Filter options for querying events. */
@@ -140,10 +137,9 @@ export interface PreparedAction {
 
   /** Complete the action with a signature.
    *  @param signature - Base64-encoded Ed25519 signature of the payload
-   *  @param userPubkey - Optional user pubkey for sovereign names
    *  @returns The completed action with memo and URI for the Zcash transaction
    */
-  complete(signature: string, userPubkey?: string): CompletedAction;
+  complete(signature: string): CompletedAction;
 }
 
 /** Prepared CLAIM action */
