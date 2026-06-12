@@ -3,6 +3,10 @@
 use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use zcash_address::ZcashAddress;
+use zcash_protocol::consensus::Parameters;
+use zcash_transparent::address::TransparentAddress;
+
+use crate::config;
 
 #[derive(Debug, Clone)]
 pub struct MemoAction {
@@ -36,6 +40,19 @@ pub fn validate_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// Returns `true` if `taddr` is a transparent address valid for the
+/// indexer's configured network (mainnet vs testnet).
+fn validate_taddr(taddr: &str) -> bool {
+    taddr
+        .parse::<ZcashAddress>()
+        .ok()
+        .and_then(|addr| {
+            addr.convert_if_network::<TransparentAddress>(config::NETWORK.network_type())
+                .ok()
+        })
+        .is_some()
 }
 
 // ── Signing payload construction (single source of truth) ────────────────────
@@ -152,7 +169,7 @@ fn parse_claim(rest: &str) -> Option<MemoAction> {
 fn parse_list(rest: &str) -> Option<MemoAction> {
     // ZNS:LIST:<name>:<price>:<pay_taddr>:<nonce>:<sig>
     let parts: Vec<&str> = rest.splitn(5, ':').collect();
-    if parts.len() != 5 || !validate_name(parts[0]) {
+    if parts.len() != 5 || !validate_name(parts[0]) || !validate_taddr(parts[2]) {
         return None;
     }
     let price: u64 = parts[1].parse().ok()?;
@@ -220,4 +237,52 @@ fn parse_buy(rest: &str) -> Option<MemoAction> {
         signature: parts[3].into(),
         kind: ActionKind::Buy { buyer_ua, price },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_address::ToAddress;
+    use zcash_protocol::consensus::NetworkType;
+
+    fn taddr(net: NetworkType) -> String {
+        ZcashAddress::from_transparent_p2pkh(net, [0u8; 20]).encode()
+    }
+
+    fn other_network() -> NetworkType {
+        match config::NETWORK.network_type() {
+            NetworkType::Main => NetworkType::Test,
+            _ => NetworkType::Main,
+        }
+    }
+
+    #[test]
+    fn validate_taddr_accepts_configured_network() {
+        assert!(validate_taddr(&taddr(config::NETWORK.network_type())));
+    }
+
+    #[test]
+    fn validate_taddr_rejects_other_network() {
+        assert!(!validate_taddr(&taddr(other_network())));
+    }
+
+    #[test]
+    fn validate_taddr_rejects_garbage() {
+        assert!(!validate_taddr("not an address"));
+    }
+
+    #[test]
+    fn parse_list_accepts_taddr_for_configured_network() {
+        let memo = format!(
+            "ZNS:LIST:myname:1000:{}:1:sig",
+            taddr(config::NETWORK.network_type())
+        );
+        assert!(parse_list(&memo["ZNS:LIST:".len()..]).is_some());
+    }
+
+    #[test]
+    fn parse_list_rejects_taddr_for_other_network() {
+        let memo = format!("ZNS:LIST:myname:1000:{}:1:sig", taddr(other_network()));
+        assert!(parse_list(&memo["ZNS:LIST:".len()..]).is_none());
+    }
 }
