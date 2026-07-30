@@ -1,8 +1,13 @@
 // ZNS block decrypter — owns the lightwalletd connection and trial-decrypts
-// Orchard notes against the indexer's incoming viewing key.
+// Orchard and Ironwood notes against the indexer's incoming viewing key.
+//
+// After NU6.3 (block 3,428,143 on mainnet), ZNS users send actions to the
+// Ironwood pool. The same Orchard viewing key decrypts both pools, but
+// Ironwood notes use a distinct note-encryption domain (version 3 plaintexts)
+// and appear in `CompactTx.ironwood_actions` rather than `CompactTx.actions`.
 
 use orchard::keys::PreparedIncomingViewingKey;
-use orchard::note_encryption::{CompactAction, OrchardDomain};
+use orchard::note_encryption::{CompactAction, IronwoodDomain, OrchardDomain};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
 use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, TxFilter, TransparentAddressBlockFilter};
@@ -21,7 +26,11 @@ pub struct PaymentMatch {
     pub height: u64,
 }
 
-/// A single decrypted Orchard note with its chain context.
+/// A single decrypted note with its chain context.
+///
+/// Notes from both the Orchard and Ironwood pools are represented by this
+/// type — the memo format is pool-agnostic, so the indexer does not need to
+/// distinguish them for ZNS action processing.
 #[derive(Debug, Clone)]
 pub struct DecryptedNote {
     pub memo: [u8; 512],
@@ -102,11 +111,19 @@ impl IndexerState {
         notes
     }
 
-    /// Scan one block: trial-decrypt compact actions, fetch full txs, collect notes.
+    /// Scan one block: trial-decrypt compact actions from both the Orchard and
+    /// Ironwood pools, fetch full txs, collect notes.
     async fn scan_block(&mut self, block: &CompactBlock, notes: &mut Vec<DecryptedNote>) {
         let height = block.height;
 
-        let candidates: Vec<_> = block
+        // Collect Orchard compact actions (tx.actions) and Ironwood compact
+        // actions (tx.ironwood_actions). Both use the same CompactOrchardAction
+        // wire type, but they are decrypted under different domains.
+        //
+        // Each candidate is tagged with (pool, tx_index, txid) so that after
+        // batch decryption we know which pool the match came from and can fetch
+        // the correct bundle from the full transaction.
+        let orchard_candidates: Vec<(CompactAction, Vec<u8>, u32)> = block
             .vtx
             .iter()
             .flat_map(|tx| {
@@ -118,26 +135,71 @@ impl IndexerState {
                 })
             })
             .collect();
-        if candidates.is_empty() {
+
+        let ironwood_candidates: Vec<(CompactAction, Vec<u8>, u32)> = block
+            .vtx
+            .iter()
+            .flat_map(|tx| {
+                let idx = tx.index as u32;
+                tx.ironwood_actions.iter().filter_map(move |a| {
+                    CompactAction::try_from(a)
+                        .ok()
+                        .map(|ca| (ca, tx.txid.clone(), idx))
+                })
+            })
+            .collect();
+
+        if orchard_candidates.is_empty() && ironwood_candidates.is_empty() {
             return;
         }
 
-        let pairs: Vec<_> = candidates
-            .iter()
-            .map(|(ca, _, _)| (OrchardDomain::for_compact_action(ca), ca.clone()))
-            .collect();
-        let results = zcash_note_encryption::batch::try_compact_note_decryption(
-            std::slice::from_ref(&self.pivk),
-            &pairs,
-        );
-        let matched: std::collections::BTreeMap<u32, Vec<u8>> = results
-            .iter()
-            .zip(&candidates)
-            .filter_map(|(r, (_, txid, idx))| r.as_ref().map(|_| (*idx, txid.clone())))
-            .collect();
+        // Batch-decrypt Orchard actions under OrchardDomain.
+        let orchard_matched: std::collections::BTreeMap<u32, Vec<u8>> =
+            if !orchard_candidates.is_empty() {
+                let pairs: Vec<_> = orchard_candidates
+                    .iter()
+                    .map(|(ca, _, _)| (OrchardDomain::for_compact_action(ca), ca.clone()))
+                    .collect();
+                let results = zcash_note_encryption::batch::try_compact_note_decryption(
+                    std::slice::from_ref(&self.pivk),
+                    &pairs,
+                );
+                results
+                    .iter()
+                    .zip(&orchard_candidates)
+                    .filter_map(|(r, (_, txid, idx))| r.as_ref().map(|_| (*idx, txid.clone())))
+                    .collect()
+            } else {
+                std::collections::BTreeMap::new()
+            };
+
+        // Batch-decrypt Ironwood actions under IronwoodDomain.
+        let ironwood_matched: std::collections::BTreeMap<u32, Vec<u8>> =
+            if !ironwood_candidates.is_empty() {
+                let pairs: Vec<_> = ironwood_candidates
+                    .iter()
+                    .map(|(ca, _, _)| (IronwoodDomain::for_compact_action(ca), ca.clone()))
+                    .collect();
+                let results = zcash_note_encryption::batch::try_compact_note_decryption(
+                    std::slice::from_ref(&self.pivk),
+                    &pairs,
+                );
+                results
+                    .iter()
+                    .zip(&ironwood_candidates)
+                    .filter_map(|(r, (_, txid, idx))| r.as_ref().map(|_| (*idx, txid.clone())))
+                    .collect()
+            } else {
+                std::collections::BTreeMap::new()
+            };
+
+        // Merge matched txids — a single tx may have matched in either or both
+        // pools. Fetch each unique txid once and decrypt both bundles.
+        let mut all_matched: std::collections::BTreeMap<u32, Vec<u8>> = orchard_matched;
+        all_matched.extend(ironwood_matched);
 
         let branch = BranchId::for_height(&self.network, BlockHeight::from_u32(height as u32));
-        for (_, txid) in &matched {
+        for (_, txid) in &all_matched {
             let Ok(data) = self
                 .client
                 .get_transaction(TxFilter {
@@ -154,23 +216,41 @@ impl IndexerState {
                 continue;
             };
             let tx_id = tx.txid();
-            let Some(bundle) = tx.orchard_bundle() else {
-                continue;
-            };
 
-            for action in bundle.actions() {
-                let domain = OrchardDomain::for_action(action);
-                let Some((note, _, memo_bytes)) =
-                    zcash_note_encryption::try_note_decryption(&domain, &self.pivk, action)
-                else {
-                    continue;
-                };
-                notes.push(DecryptedNote {
-                    memo: memo_bytes,
-                    value: note.value().inner(),
-                    txid: tx_id,
-                    height,
-                });
+            // Decrypt Orchard bundle actions (pre-NU6.3 notes).
+            if let Some(bundle) = tx.orchard_bundle() {
+                for action in bundle.actions() {
+                    let domain = OrchardDomain::for_action(action);
+                    let Some((note, _, memo_bytes)) =
+                        zcash_note_encryption::try_note_decryption(&domain, &self.pivk, action)
+                    else {
+                        continue;
+                    };
+                    notes.push(DecryptedNote {
+                        memo: memo_bytes,
+                        value: note.value().inner(),
+                        txid: tx_id,
+                        height,
+                    });
+                }
+            }
+
+            // Decrypt Ironwood bundle actions (post-NU6.3 notes).
+            if let Some(bundle) = tx.ironwood_bundle() {
+                for action in bundle.actions() {
+                    let domain = IronwoodDomain::for_action(action);
+                    let Some((note, _, memo_bytes)) =
+                        zcash_note_encryption::try_note_decryption(&domain, &self.pivk, action)
+                    else {
+                        continue;
+                    };
+                    notes.push(DecryptedNote {
+                        memo: memo_bytes,
+                        value: note.value().inner(),
+                        txid: tx_id,
+                        height,
+                    });
+                }
             }
         }
     }

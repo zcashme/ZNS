@@ -25,7 +25,7 @@ pub const LWD_URL: &str = "https://testnet.zec.rocks:443";
 #[cfg(feature = "testnet")]
 pub const NETWORK: Network = Network::TestNetwork;
 #[cfg(feature = "testnet")]
-pub const BIRTHDAY: u64 = 2_726_400; // NU6 activation (same height on testnet)
+pub const BIRTHDAY: u64 = 2_976_000; // NU6 activation (2025-01-17)
 
 #[cfg(feature = "mainnet")]
 pub const LWD_URL: &str = "https://zec.rocks:443";
