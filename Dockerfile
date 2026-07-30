@@ -5,7 +5,7 @@ RUN test -n "$FEATURES" || (echo "FEATURES required (testnet or mainnet)" && exi
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
-RUN cargo build --release --features "$FEATURES"
+RUN cargo build --release --no-default-features --features "$FEATURES"
 
 # --- Runtime stage ---
 FROM debian:bookworm-slim
